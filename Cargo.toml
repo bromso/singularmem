@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-repository = "https://github.com/jonasbroms/singularmem"
+repository = "https://github.com/bromso/singularmem"
 authors = ["Jonas Broms"]
 
 [workspace.lints.clippy]
