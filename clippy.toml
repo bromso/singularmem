@@ -1,0 +1,5 @@
+# Project-wide clippy lint configuration.
+#
+# Lint groups (pedantic, nursery) are configured in [workspace.lints.clippy]
+# in Cargo.toml. This file is reserved for per-lint thresholds such as
+# cognitive-complexity-threshold and is intentionally empty for v0.0.0.
