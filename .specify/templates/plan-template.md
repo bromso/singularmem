@@ -48,6 +48,18 @@ unless explicitly marked parallel.
 
 **Assigned skill:** `<skill-name>`
 
+**Blocked-by:** Task K, Task M (or "none")
+**Blocks:** Task P (or "none")
+**Owner:** <unassigned | agent-id | name>
+
+**Description:** One paragraph explaining what this task does and why it
+exists in the plan.
+
+**Acceptance criteria:**
+
+1. ...
+2. ...
+
 - [ ] **Step 1: ...**
 
 (Repeat per step. Each step is one action of 2–5 minutes. Include
@@ -63,6 +75,10 @@ exact code, exact commands, expected output.)
 | **V — Composable Library Architecture** | ... |
 | **VI — Deterministic and Offline-Testable** | ... |
 | **X — Performance Budgets, Enforced in CI** | ... |
+
+Principles IV (CLI-First), VII (Honest Failure Modes), VIII (Privacy
+Telemetry), and IX (Accessible by Default) are re-checked in any plan
+that touches their surfaces.
 
 ## Risks & mitigations
 

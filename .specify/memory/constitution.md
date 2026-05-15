@@ -1,3 +1,31 @@
+<!--
+SYNC IMPACT REPORT
+==================
+
+Format for amendments (one block per amendment, newest first):
+
+  - Date:                YYYY-MM-DD
+  - Version:             <old> → <new>
+  - Type:                MAJOR | MINOR | PATCH
+  - Principles changed:  <list, or "none">
+  - Open/Closed Split:   <changes, or "none">
+  - Templates updated:   <list of .specify/templates/* files, or "none">
+  - Rationale:           <one-paragraph WHY, focused on the change>
+
+Amendment log (newest first):
+
+  - Date:                2026-05-15
+  - Version:             0.0.0 → 0.2.0
+  - Type:                Initial ratification
+  - Principles changed:  All ten introduced
+  - Open/Closed Split:   Section established
+  - Templates updated:   spec-template.md, plan-template.md, tasks-template.md (initial)
+  - Rationale:           First ratification of the constitution. All ten
+                         principles introduced. Open/closed split established
+                         with the III.a one-way ratchet. Performance budgets
+                         set against ubuntu-latest reference hardware.
+-->
+
 # Singularmem — Project Constitution
 
 **Version:** 0.2.0
@@ -184,6 +212,12 @@ Current budgets, measured on the primary reference runner:
 - Cold start (GUI): deferred until the Flutter sub-project ships a measurable build.
 - Distributable binary size (CLI): **< 150 MB**
 
+These budgets are calibrated for a reference store of approximately 100,000
+items with inline ONNX CPU embedding generation on the primary reference
+runner. If a sub-project changes the workload assumption materially (a
+larger store, GPU embeddings, batch ingest, etc.), the amendment rationale
+**MUST** state the new assumption alongside the new budget value.
+
 Budgets **MAY** be revised, but only via a constitution amendment with
 explicit rationale.
 
@@ -359,8 +393,11 @@ Apache-2.0 as a parting gift to existing users.
 
 ### Compliance review
 
-- `/speckit.analyze` **MUST** be run before any feature merge; constitutional
-  violations are blocking.
+- The Constitution Check section in each plan **MUST** be reviewed against
+  this document before any feature merge; constitutional violations are
+  blocking. Once the `/speckit.analyze` tooling (from github/spec-kit) is
+  integrated into this repository, it becomes the mechanical gate; until
+  then, the manual review of the Constitution Check section is the gate.
 - Every `plan.md` **MUST** contain a Constitution Check section that
   explicitly addresses Principles I, II, III, V, VI, and X. Other principles
   are checked but need not be re-stated unless the plan touches them.
@@ -372,5 +409,8 @@ Apache-2.0 as a parting gift to existing users.
 
 Where this document conflicts with any other guidance — including AI agent
 instructions, downstream specs, plans, or task lists — **this document wins**.
-The remedy for disagreement is an amendment, not a workaround. When you plan
-everything, make sure to assign relevant skills to the tasks you create.
+The remedy for disagreement is an amendment, not a workaround.
+Implementation plans **MUST** assign a relevant skill to each task they
+enumerate, using the `assigned-skill` field defined in `tasks-template.md`,
+so that the constitutional skill-assignment requirement is mechanical
+rather than aspirational.
