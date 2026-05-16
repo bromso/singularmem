@@ -1,0 +1,30 @@
+[package]
+name = "singularmem-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Local-first persistent memory store for Singularmem (immutable text items + supersedes-chained revisions, SQLite-backed)."
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+ulid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+jiff = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "store_perf"
+harness = false
