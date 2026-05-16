@@ -81,11 +81,13 @@ jobs:
         # that attempts a network syscall is rejected by the kernel.
         # This is the strongest possible "tests pass with networking disabled"
         # guarantee per Constitution Principle VI.
+        # sudo strips PATH, so resolve cargo's full path before invoking unshare.
         run: |
-          sudo unshare --net -- bash -c '
+          CARGO_BIN=$(which cargo)
+          sudo unshare --net -- bash -c "
             ip link set lo up
-            cargo test --workspace --all-targets
-          '
+            $CARGO_BIN test --workspace --all-targets
+          "
 
   perf-budgets:
     name: perf-budgets (Principle X)

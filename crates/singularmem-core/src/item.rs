@@ -181,9 +181,7 @@ pub(crate) fn validate(item: &NewItem) -> crate::Result<Vec<String>> {
             ),
         });
     }
-    let metadata_bytes = serde_json::to_vec(&item.metadata)
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let metadata_bytes = serde_json::to_vec(&item.metadata).map_or(0, |v| v.len());
     if metadata_bytes > METADATA_WARN_BYTES {
         tracing::warn!(
             target: "singularmem_core::ingest",
