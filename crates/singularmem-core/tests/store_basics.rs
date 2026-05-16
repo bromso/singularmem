@@ -133,3 +133,42 @@ fn ingest_supersedes_unknown_id_errors() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn ingest_many_persists_all_items_atomically() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let items = vec![
+        NewItem::text("one"),
+        NewItem::text("two"),
+        NewItem::text("three"),
+    ];
+    let stored = store.ingest_many(items).expect("bulk ingest");
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[0].content, "one");
+    assert_eq!(stored[2].content, "three");
+}
+
+#[test]
+fn ingest_many_rolls_back_on_validation_failure() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("store.db");
+    let store = Store::open(&path).unwrap();
+    let items = vec![
+        NewItem::text("good"),
+        NewItem::text(""), // validation failure here
+        NewItem::text("never-reached"),
+    ];
+    let err = store.ingest_many(items).unwrap_err();
+    assert!(matches!(
+        err,
+        singularmem_core::Error::Validation { field: "content", .. }
+    ));
+    drop(store);
+    // Confirm zero rows persisted — atomic rollback.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
