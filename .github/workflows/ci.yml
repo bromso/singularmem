@@ -67,6 +67,41 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  tests-offline:
+    name: tests (offline, --network=none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test binaries with network access
+        run: cargo test --no-run --workspace --all-targets
+      - name: Run the test binaries with networking disabled
+        # Re-launch cargo test inside `unshare --net` so any test that
+        # attempts a network syscall is rejected by the kernel — the
+        # strongest possible "tests pass with networking disabled"
+        # guarantee per Constitution Principle VI.
+        #
+        # GitHub Actions disables unprivileged user namespaces (so we can't
+        # use `unshare -U`), and sudo strips PATH and RUSTUP_HOME. To work
+        # around both: resolve the active toolchain's cargo binary directly
+        # (bypassing rustup's network-fetching wrapper), then sudo+unshare
+        # straight to it. `--offline` is belt-and-suspenders.
+        run: |
+          TOOLCHAIN=$(rustup show active-toolchain | awk '{print $1}')
+          CARGO_BIN="$HOME/.rustup/toolchains/$TOOLCHAIN/bin/cargo"
+          test -x "$CARGO_BIN" || { echo "no toolchain cargo at $CARGO_BIN"; exit 1; }
+          sudo unshare --net -- "$CARGO_BIN" test --workspace --all-targets --offline
+
+  perf-budgets:
+    name: perf-budgets (Principle X)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: .github/scripts/perf-check.sh
+
   macos-advisory:
     name: macOS advisory (non-blocking)
     runs-on: macos-latest
