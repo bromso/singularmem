@@ -183,6 +183,95 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Walk the supersedes chain from a starting item back to the original.
+    /// Items returned newest-first; the starting item is included as
+    /// `result[0]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFound` if the starting ID is not in the store.
+    /// Returns `Error::Sqlite` on database errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal connection `Mutex` is poisoned.
+    pub fn revision_history(&self, id: ItemId) -> Result<Vec<Item>> {
+        let mut history = Vec::new();
+        let mut cursor = self.get(id)?;
+        history.push(cursor.clone());
+        while let Some(prev_id) = cursor.supersedes {
+            let prev = self.get(prev_id)?;
+            history.push(prev.clone());
+            cursor = prev;
+        }
+        Ok(history)
+    }
+
+    /// Find the latest revision reachable forward from `id`.
+    /// An item is "latest" iff no other item has it in its `supersedes` field.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::NotFound` if the starting ID is not in the store.
+    /// Returns `Error::AmbiguousLatest` if the chain forks (multiple items
+    /// supersede the same head). Per Principle VII, the library refuses to
+    /// guess which fork wins; callers must resolve.
+    /// Returns `Error::Sqlite` on database errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal connection `Mutex` is poisoned.
+    pub fn latest_revision(&self, id: ItemId) -> Result<Item> {
+        // Confirm the starting item exists.
+        let _ = self.get(id)?;
+
+        // Walk forward: from `current`, find items where supersedes = current.id.
+        // If exactly one, advance. If zero, current is the head. If many, ambiguous.
+        let mut current_id = id;
+        loop {
+            let conn = self.conn.lock().expect("store mutex poisoned");
+            let mut stmt = conn
+                .prepare("SELECT id FROM items WHERE supersedes = ?1")
+                .map_err(|e| Error::Sqlite {
+                    context: "preparing latest_revision walk",
+                    source: e,
+                })?;
+            let next_ids: Vec<String> = stmt
+                .query_map(params![current_id.to_string()], |r| r.get(0))
+                .map_err(|e| Error::Sqlite {
+                    context: "executing latest_revision walk",
+                    source: e,
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| Error::Sqlite {
+                    context: "collecting latest_revision walk IDs",
+                    source: e,
+                })?;
+            drop(stmt);
+            drop(conn);
+
+            match next_ids.len() {
+                0 => return self.get(current_id),
+                1 => {
+                    current_id = next_ids
+                        .into_iter()
+                        .next()
+                        .expect("len == 1")
+                        .parse()?;
+                }
+                _ => {
+                    let candidates = next_ids
+                        .into_iter()
+                        .map(|s| s.parse::<ItemId>())
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    return Err(Error::AmbiguousLatest { candidates });
+                }
+            }
+        }
+    }
+}
+
 fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {
     let id_text = id.to_string();
     let mut stmt = conn
