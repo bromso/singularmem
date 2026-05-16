@@ -128,7 +128,8 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Lib(Error::NotFound { .. })) => ExitCode::from(2),
         Err(CliError::Lib(Error::UnsupportedFormatVersion { .. })) => ExitCode::from(3),
-        Err(CliError::Lib(Error::Validation { .. } | Error::SupersedesNotFound { .. })) => {
+        Err(e @ CliError::Lib(Error::Validation { .. } | Error::SupersedesNotFound { .. })) => {
+            eprintln!("singularmem: {e}");
             ExitCode::from(1)
         }
         Err(e) => {
