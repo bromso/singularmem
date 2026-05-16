@@ -191,3 +191,51 @@ fn get_optional_returns_some_for_present() {
     let fetched = store.get_optional(item.id).expect("get_optional ok").expect("present");
     assert_eq!(fetched, item);
 }
+
+#[test]
+fn list_iterates_in_created_at_order() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let a = store.ingest(NewItem::text("a")).unwrap();
+    let b = store.ingest(NewItem::text("b")).unwrap();
+    let c = store.ingest(NewItem::text("c")).unwrap();
+    let ids: Vec<_> = store
+        .list()
+        .unwrap()
+        .map(|r| r.unwrap().id)
+        .collect();
+    assert_eq!(ids, vec![a.id, b.id, c.id]);
+}
+
+#[test]
+fn list_by_tags_filters_and_semantics() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let mut item_a = NewItem::text("a");
+    item_a.tags = vec!["work".into(), "urgent".into()];
+    let mut item_b = NewItem::text("b");
+    item_b.tags = vec!["work".into()];
+    let mut item_c = NewItem::text("c");
+    item_c.tags = vec!["urgent".into()];
+    let a = store.ingest(item_a).unwrap();
+    let _ = store.ingest(item_b).unwrap();
+    let _ = store.ingest(item_c).unwrap();
+
+    // AND filter — only items with BOTH tags
+    let filtered: Vec<_> = store
+        .list_by_tags(&["work", "urgent"])
+        .unwrap()
+        .map(|r| r.unwrap().id)
+        .collect();
+    assert_eq!(filtered, vec![a.id]);
+}
+
+#[test]
+fn list_by_tags_empty_filter_lists_everything() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let _ = store.ingest(NewItem::text("a")).unwrap();
+    let _ = store.ingest(NewItem::text("b")).unwrap();
+    let count = store.list_by_tags(&[]).unwrap().count();
+    assert_eq!(count, 2);
+}

@@ -25,3 +25,4 @@ pub use crate::error::{Error, Result};
 pub use crate::format::FORMAT_VERSION;
 pub use crate::item::{Item, ItemId, NewItem};
 pub use crate::store::{Store, StoreOptions};
+pub use crate::query::ItemIter;
