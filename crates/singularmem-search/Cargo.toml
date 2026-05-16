@@ -1,0 +1,31 @@
+[package]
+name = "singularmem-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Tantivy-backed lexical search for Singularmem memory stores."
+
+[lints]
+workspace = true
+
+[dependencies]
+singularmem-core = { path = "../singularmem-core" }
+tantivy = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+singularmem-core = { path = "../singularmem-core" }  # for test fixtures
+
+[[bench]]
+name = "search_perf"
+harness = false
