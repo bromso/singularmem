@@ -99,4 +99,82 @@ impl Index {
         let searcher = self.reader.searcher();
         Ok(searcher.num_docs())
     }
+
+    /// Execute a query and return ranked hits.
+    ///
+    /// # Errors
+    /// Returns `Error::Tantivy` on index-read failure.
+    pub fn search(&self, query: &crate::query::Query, options: crate::result::SearchOptions) -> Result<crate::result::SearchResults> {
+        use std::time::Instant;
+        use tantivy::collector::{Count, TopDocs};
+        use tantivy::schema::OwnedValue;
+        use tantivy::snippet::SnippetGenerator;
+        use tantivy::TantivyDocument;
+        use std::str::FromStr;
+
+        let start = Instant::now();
+        let searcher = self.reader.searcher();
+
+        let collector = TopDocs::with_limit(options.limit + options.offset);
+        let (top_docs, total) = searcher
+            .search(&*query.inner, &(collector, Count))
+            .map_err(|e| Error::Tantivy {
+                context: "executing search",
+                source: e,
+            })?;
+
+        // Snippet generator (only build if requested).
+        let snippet_gen = if options.include_snippets {
+            Some(
+                SnippetGenerator::create(&searcher, &*query.inner, self.fields.content)
+                    .map_err(|e| Error::Tantivy {
+                        context: "building snippet generator",
+                        source: e,
+                    })?,
+            )
+        } else {
+            None::<SnippetGenerator>
+        };
+
+        let hits: Vec<crate::result::Hit> = top_docs
+            .into_iter()
+            .skip(options.offset)
+            .map(|(score, doc_address)| -> Result<crate::result::Hit> {
+                let doc: TantivyDocument = searcher.doc(doc_address).map_err(|e| Error::Tantivy {
+                    context: "fetching stored document",
+                    source: e,
+                })?;
+                let id_str = doc
+                    .get_first(self.fields.id)
+                    .and_then(|v| {
+                        if let OwnedValue::Str(s) = v { Some(s.as_str()) } else { None }
+                    })
+                    .ok_or_else(|| Error::IndexCorrupted {
+                        path: self.path.clone(),
+                        reason: "document has no id field".to_string(),
+                    })?
+                    .to_string();
+                let id = singularmem_core::ItemId::from_str(&id_str).map_err(|e| {
+                    Error::IndexCorrupted {
+                        path: self.path.clone(),
+                        reason: format!("invalid ULID stored: {e}"),
+                    }
+                })?;
+
+                let snippet = snippet_gen.as_ref().map(|gen| {
+                    let snip = gen.snippet_from_doc(&doc);
+                    snip.to_html()
+                });
+
+                Ok(crate::result::Hit { id, score, snippet })
+            })
+            .take(options.limit)
+            .collect::<Result<Vec<crate::result::Hit>>>()?;
+
+        Ok(crate::result::SearchResults {
+            hits,
+            total_matched: total as u64,
+            elapsed: start.elapsed(),
+        })
+    }
 }
