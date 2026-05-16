@@ -54,17 +54,15 @@ impl Index {
         let (schema, fields) = build_schema();
 
         // Tantivy's `open_or_create` behaviour: open existing or build new from schema.
-        let mmap_dir = tantivy::directory::MmapDirectory::open(dir).map_err(|e| {
-            Error::IndexCorrupted {
+        let mmap_dir =
+            tantivy::directory::MmapDirectory::open(dir).map_err(|e| Error::IndexCorrupted {
                 path: dir.to_path_buf(),
                 reason: format!("could not open Tantivy directory: {e}"),
-            }
-        })?;
-        let inner =
-            TantivyIndex::open_or_create(mmap_dir, schema).map_err(|e| Error::Tantivy {
-                context: "opening Tantivy index",
-                source: e,
             })?;
+        let inner = TantivyIndex::open_or_create(mmap_dir, schema).map_err(|e| Error::Tantivy {
+            context: "opening Tantivy index",
+            source: e,
+        })?;
 
         let writer = inner
             .writer(options.writer_memory_bytes)
@@ -104,13 +102,17 @@ impl Index {
     ///
     /// # Errors
     /// Returns `Error::Tantivy` on index-read failure.
-    pub fn search(&self, query: &crate::query::Query, options: crate::result::SearchOptions) -> Result<crate::result::SearchResults> {
+    pub fn search(
+        &self,
+        query: &crate::query::Query,
+        options: crate::result::SearchOptions,
+    ) -> Result<crate::result::SearchResults> {
+        use std::str::FromStr;
         use std::time::Instant;
         use tantivy::collector::{Count, TopDocs};
         use tantivy::schema::OwnedValue;
         use tantivy::snippet::SnippetGenerator;
         use tantivy::TantivyDocument;
-        use std::str::FromStr;
 
         let start = Instant::now();
         let searcher = self.reader.searcher();
@@ -126,11 +128,12 @@ impl Index {
         // Snippet generator (only build if requested).
         let snippet_gen = if options.include_snippets {
             Some(
-                SnippetGenerator::create(&searcher, &*query.inner, self.fields.content)
-                    .map_err(|e| Error::Tantivy {
+                SnippetGenerator::create(&searcher, &*query.inner, self.fields.content).map_err(
+                    |e| Error::Tantivy {
                         context: "building snippet generator",
                         source: e,
-                    })?,
+                    },
+                )?,
             )
         } else {
             None::<SnippetGenerator>
@@ -140,14 +143,19 @@ impl Index {
             .into_iter()
             .skip(options.offset)
             .map(|(score, doc_address)| -> Result<crate::result::Hit> {
-                let doc: TantivyDocument = searcher.doc(doc_address).map_err(|e| Error::Tantivy {
-                    context: "fetching stored document",
-                    source: e,
-                })?;
+                let doc: TantivyDocument =
+                    searcher.doc(doc_address).map_err(|e| Error::Tantivy {
+                        context: "fetching stored document",
+                        source: e,
+                    })?;
                 let id_str = doc
                     .get_first(self.fields.id)
                     .and_then(|v| {
-                        if let OwnedValue::Str(s) = v { Some(s.as_str()) } else { None }
+                        if let OwnedValue::Str(s) = v {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
                     })
                     .ok_or_else(|| Error::IndexCorrupted {
                         path: self.path.clone(),

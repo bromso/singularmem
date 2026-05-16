@@ -19,10 +19,7 @@ impl IndexHook for Index {
     fn commit(&self) -> CoreResult<()> {
         // Scope the writer lock so it is released before we call reader.reload().
         {
-            let mut writer = self
-                .writer
-                .lock()
-                .expect("Tantivy writer mutex poisoned");
+            let mut writer = self.writer.lock().expect("Tantivy writer mutex poisoned");
             writer.commit().map_err(|e| {
                 to_core_error(&crate::Error::Tantivy {
                     context: "committing Tantivy writer",
@@ -66,14 +63,13 @@ fn index_item(index: &Index, item: &Item) -> crate::Result<()> {
 
     // Scope the writer lock so it is released immediately after add_document.
     {
-        let writer = index
-            .writer
-            .lock()
-            .expect("Tantivy writer mutex poisoned");
-        writer.add_document(doc).map_err(|e| crate::Error::Tantivy {
-            context: "adding document to Tantivy writer",
-            source: e,
-        })?;
+        let writer = index.writer.lock().expect("Tantivy writer mutex poisoned");
+        writer
+            .add_document(doc)
+            .map_err(|e| crate::Error::Tantivy {
+                context: "adding document to Tantivy writer",
+                source: e,
+            })?;
     }
 
     Ok(())

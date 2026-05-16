@@ -4,7 +4,6 @@
 use singularmem_search::{Index, IndexOptions};
 use tempfile::TempDir;
 
-
 #[test]
 fn open_fresh_creates_directory_and_doc_count_is_zero() {
     let dir = TempDir::new().unwrap();

@@ -24,7 +24,7 @@ impl Store {
     ///
     /// Panics if the internal connection `Mutex` is poisoned (i.e. another
     /// thread panicked while holding the lock).
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn ingest(&self, item: NewItem) -> Result<Item> {
         self.assert_writable("ingest")?;
 
@@ -112,7 +112,12 @@ impl Store {
         // durably stored, and the hook implementation is expected to log
         // a warning naming the item ID so the user can recover via
         // `singularmem reindex`.
-        if let Some(hook) = self.hook.lock().expect("store hook mutex poisoned").as_ref() {
+        if let Some(hook) = self
+            .hook
+            .lock()
+            .expect("store hook mutex poisoned")
+            .as_ref()
+        {
             let item_for_hook = Item {
                 id,
                 content: item.content.clone(),
@@ -159,7 +164,7 @@ impl Store {
     ///
     /// Panics if the internal connection `Mutex` is poisoned (i.e. another
     /// thread panicked while holding the lock).
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn ingest_many<I: IntoIterator<Item = NewItem>>(&self, items: I) -> Result<Vec<Item>> {
         self.assert_writable("ingest_many")?;
 
@@ -256,7 +261,12 @@ impl Store {
         })?;
 
         // Hook integration: per-item on_ingest, then ONE commit at the end.
-        if let Some(hook) = self.hook.lock().expect("store hook mutex poisoned").as_ref() {
+        if let Some(hook) = self
+            .hook
+            .lock()
+            .expect("store hook mutex poisoned")
+            .as_ref()
+        {
             for item in &out {
                 if let Err(e) = hook.on_ingest(item) {
                     tracing::warn!(

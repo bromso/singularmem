@@ -93,7 +93,9 @@ fn search_respects_limit() {
 fn search_with_snippets_returns_marked_text() {
     let (dir, store, index_path) = store_with_index();
     let _ = store
-        .ingest(NewItem::text("This is a long sentence containing the word decision and more text"))
+        .ingest(NewItem::text(
+            "This is a long sentence containing the word decision and more text",
+        ))
         .unwrap();
     drop(store);
     wait_for_index_visibility();
@@ -103,8 +105,13 @@ fn search_with_snippets_returns_marked_text() {
     let results = index.search(&query, SearchOptions::default()).unwrap();
 
     assert_eq!(results.hits.len(), 1);
-    let snippet = results.hits[0].snippet.as_deref().expect("snippet present by default");
-    assert!(snippet.contains("<mark>") || snippet.contains("<b>"),
-            "snippet should contain highlight markers: {snippet}");
+    let snippet = results.hits[0]
+        .snippet
+        .as_deref()
+        .expect("snippet present by default");
+    assert!(
+        snippet.contains("<mark>") || snippet.contains("<b>"),
+        "snippet should contain highlight markers: {snippet}"
+    );
     drop(dir);
 }

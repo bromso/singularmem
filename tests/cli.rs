@@ -219,3 +219,139 @@ fn ingest_conflicting_input_modes_errors() {
         .assert()
         .failure();
 }
+
+// ── Task 10: search verb ────────────────────────────────────────────────────
+
+#[test]
+fn search_finds_ingested_item() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "Decision to use SQLite",
+        ])
+        .assert()
+        .success();
+
+    // Give Tantivy reader a moment to reload.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "decision"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Decision"));
+}
+
+#[test]
+fn search_missing_index_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Create store but never ingest (and never create the .tantivy dir).
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "list"])
+        .assert()
+        .success();
+
+    // Search auto-creates an empty index directory if absent. The result is
+    // 0 matches → exit 0. `--no-index` only suppresses auto-wiring of the
+    // hook on Store::open; cmd_search opens its own Index regardless.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "--no-index",
+            "search",
+            "anything",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn search_malformed_query_exits_1() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "tags:"])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn reindex_command_succeeds_on_empty_store() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "list"])
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "reindex"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn auto_wiring_makes_ingest_searchable() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "auto-wired item",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "auto-wired",
+            "--no-snippets",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("01")); // any ULID prefix in stdout = a hit
+}
+
+#[test]
+fn no_index_flag_skips_hook_wiring() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "--no-index",
+            "ingest",
+            "--content",
+            "not searchable",
+        ])
+        .assert()
+        .success();
+    // Search opens a fresh index (auto-created empty). 0 matches; exit 0.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "not",
+            "searchable",
+        ])
+        .assert()
+        .success();
+}

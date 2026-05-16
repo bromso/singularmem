@@ -1,7 +1,7 @@
 //! Singularmem CLI — thin shell over `singularmem_core`.
 
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -22,6 +22,11 @@ struct Cli {
     #[arg(long, global = true)]
     read_only: bool,
 
+    /// Skip wiring up the Tantivy hook on open. Use for storage-only operations
+    /// that don't need search, or when the Tantivy directory is intentionally absent.
+    #[arg(long, global = true)]
+    no_index: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -38,6 +43,10 @@ enum Command {
     Revisions(RevisionsArgs),
     /// Emit the entire store as JSONL on stdout.
     Export,
+    /// Full-text search over the store.
+    Search(SearchArgs),
+    /// Rebuild the Tantivy index from the `SQLite` store.
+    Reindex(ReindexArgs),
 }
 
 #[derive(Args, Debug)]
@@ -116,6 +125,31 @@ struct RevisionsArgs {
     format: ListFormat,
 }
 
+#[derive(Args, Debug)]
+struct SearchArgs {
+    /// One or more query tokens. Multiple tokens become an implicit AND.
+    queries: Vec<String>,
+    /// Max hits to return.
+    #[arg(long, default_value = "20")]
+    limit: usize,
+    /// Skip first N hits (pagination).
+    #[arg(long, default_value = "0")]
+    offset: usize,
+    /// Suppress snippet highlighting (faster).
+    #[arg(long)]
+    no_snippets: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+    format: ListFormat,
+}
+
+#[derive(Args, Debug)]
+struct ReindexArgs {
+    /// Suppress progress output.
+    #[arg(long)]
+    quiet: bool,
+}
+
 fn main() -> ExitCode {
     // Subscribe tracing to stderr at WARN level by default; user can override
     // with RUST_LOG=… environment variable.
@@ -132,6 +166,14 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Lib(Error::NotFound { .. })) => ExitCode::from(2),
         Err(CliError::Lib(Error::UnsupportedFormatVersion { .. })) => ExitCode::from(3),
+        Err(CliError::IndexOpen(ref e)) => {
+            eprintln!("singularmem: {e}");
+            ExitCode::from(2)
+        }
+        Err(CliError::QueryParse(ref e)) => {
+            eprintln!("singularmem: invalid search query: {e}");
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(1)
@@ -151,14 +193,37 @@ enum CliError {
     Json(#[from] serde_json::Error),
     #[error("invalid item ID: {0}")]
     InvalidId(#[from] ulid::DecodeError),
+    #[error("could not open Tantivy index: {0}")]
+    IndexOpen(String),
+    #[error("invalid search query: {0}")]
+    QueryParse(String),
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
-    let store_path = cli.store.unwrap_or_else(default_store_path);
+    let store_path = cli.store.clone().unwrap_or_else(default_store_path);
     let opts = StoreOptions {
         read_only: cli.read_only,
     };
-    let store = Store::open_with_options(&store_path, opts)?;
+    let mut store = Store::open_with_options(&store_path, opts)?;
+
+    // Auto-wire the Tantivy hook for write commands so live ingest populates
+    // the index. Read/search commands open their own Index instances; if we
+    // auto-wired here AND those commands opened again, Tantivy's writer lock
+    // would conflict (single-writer-per-Directory).
+    let needs_hook = matches!(cli.command, Command::Ingest(_));
+    if needs_hook && !cli.no_index {
+        let index_path = derive_index_path(&store_path);
+        match singularmem_search::Index::open(&index_path) {
+            Ok(index) => store.set_hook(Some(Box::new(index))),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %index_path.display(),
+                    "could not open Tantivy index; search will not work until `singularmem reindex` runs"
+                );
+            }
+        }
+    }
 
     match cli.command {
         Command::Ingest(args) => cmd_ingest(&store, args),
@@ -166,7 +231,15 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::List(args) => cmd_list(&store, &args),
         Command::Revisions(args) => cmd_revisions(&store, &args),
         Command::Export => cmd_export(&store),
+        Command::Search(args) => cmd_search(&store_path, &args),
+        Command::Reindex(args) => cmd_reindex(&store, &store_path, &args),
     }
+}
+
+fn derive_index_path(store_path: &Path) -> PathBuf {
+    let mut s = store_path.to_path_buf().into_os_string();
+    s.push(".tantivy");
+    PathBuf::from(s)
 }
 
 fn default_store_path() -> PathBuf {
@@ -294,5 +367,63 @@ fn cmd_revisions(store: &Store, args: &RevisionsArgs) -> Result<(), CliError> {
 fn cmd_export(store: &Store) -> Result<(), CliError> {
     let mut out = io::stdout().lock();
     store.export(&mut out)?;
+    Ok(())
+}
+
+fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
+    use singularmem_search::{Index, Query, SearchOptions};
+    let index_path = derive_index_path(store_path);
+    let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    let query_str = args.queries.join(" ");
+    let query = Query::parse(&query_str).map_err(|e| CliError::QueryParse(e.to_string()))?;
+    let opts = SearchOptions {
+        limit: args.limit,
+        offset: args.offset,
+        include_snippets: !args.no_snippets,
+    };
+    let results = index
+        .search(&query, opts)
+        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+
+    if results.total_matched == 0 {
+        tracing::info!("0 matches");
+        return Ok(());
+    }
+
+    let mut out = io::stdout().lock();
+    for hit in &results.hits {
+        match args.format {
+            ListFormat::Ids => writeln!(out, "{}", hit.id)?,
+            ListFormat::Jsonl => {
+                let line = serde_json::json!({
+                    "id": hit.id.to_string(),
+                    "score": hit.score,
+                    "snippet": hit.snippet,
+                });
+                serde_json::to_writer(&mut out, &line)?;
+                writeln!(out)?;
+            }
+            ListFormat::Table => {
+                let snip = hit.snippet.as_deref().unwrap_or("").replace('\n', " ");
+                writeln!(out, "{:.4}\t{}\t{}", hit.score, hit.id, snip)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {
+    use singularmem_search::Index;
+    let index_path = derive_index_path(store_path);
+    let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    let progress = |n: u64| {
+        if !args.quiet {
+            tracing::info!("reindex: {n} items processed");
+        }
+    };
+    let count = index
+        .reindex_from(store.list()?.filter_map(Result::ok), progress)
+        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    tracing::info!("reindex: {count} items total");
     Ok(())
 }

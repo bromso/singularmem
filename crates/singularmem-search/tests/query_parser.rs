@@ -35,9 +35,7 @@ fn parse_malformed_errors() {
 
 #[test]
 fn query_builder_constructs_single_term() {
-    let _q = QueryBuilder::new()
-        .term(Field::Content, "decision")
-        .build();
+    let _q = QueryBuilder::new().term(Field::Content, "decision").build();
 }
 
 #[test]

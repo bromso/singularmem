@@ -23,7 +23,9 @@ pub enum Error {
     QueryParse(String),
 
     /// The Tantivy index directory does not exist or is empty.
-    #[error("Tantivy index at {path} is missing or unreadable; run `singularmem reindex` to rebuild")]
+    #[error(
+        "Tantivy index at {path} is missing or unreadable; run `singularmem reindex` to rebuild"
+    )]
     IndexMissing {
         /// Filesystem path that was attempted.
         path: PathBuf,

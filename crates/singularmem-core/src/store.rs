@@ -219,10 +219,7 @@ impl Store {
     ///
     /// # Errors
     /// Same as `Store::open`.
-    pub fn open_with_hook(
-        path: impl AsRef<Path>,
-        hook: Box<dyn IndexHook>,
-    ) -> Result<Self> {
+    pub fn open_with_hook(path: impl AsRef<Path>, hook: Box<dyn IndexHook>) -> Result<Self> {
         let mut store = Self::open(path)?;
         store.set_hook(Some(hook));
         Ok(store)

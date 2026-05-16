@@ -60,7 +60,9 @@ fn ingest_many_calls_commit_once() {
     });
     let store = Store::open_with_hook(&path, hook).expect("open with hook");
 
-    let items: Vec<NewItem> = (0..10).map(|i| NewItem::text(format!("item-{i}"))).collect();
+    let items: Vec<NewItem> = (0..10)
+        .map(|i| NewItem::text(format!("item-{i}")))
+        .collect();
     let _ = store.ingest_many(items).unwrap();
 
     assert_eq!(on_ingest.load(Ordering::SeqCst), 10);
@@ -117,9 +119,7 @@ fn failing_hook_does_not_fail_ingest_many() {
     let path = dir.path().join("store.db");
     let store = Store::open_with_hook(&path, Box::new(FailingHook)).unwrap();
 
-    let items: Vec<NewItem> = (0..5)
-        .map(|i| NewItem::text(format!("bulk-{i}")))
-        .collect();
+    let items: Vec<NewItem> = (0..5).map(|i| NewItem::text(format!("bulk-{i}"))).collect();
 
     let stored = store
         .ingest_many(items)
@@ -129,7 +129,9 @@ fn failing_hook_does_not_fail_ingest_many() {
 
     // All five items should still be in the SQLite store.
     for item in &stored {
-        let fetched = store.get(item.id).expect("each item should still be in SQLite");
+        let fetched = store
+            .get(item.id)
+            .expect("each item should still be in SQLite");
         assert_eq!(fetched.id, item.id);
     }
 }
