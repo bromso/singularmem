@@ -177,4 +177,59 @@ impl Index {
             elapsed: start.elapsed(),
         })
     }
+
+    /// Rebuild this index from an iterator of `Item`s (typically `store.list()`).
+    /// Deletes all existing documents, writes new ones from the iterator, and
+    /// commits once at the end. Calls `on_progress(items_so_far)` every 1000
+    /// items.
+    ///
+    /// Note: `wait_merging_threads` is intentionally skipped — Tantivy 0.22's
+    /// API consumes the writer when called, which would invalidate the writer
+    /// mutex. Background segment merges may continue after `reindex_from`
+    /// returns. The caller's exit-success signal is "all docs indexed and
+    /// committed", not "all merges settled".
+    ///
+    /// # Errors
+    /// Returns `Error::Tantivy` on writer failure.
+    ///
+    /// # Panics
+    /// Panics if the internal writer mutex is poisoned (i.e. another thread
+    /// panicked while holding the writer lock).
+    pub fn reindex_from<I, F>(&self, items: I, mut on_progress: F) -> Result<u64>
+    where
+        I: IntoIterator<Item = singularmem_core::Item>,
+        F: FnMut(u64),
+    {
+        use singularmem_core::IndexHook;
+
+        // Delete all documents in the current index.
+        {
+            let writer = self.writer.lock().expect("writer mutex poisoned");
+            writer.delete_all_documents().map_err(|e| Error::Tantivy {
+                context: "delete_all_documents during reindex",
+                source: e,
+            })?;
+        }
+
+        let mut count: u64 = 0;
+        for item in items {
+            // on_reindex returns singularmem_core::Result; surface as Tantivy error.
+            self.on_reindex(&item).map_err(|core_err| Error::Tantivy {
+                context: "on_reindex call during reindex_from",
+                source: tantivy::TantivyError::SystemError(core_err.to_string()),
+            })?;
+            count += 1;
+            if count % 1000 == 0 {
+                on_progress(count);
+            }
+        }
+
+        // Single commit at the end of the batch.
+        self.commit().map_err(|core_err| Error::Tantivy {
+            context: "commit during reindex_from",
+            source: tantivy::TantivyError::SystemError(core_err.to_string()),
+        })?;
+
+        Ok(count)
+    }
 }
