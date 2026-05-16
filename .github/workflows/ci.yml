@@ -67,6 +67,35 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  tests-offline:
+    name: tests (offline, --network=none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test binaries with network access
+        run: cargo test --no-run --workspace --all-targets
+      - name: Run the test binaries with networking disabled
+        # Re-launch cargo test inside an unshare network namespace so any test
+        # that attempts a network syscall is rejected by the kernel.
+        # This is the strongest possible "tests pass with networking disabled"
+        # guarantee per Constitution Principle VI.
+        run: |
+          sudo unshare --net -- bash -c '
+            ip link set lo up
+            cargo test --workspace --all-targets
+          '
+
+  perf-budgets:
+    name: perf-budgets (Principle X)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: .github/scripts/perf-check.sh
+
   macos-advisory:
     name: macOS advisory (non-blocking)
     runs-on: macos-latest
