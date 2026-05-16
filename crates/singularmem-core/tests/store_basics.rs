@@ -1,7 +1,7 @@
 //! Smoke tests for Store lifecycle: open creates schema; reopen finds it;
 //! `format_version` is recorded; unsupported versions are rejected.
 
-use singularmem_core::{FORMAT_VERSION, Store, StoreOptions};
+use singularmem_core::{FORMAT_VERSION, NewItem, Store, StoreOptions};
 use tempfile::TempDir;
 
 #[test]
@@ -66,4 +66,70 @@ fn unsupported_format_version_rejected() {
     let msg = err.to_string();
     assert!(msg.contains("999"), "error mentions found version: {msg}");
     assert!(msg.contains('1'), "error mentions max supported: {msg}");
+}
+
+#[test]
+fn ingest_then_get_round_trip() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+
+    let mut new_item = NewItem::text("hello");
+    new_item.tags = vec!["greeting".into()];
+    new_item.source = Some("test".into());
+    new_item.metadata = serde_json::json!({"k": "v"});
+
+    let stored = store.ingest(new_item).expect("ingest");
+    assert_eq!(stored.content, "hello");
+    assert_eq!(stored.tags, vec!["greeting"]);
+    assert_eq!(stored.source.as_deref(), Some("test"));
+    assert_eq!(stored.metadata, serde_json::json!({"k": "v"}));
+
+    let fetched = store.get(stored.id).expect("get");
+    assert_eq!(fetched, stored);
+}
+
+#[test]
+fn ingest_assigns_distinct_ids_for_concurrent_calls() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let a = store.ingest(NewItem::text("a")).unwrap();
+    let b = store.ingest(NewItem::text("b")).unwrap();
+    assert_ne!(a.id, b.id);
+    assert!(b.created_at >= a.created_at);
+}
+
+#[test]
+fn ingest_supersedes_resolution_succeeds() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let original = store.ingest(NewItem::text("original")).unwrap();
+
+    let mut correction = NewItem::text("correction");
+    correction.supersedes = Some(original.id);
+    let new = store.ingest(correction).expect("ingest with supersedes");
+    assert_eq!(new.supersedes, Some(original.id));
+}
+
+#[test]
+fn ingest_supersedes_unknown_id_errors() {
+    use singularmem_core::Error;
+    use std::str::FromStr;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("store.db");
+    let store = Store::open(&path).unwrap();
+    let bogus = singularmem_core::ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+
+    let mut correction = NewItem::text("correction");
+    correction.supersedes = Some(bogus);
+    let err = store.ingest(correction).unwrap_err();
+    assert!(matches!(err, Error::SupersedesNotFound { .. }));
+
+    // Verify no rows by direct SQL on the same file.
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }
