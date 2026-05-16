@@ -239,3 +239,29 @@ fn list_by_tags_empty_filter_lists_everything() {
     let count = store.list_by_tags(&[]).unwrap().count();
     assert_eq!(count, 2);
 }
+
+#[test]
+fn export_emits_meta_line_and_items_in_order() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let _a = store.ingest(NewItem::text("first")).unwrap();
+    let _b = store.ingest(NewItem::text("second")).unwrap();
+
+    let mut buf = Vec::new();
+    store.export(&mut buf).expect("export ok");
+    let text = String::from_utf8(buf).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "1 meta + 2 item lines");
+
+    let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(meta["_singularmem_format"], "export-v1");
+    assert_eq!(meta["_kind"], "meta");
+    assert_eq!(meta["store_format_version"], "1");
+
+    let first: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first["_kind"], "item");
+    assert_eq!(first["content"], "first");
+
+    let second: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    assert_eq!(second["content"], "second");
+}
