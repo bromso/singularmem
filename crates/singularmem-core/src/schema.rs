@@ -6,7 +6,6 @@ use crate::format::FORMAT_VERSION;
 /// The full v1 DDL. Applied to a fresh store. This string is the single source
 /// of truth in code; the format spec at `docs/formats/store-v1.md` documents
 /// the same shape for third-party loaders.
-#[allow(dead_code)]
 const DDL_V1: &str = "
 CREATE TABLE singularmem_meta (
     key    TEXT PRIMARY KEY NOT NULL,
@@ -42,7 +41,6 @@ CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 /// Used by `Store::open` on a fresh store. Idempotent only in the sense that
 /// `CREATE TABLE` will fail loudly if the schema already exists — callers
 /// must check the meta table first.
-#[allow(dead_code)]
 pub fn apply_v1(conn: &rusqlite::Connection, created_at: &str) -> Result<()> {
     conn.execute_batch(DDL_V1).map_err(|e| Error::Sqlite {
         context: "applying v1 schema",
@@ -71,15 +69,26 @@ pub fn apply_v1(conn: &rusqlite::Connection, created_at: &str) -> Result<()> {
 }
 
 /// Read the `format_version` meta row. Returns `None` if the row does not
-/// exist (i.e. this is not a Singularmem store, or the meta table is empty).
-#[allow(dead_code)]
+/// exist (i.e. this is not a Singularmem store, or the meta table is empty),
+/// or if the `singularmem_meta` table itself does not yet exist (fresh DB).
 pub fn read_format_version(conn: &rusqlite::Connection) -> Result<Option<String>> {
-    let mut stmt = conn
+    let mut stmt = match conn
         .prepare("SELECT value FROM singularmem_meta WHERE key = 'format_version'")
-        .map_err(|e| Error::Sqlite {
-            context: "preparing format_version query",
-            source: e,
-        })?;
+    {
+        Ok(s) => s,
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.extended_code == rusqlite::ffi::SQLITE_ERROR =>
+        {
+            // "no such table" — fresh database with no schema yet.
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(Error::Sqlite {
+                context: "preparing format_version query",
+                source: e,
+            });
+        }
+    };
     stmt.query_row([], |row| row.get::<_, String>(0))
         .map(Some)
         .or_else(|e| match e {
