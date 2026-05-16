@@ -15,7 +15,7 @@ mod hook;
 mod reindex;
 mod schema;
 
-// pub use crate::error::{Error, Result};
-// pub use crate::index::{Index, IndexOptions};
-// pub use crate::query::{Field, Query, QueryBuilder};
-// pub use crate::result::{Hit, SearchOptions, SearchResults};
+pub use crate::error::{Error, Result};
+pub use crate::index::{Index, IndexOptions};
+pub use crate::query::{Field, Query, QueryBuilder};
+pub use crate::result::{Hit, SearchOptions, SearchResults};
