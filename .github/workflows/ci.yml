@@ -77,21 +77,21 @@ jobs:
       - name: Build the test binaries with network access
         run: cargo test --no-run --workspace --all-targets
       - name: Run the test binaries with networking disabled
-        # Re-launch cargo test inside an unprivileged user+network namespace
-        # so any test that attempts a network syscall is rejected by the kernel.
-        # This is the strongest possible "tests pass with networking disabled"
+        # Re-launch cargo test inside `unshare --net` so any test that
+        # attempts a network syscall is rejected by the kernel — the
+        # strongest possible "tests pass with networking disabled"
         # guarantee per Constitution Principle VI.
         #
-        # `unshare -Urn` uses user-namespace mapping (no sudo) so the runner's
-        # environment (PATH, RUSTUP_HOME, CARGO_HOME) propagates intact.
-        # CARGO_NET_OFFLINE=true is belt-and-suspenders: even if a test wanted
-        # to fetch a registry update, cargo refuses before hitting the kernel.
-        env:
-          CARGO_NET_OFFLINE: "true"
+        # GitHub Actions disables unprivileged user namespaces (so we can't
+        # use `unshare -U`), and sudo strips PATH and RUSTUP_HOME. To work
+        # around both: resolve the active toolchain's cargo binary directly
+        # (bypassing rustup's network-fetching wrapper), then sudo+unshare
+        # straight to it. `--offline` is belt-and-suspenders.
         run: |
-          unshare -Urn -- bash -c '
-            cargo test --workspace --all-targets
-          '
+          TOOLCHAIN=$(rustup show active-toolchain | awk '{print $1}')
+          CARGO_BIN="$HOME/.rustup/toolchains/$TOOLCHAIN/bin/cargo"
+          test -x "$CARGO_BIN" || { echo "no toolchain cargo at $CARGO_BIN"; exit 1; }
+          sudo unshare --net -- "$CARGO_BIN" test --workspace --all-targets --offline
 
   perf-budgets:
     name: perf-budgets (Principle X)
