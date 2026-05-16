@@ -3,7 +3,7 @@
 //! initial version covers just the "trait + `Store::set_hook` + `Store::open_with_hook`
 //! compile and run" surface.
 
-use singularmem_core::{IndexHook, Item, NewItem, Result, Store};
+use singularmem_core::{Error, IndexHook, Item, NewItem, Result, Store};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -76,4 +76,76 @@ fn store_open_without_hook_works_unchanged() {
     let item = store.ingest(NewItem::text("no hook")).unwrap();
     let fetched = store.get(item.id).unwrap();
     assert_eq!(fetched.content, "no hook");
+}
+
+/// Always-failing hook. Used to assert Principle VII: `SQLite` write succeeds
+/// even when the hook errors.
+struct FailingHook;
+
+impl IndexHook for FailingHook {
+    fn on_ingest(&self, _item: &Item) -> Result<()> {
+        Err(Error::Io(std::io::Error::other("simulated hook failure")))
+    }
+    fn on_reindex(&self, _item: &Item) -> Result<()> {
+        Err(Error::Io(std::io::Error::other("simulated hook failure")))
+    }
+    fn commit(&self) -> Result<()> {
+        Err(Error::Io(std::io::Error::other("simulated commit failure")))
+    }
+}
+
+#[test]
+fn failing_hook_does_not_fail_ingest() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("store.db");
+    let store = Store::open_with_hook(&path, Box::new(FailingHook)).unwrap();
+
+    // Ingest succeeds despite the hook failing.
+    let item = store
+        .ingest(NewItem::text("durable despite hook failure"))
+        .expect("ingest must succeed when hook fails (Principle VII)");
+    assert_eq!(item.content, "durable despite hook failure");
+
+    // Item is still in the SQLite store — verify with a fresh Store::get.
+    let fetched = store.get(item.id).expect("item should still be in SQLite");
+    assert_eq!(fetched, item);
+}
+
+#[test]
+fn failing_hook_does_not_fail_ingest_many() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("store.db");
+    let store = Store::open_with_hook(&path, Box::new(FailingHook)).unwrap();
+
+    let items: Vec<NewItem> = (0..5)
+        .map(|i| NewItem::text(format!("bulk-{i}")))
+        .collect();
+
+    let stored = store
+        .ingest_many(items)
+        .expect("ingest_many must succeed when hook fails (Principle VII)");
+
+    assert_eq!(stored.len(), 5);
+
+    // All five items should still be in the SQLite store.
+    for item in &stored {
+        let fetched = store.get(item.id).expect("each item should still be in SQLite");
+        assert_eq!(fetched.id, item.id);
+    }
+}
+
+#[test]
+fn failing_hook_after_store_drop_does_not_panic() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("store.db");
+
+    {
+        let store = Store::open_with_hook(&path, Box::new(FailingHook)).unwrap();
+        let _ = store.ingest(NewItem::text("hello")).unwrap();
+    } // Store drops; hook drops; no panic.
+
+    // Reopen without hook; the item is still there.
+    let store2 = Store::open(&path).unwrap();
+    let count = store2.list().unwrap().count();
+    assert_eq!(count, 1);
 }
