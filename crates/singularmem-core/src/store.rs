@@ -8,6 +8,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::clock::{Clock, SystemClock};
 use crate::error::{Error, Result};
 use crate::format::FORMAT_VERSION;
+use crate::hook::IndexHook;
 use crate::rng::{OsRng, Rng};
 use crate::schema;
 
@@ -36,6 +37,7 @@ pub struct Store {
     #[allow(dead_code)]
     pub(crate) rng: Mutex<Box<dyn Rng>>,
     pub(crate) read_only: bool,
+    pub(crate) hook: Mutex<Option<Box<dyn IndexHook>>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -179,6 +181,7 @@ impl Store {
             clock,
             rng: Mutex::new(rng),
             read_only: options.read_only,
+            hook: Mutex::new(None),
         })
     }
 
@@ -209,5 +212,29 @@ impl Store {
         } else {
             Ok(())
         }
+    }
+
+    /// Open with an `IndexHook` attached. Equivalent to `Store::open` for the
+    /// `SQLite` layer.
+    ///
+    /// # Errors
+    /// Same as `Store::open`.
+    pub fn open_with_hook(
+        path: impl AsRef<Path>,
+        hook: Box<dyn IndexHook>,
+    ) -> Result<Self> {
+        let mut store = Self::open(path)?;
+        store.set_hook(Some(hook));
+        Ok(store)
+    }
+
+    /// Replace the `IndexHook` on an already-open store. Pass `None` to detach.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal hook `Mutex` is poisoned (another thread panicked
+    /// while holding the lock).
+    pub fn set_hook(&mut self, hook: Option<Box<dyn IndexHook>>) {
+        *self.hook.lock().expect("store hook mutex poisoned") = hook;
     }
 }
