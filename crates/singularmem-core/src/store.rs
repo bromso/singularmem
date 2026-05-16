@@ -138,6 +138,11 @@ impl Store {
                 context: "enabling foreign_keys pragma",
                 source: e,
             })?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| Error::Sqlite {
+                context: "setting busy_timeout",
+                source: e,
+            })?;
 
         // Bootstrap schema (write) or verify format version (read-only).
         if options.read_only {
