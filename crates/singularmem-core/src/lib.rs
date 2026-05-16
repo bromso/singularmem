@@ -19,10 +19,9 @@ mod ingest;
 mod query;
 mod export;
 
-// pub use re-exports commented out until module stubs are populated (Phase B).
-// pub use crate::clock::{Clock, SystemClock};
-// pub use crate::rng::{Rng, OsRng};
-// pub use crate::error::{Error, Result};
-// pub use crate::format::FORMAT_VERSION;
-// pub use crate::item::{Item, ItemId, NewItem};
-// pub use crate::store::{Store, StoreOptions};
+pub use crate::clock::{Clock, SystemClock};
+pub use crate::rng::{Rng, OsRng};
+pub use crate::error::{Error, Result};
+pub use crate::format::FORMAT_VERSION;
+pub use crate::item::{Item, ItemId, NewItem};
+pub use crate::store::{Store, StoreOptions};
