@@ -24,6 +24,20 @@ impl Store {
         let conn = self.conn.lock().expect("store mutex poisoned");
         load_item(&conn, id)
     }
+
+    /// Like `get`, but returns `Ok(None)` for a missing ID instead of
+    /// `Err(Error::NotFound)`. Useful when the absence is not exceptional.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Sqlite` on database error. A missing item is `Ok(None)`.
+    pub fn get_optional(&self, id: ItemId) -> Result<Option<Item>> {
+        match self.get(id) {
+            Ok(item) => Ok(Some(item)),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
 }
 
 fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {

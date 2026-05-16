@@ -172,3 +172,22 @@ fn ingest_many_rolls_back_on_validation_failure() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[test]
+fn get_optional_returns_none_for_missing() {
+    use std::str::FromStr;
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let bogus = singularmem_core::ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+    let result = store.get_optional(bogus).expect("get_optional ok");
+    assert!(result.is_none());
+}
+
+#[test]
+fn get_optional_returns_some_for_present() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("store.db")).unwrap();
+    let item = store.ingest(NewItem::text("present")).unwrap();
+    let fetched = store.get_optional(item.id).expect("get_optional ok").expect("present");
+    assert_eq!(fetched, item);
+}
