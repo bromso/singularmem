@@ -147,12 +147,11 @@ impl Store {
         // Bootstrap schema (write) or verify format version (read-only).
         if options.read_only {
             // Read-only: must already be at a supported version.
-            let version = schema::read_format_version(&conn)?.ok_or(
-                Error::UnsupportedFormatVersion {
+            let version =
+                schema::read_format_version(&conn)?.ok_or(Error::UnsupportedFormatVersion {
                     found: "<missing>".to_string(),
                     max_supported: FORMAT_VERSION,
-                },
-            )?;
+                })?;
             if version != FORMAT_VERSION {
                 return Err(Error::UnsupportedFormatVersion {
                     found: version,

@@ -1,7 +1,7 @@
 //! Smoke tests for Store lifecycle: open creates schema; reopen finds it;
 //! `format_version` is recorded; unsupported versions are rejected.
 
-use singularmem_core::{FORMAT_VERSION, NewItem, Store, StoreOptions};
+use singularmem_core::{NewItem, Store, StoreOptions, FORMAT_VERSION};
 use tempfile::TempDir;
 
 #[test]
@@ -23,7 +23,10 @@ fn reopen_existing_does_not_recreate_schema() {
     } // drop closes
 
     let reopened = Store::open(&path).expect("reopen");
-    assert_eq!(reopened.format_version().expect("read meta"), FORMAT_VERSION);
+    assert_eq!(
+        reopened.format_version().expect("read meta"),
+        FORMAT_VERSION
+    );
 }
 
 #[test]
@@ -162,7 +165,10 @@ fn ingest_many_rolls_back_on_validation_failure() {
     let err = store.ingest_many(items).unwrap_err();
     assert!(matches!(
         err,
-        singularmem_core::Error::Validation { field: "content", .. }
+        singularmem_core::Error::Validation {
+            field: "content",
+            ..
+        }
     ));
     drop(store);
     // Confirm zero rows persisted — atomic rollback.
@@ -188,7 +194,10 @@ fn get_optional_returns_some_for_present() {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path().join("store.db")).unwrap();
     let item = store.ingest(NewItem::text("present")).unwrap();
-    let fetched = store.get_optional(item.id).expect("get_optional ok").expect("present");
+    let fetched = store
+        .get_optional(item.id)
+        .expect("get_optional ok")
+        .expect("present");
     assert_eq!(fetched, item);
 }
 
@@ -199,11 +208,7 @@ fn list_iterates_in_created_at_order() {
     let a = store.ingest(NewItem::text("a")).unwrap();
     let b = store.ingest(NewItem::text("b")).unwrap();
     let c = store.ingest(NewItem::text("c")).unwrap();
-    let ids: Vec<_> = store
-        .list()
-        .unwrap()
-        .map(|r| r.unwrap().id)
-        .collect();
+    let ids: Vec<_> = store.list().unwrap().map(|r| r.unwrap().id).collect();
     assert_eq!(ids, vec![a.id, b.id, c.id]);
 }
 

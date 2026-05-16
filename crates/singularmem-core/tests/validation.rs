@@ -15,7 +15,13 @@ fn fresh_store() -> (TempDir, Store) {
 fn empty_content_rejected() {
     let (_dir, store) = fresh_store();
     let err = store.ingest(NewItem::text("")).unwrap_err();
-    assert!(matches!(err, Error::Validation { field: "content", .. }));
+    assert!(matches!(
+        err,
+        Error::Validation {
+            field: "content",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -23,7 +29,13 @@ fn oversized_content_rejected() {
     let (_dir, store) = fresh_store();
     let big = "x".repeat(1_048_577);
     let err = store.ingest(NewItem::text(big)).unwrap_err();
-    assert!(matches!(err, Error::Validation { field: "content", .. }));
+    assert!(matches!(
+        err,
+        Error::Validation {
+            field: "content",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -32,7 +44,13 @@ fn metadata_array_rejected() {
     let mut item = NewItem::text("ok");
     item.metadata = serde_json::json!([1, 2, 3]);
     let err = store.ingest(item).unwrap_err();
-    assert!(matches!(err, Error::Validation { field: "metadata", .. }));
+    assert!(matches!(
+        err,
+        Error::Validation {
+            field: "metadata",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -41,7 +59,13 @@ fn metadata_scalar_rejected() {
     let mut item = NewItem::text("ok");
     item.metadata = serde_json::Value::String("string-not-object".into());
     let err = store.ingest(item).unwrap_err();
-    assert!(matches!(err, Error::Validation { field: "metadata", .. }));
+    assert!(matches!(
+        err,
+        Error::Validation {
+            field: "metadata",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -68,7 +92,13 @@ fn long_source_rejected() {
     let mut item = NewItem::text("ok");
     item.source = Some("s".repeat(257));
     let err = store.ingest(item).unwrap_err();
-    assert!(matches!(err, Error::Validation { field: "source", .. }));
+    assert!(matches!(
+        err,
+        Error::Validation {
+            field: "source",
+            ..
+        }
+    ));
 }
 
 #[test]

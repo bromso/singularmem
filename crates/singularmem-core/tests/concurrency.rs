@@ -64,10 +64,7 @@ fn two_writers_from_separate_handles_serialise_correctly() {
     let writer_a = thread::spawn(move || {
         let mut ok = 0;
         for i in 0..50 {
-            if store_a
-                .ingest(NewItem::text(format!("a-{i}")))
-                .is_ok()
-            {
+            if store_a.ingest(NewItem::text(format!("a-{i}"))).is_ok() {
                 ok += 1;
             }
         }
@@ -77,10 +74,7 @@ fn two_writers_from_separate_handles_serialise_correctly() {
     let writer_b = thread::spawn(move || {
         let mut ok = 0;
         for i in 0..50 {
-            if store_b
-                .ingest(NewItem::text(format!("b-{i}")))
-                .is_ok()
-            {
+            if store_b.ingest(NewItem::text(format!("b-{i}"))).is_ok() {
                 ok += 1;
             }
         }
@@ -98,5 +92,8 @@ fn two_writers_from_separate_handles_serialise_correctly() {
     let store = Store::open(&path).unwrap();
     let count = store.list().unwrap().count();
     assert_eq!(count, ok_a + ok_b, "successful writes are durable");
-    assert!(ok_a > 0 && ok_b > 0, "both writers made progress (ok_a={ok_a}, ok_b={ok_b})");
+    assert!(
+        ok_a > 0 && ok_b > 0,
+        "both writers made progress (ok_a={ok_a}, ok_b={ok_b})"
+    );
 }

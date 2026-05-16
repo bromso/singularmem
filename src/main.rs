@@ -8,7 +8,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use singularmem_core::{Error, ItemId, NewItem, Store, StoreOptions};
 
 #[derive(Parser, Debug)]
-#[command(name = "singularmem", version, about = "Local-first persistent memory layer for LLM workflows.")]
+#[command(
+    name = "singularmem",
+    version,
+    about = "Local-first persistent memory layer for LLM workflows."
+)]
 struct Cli {
     /// Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
     #[arg(long, global = true, value_name = "PATH")]

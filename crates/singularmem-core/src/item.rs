@@ -60,15 +60,23 @@ impl FromStr for ItemId {
 /// SDK consumers may read every field directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
+    /// Stable, opaque identifier minted by the store at ingest time.
     pub id: ItemId,
+    /// UTF-8 text content of the item. Non-empty, ≤ 1 MiB.
     pub content: String,
+    /// Wall-clock timestamp the store assigned at ingest, RFC 3339 nanos.
     pub created_at: jiff::Timestamp,
+    /// Pointer to the prior item this one corrects (the supersedes chain).
+    /// `None` for items with no prior version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<ItemId>,
+    /// Tags attached to the item. Sorted, deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Free-form provenance label (e.g. `"claude-conversation:abc-123"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Arbitrary user-defined metadata. Always a JSON object (possibly empty).
     #[serde(default = "default_metadata", skip_serializing_if = "is_empty_object")]
     pub metadata: serde_json::Value,
 }
@@ -77,10 +85,15 @@ pub struct Item {
 /// `created_at`; callers cannot override them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NewItem {
+    /// UTF-8 text content. Non-empty, ≤ 1 MiB.
     pub content: String,
+    /// Optional pointer to the prior item this corrects.
     pub supersedes: Option<ItemId>,
+    /// Tags to attach. Order does not matter; duplicates are silently deduped.
     pub tags: Vec<String>,
+    /// Optional free-form provenance label, ≤ 256 bytes.
     pub source: Option<String>,
+    /// Arbitrary user-defined JSON object. Defaults to `{}`.
     pub metadata: serde_json::Value,
 }
 
@@ -231,27 +244,51 @@ mod tests {
     #[test]
     fn empty_content_rejected() {
         let item = NewItem::text("");
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "content", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "content",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn oversized_content_rejected() {
         let item = NewItem::text("x".repeat(MAX_CONTENT_BYTES + 1));
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "content", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "content",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn long_source_rejected() {
         let mut item = NewItem::text("hello");
         item.source = Some("s".repeat(MAX_SOURCE_BYTES + 1));
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "source", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "source",
+                ..
+            })
+        ));
     }
 
     #[test]
     fn metadata_must_be_object() {
         let mut item = NewItem::text("hello");
         item.metadata = serde_json::json!([1, 2, 3]);
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "metadata", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "metadata",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -266,14 +303,20 @@ mod tests {
     fn empty_tag_rejected() {
         let mut item = NewItem::text("hello");
         item.tags = vec!["valid".into(), String::new(), "another".into()];
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "tags", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation { field: "tags", .. })
+        ));
     }
 
     #[test]
     fn null_byte_in_tag_rejected() {
         let mut item = NewItem::text("hello");
         item.tags = vec!["nul\0byte".into()];
-        assert!(matches!(validate(&item), Err(Error::Validation { field: "tags", .. })));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation { field: "tags", .. })
+        ));
     }
 
     #[test]

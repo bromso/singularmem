@@ -41,11 +41,7 @@ fn open_core_only_round_trip() {
     correction.supersedes = Some(plain.id);
     let correction = store.ingest(correction).unwrap();
 
-    let originals: Vec<Item> = store
-        .list()
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+    let originals: Vec<Item> = store.list().unwrap().map(|r| r.unwrap()).collect();
     assert_eq!(originals.len(), 4);
 
     // Export to a buffer.
@@ -66,8 +62,8 @@ fn open_core_only_round_trip() {
     let parsed_items: Vec<Item> = lines[1..]
         .iter()
         .map(|line| {
-            let parsed: ItemLine = serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("parse {line:?}: {e}"));
+            let parsed: ItemLine =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("parse {line:?}: {e}"));
             assert_eq!(parsed.kind, "item");
             parsed.item
         })
@@ -92,7 +88,10 @@ fn open_core_only_round_trip() {
         sourced_via_export.metadata,
         serde_json::json!({"project": "alpha", "priority": 2})
     );
-    assert_eq!(sourced_via_export.source.as_deref(), Some("conversation:abc-123"));
+    assert_eq!(
+        sourced_via_export.source.as_deref(),
+        Some("conversation:abc-123")
+    );
 
     // Cross-check: tag set survived (sorted-deduped).
     let tagged_via_export = parsed_items

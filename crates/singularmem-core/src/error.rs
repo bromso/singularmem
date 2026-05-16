@@ -21,28 +21,42 @@ pub enum Error {
     /// `NewItem.supersedes` referenced an ID that does not exist in the store.
     /// The new item was not persisted.
     #[error("supersedes target {id} not found in store; new item was not persisted")]
-    SupersedesNotFound { id: ItemId },
+    SupersedesNotFound {
+        /// The supersedes target that could not be located.
+        id: ItemId,
+    },
 
     /// A point read or revision walk did not find the requested item.
     #[error("item {id} not found")]
-    NotFound { id: ItemId },
+    NotFound {
+        /// The ID that was looked up.
+        id: ItemId,
+    },
 
     /// `latest_revision` walked forward from an item and found multiple
     /// candidates that nothing supersedes — a fork. The library refuses to
     /// guess (Principle VII).
     #[error("ambiguous latest revision: {} candidates", candidates.len())]
-    AmbiguousLatest { candidates: Vec<ItemId> },
+    AmbiguousLatest {
+        /// The competing head candidates that all claim to supersede the same prior item.
+        candidates: Vec<ItemId>,
+    },
 
     /// The store file is at a format version newer than this binary supports.
     #[error("store format version {found} is newer than supported maximum {max_supported}")]
     UnsupportedFormatVersion {
+        /// The version found in the file's `singularmem_meta` row.
         found: String,
+        /// The highest version this binary knows how to read.
         max_supported: &'static str,
     },
 
     /// A write was attempted against a read-only store.
     #[error("store is opened read-only; the {operation} operation requires write access")]
-    ReadOnly { operation: &'static str },
+    ReadOnly {
+        /// The name of the write operation that was refused.
+        operation: &'static str,
+    },
 
     /// A string failed to parse as a ULID.
     #[error("invalid ULID: {0}")]
@@ -52,7 +66,9 @@ pub enum Error {
     /// rolled back.
     #[error("SQLite error during {context}: {source}; rolled back")]
     Sqlite {
+        /// Short tag naming what the library was doing when `SQLite` errored.
         context: &'static str,
+        /// The underlying `SQLite` error.
         #[source]
         source: rusqlite::Error,
     },
@@ -64,7 +80,9 @@ pub enum Error {
     /// JSON serialisation or deserialisation failed (e.g. while emitting export-v1).
     #[error("JSON error during {context}: {source}")]
     Json {
+        /// Short tag naming what the library was doing when JSON failed.
         context: &'static str,
+        /// The underlying `serde_json` error.
         #[source]
         source: serde_json::Error,
     },

@@ -14,8 +14,9 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns `Error::Validation` if the item fails any rule in
-    /// [`crate::item::validate`]; `Error::SupersedesNotFound` if `supersedes`
+    /// Returns `Error::Validation` if the item fails any rule (empty or
+    /// oversized content, oversized source, non-object metadata, oversized or
+    /// NUL-bearing tags); `Error::SupersedesNotFound` if `supersedes`
     /// is set to an unknown ID; `Error::Sqlite` on database error;
     /// `Error::ReadOnly` if the store was opened read-only.
     ///
@@ -129,10 +130,7 @@ impl Store {
     /// Panics if the internal connection `Mutex` is poisoned (i.e. another
     /// thread panicked while holding the lock).
     #[allow(clippy::significant_drop_tightening)]
-    pub fn ingest_many<I: IntoIterator<Item = NewItem>>(
-        &self,
-        items: I,
-    ) -> Result<Vec<Item>> {
+    pub fn ingest_many<I: IntoIterator<Item = NewItem>>(&self, items: I) -> Result<Vec<Item>> {
         self.assert_writable("ingest_many")?;
 
         // Materialise + validate up front so we can fail before touching SQL.
@@ -177,11 +175,10 @@ impl Store {
             // captured at the start of the batch but differ in random bytes.
             let id = mint_ulid(self, now)?;
             let id_text = id.to_string();
-            let metadata_text =
-                serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
-                    context: "serialising metadata in bulk",
-                    source: e,
-                })?;
+            let metadata_text = serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
+                context: "serialising metadata in bulk",
+                source: e,
+            })?;
             let created_at_text = now.to_string();
 
             tx.execute(

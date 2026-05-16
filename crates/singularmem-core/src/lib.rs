@@ -8,21 +8,21 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
-pub mod rng;
 pub mod error;
 pub mod format;
 pub mod item;
+pub mod rng;
 pub mod store;
 
-mod schema;
+mod export;
 mod ingest;
 mod query;
-mod export;
+mod schema;
 
 pub use crate::clock::{Clock, SystemClock};
-pub use crate::rng::{Rng, OsRng};
 pub use crate::error::{Error, Result};
 pub use crate::format::FORMAT_VERSION;
 pub use crate::item::{Item, ItemId, NewItem};
-pub use crate::store::{Store, StoreOptions};
 pub use crate::query::ItemIter;
+pub use crate::rng::{OsRng, Rng};
+pub use crate::store::{Store, StoreOptions};

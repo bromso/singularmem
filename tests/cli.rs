@@ -40,7 +40,13 @@ fn ingest_prints_id_then_get_returns_content() {
     let db = dir.path().join("store.db");
 
     let out = singularmem()
-        .args(["--store", db.to_str().unwrap(), "ingest", "--content", "hello"])
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "hello",
+        ])
         .assert()
         .success()
         .get_output()
@@ -62,12 +68,28 @@ fn list_jsonl_includes_ingested_item() {
     let db = dir.path().join("store.db");
 
     singularmem()
-        .args(["--store", db.to_str().unwrap(), "ingest", "--content", "x", "--tag", "greeting"])
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "x",
+            "--tag",
+            "greeting",
+        ])
         .assert()
         .success();
 
     singularmem()
-        .args(["--store", db.to_str().unwrap(), "list", "--tag", "greeting", "--format", "jsonl"])
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "list",
+            "--tag",
+            "greeting",
+            "--format",
+            "jsonl",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"content\":\"x\""));
@@ -93,7 +115,15 @@ fn revisions_walks_chain_newest_first() {
 
     let v2 = String::from_utf8(
         singularmem()
-            .args(["--store", db.to_str().unwrap(), "ingest", "--content", "v2", "--supersedes", &v1])
+            .args([
+                "--store",
+                db.to_str().unwrap(),
+                "ingest",
+                "--content",
+                "v2",
+                "--supersedes",
+                &v1,
+            ])
             .assert()
             .success()
             .get_output()
@@ -105,7 +135,14 @@ fn revisions_walks_chain_newest_first() {
     .to_string();
 
     singularmem()
-        .args(["--store", db.to_str().unwrap(), "revisions", &v2, "--format", "ids"])
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "revisions",
+            &v2,
+            "--format",
+            "ids",
+        ])
         .assert()
         .success()
         .stdout(format!("{v2}\n{v1}\n"));
@@ -154,7 +191,12 @@ fn get_missing_id_exits_2() {
 
     // Use a valid ULID (Crockford base32, no I/L/O/U) that doesn't exist in the store.
     singularmem()
-        .args(["--store", db.to_str().unwrap(), "get", "00000000000000000000000000"])
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "get",
+            "00000000000000000000000000",
+        ])
         .assert()
         .failure()
         .code(2);
@@ -167,8 +209,12 @@ fn ingest_conflicting_input_modes_errors() {
 
     singularmem()
         .args([
-            "--store", db.to_str().unwrap(),
-            "ingest", "--content", "x", "--stdin",
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "x",
+            "--stdin",
         ])
         .assert()
         .failure();

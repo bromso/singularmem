@@ -72,23 +72,22 @@ pub fn apply_v1(conn: &rusqlite::Connection, created_at: &str) -> Result<()> {
 /// exist (i.e. this is not a Singularmem store, or the meta table is empty),
 /// or if the `singularmem_meta` table itself does not yet exist (fresh DB).
 pub fn read_format_version(conn: &rusqlite::Connection) -> Result<Option<String>> {
-    let mut stmt = match conn
-        .prepare("SELECT value FROM singularmem_meta WHERE key = 'format_version'")
-    {
-        Ok(s) => s,
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.extended_code == rusqlite::ffi::SQLITE_ERROR =>
-        {
-            // "no such table" — fresh database with no schema yet.
-            return Ok(None);
-        }
-        Err(e) => {
-            return Err(Error::Sqlite {
-                context: "preparing format_version query",
-                source: e,
-            });
-        }
-    };
+    let mut stmt =
+        match conn.prepare("SELECT value FROM singularmem_meta WHERE key = 'format_version'") {
+            Ok(s) => s,
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_ERROR =>
+            {
+                // "no such table" — fresh database with no schema yet.
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(Error::Sqlite {
+                    context: "preparing format_version query",
+                    source: e,
+                });
+            }
+        };
     stmt.query_row([], |row| row.get::<_, String>(0))
         .map(Some)
         .or_else(|e| match e {

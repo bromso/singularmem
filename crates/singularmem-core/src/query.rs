@@ -154,7 +154,9 @@ impl Store {
         let id_strings: Vec<String> = stmt
             .query_map(
                 rusqlite::params_from_iter(
-                    tag_strings.iter().map(|s| s as &dyn rusqlite::ToSql)
+                    tag_strings
+                        .iter()
+                        .map(|s| s as &dyn rusqlite::ToSql)
                         .chain(std::iter::once(&tag_count as &dyn rusqlite::ToSql)),
                 ),
                 |r| r.get::<_, String>(0),
@@ -254,11 +256,7 @@ impl Store {
             match next_ids.len() {
                 0 => return self.get(current_id),
                 1 => {
-                    current_id = next_ids
-                        .into_iter()
-                        .next()
-                        .expect("len == 1")
-                        .parse()?;
+                    current_id = next_ids.into_iter().next().expect("len == 1").parse()?;
                 }
                 _ => {
                     let candidates = next_ids
