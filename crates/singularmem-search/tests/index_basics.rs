@@ -4,6 +4,7 @@
 use singularmem_search::{Index, IndexOptions};
 use tempfile::TempDir;
 
+
 #[test]
 fn open_fresh_creates_directory_and_doc_count_is_zero() {
     let dir = TempDir::new().unwrap();
@@ -29,4 +30,32 @@ fn open_with_options_respects_writer_memory() {
         writer_memory_bytes: 16 * 1024 * 1024,
     };
     let _ = Index::open_with_options(dir.path().join("index"), options).expect("open with options");
+}
+
+use jiff::Timestamp;
+use singularmem_core::{IndexHook, Item, ItemId};
+use std::str::FromStr;
+
+#[test]
+fn on_ingest_then_commit_increments_doc_count() {
+    let dir = TempDir::new().unwrap();
+    let index = Index::open(dir.path().join("idx")).unwrap();
+
+    let item = Item {
+        id: ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+        content: "hello world".to_string(),
+        created_at: Timestamp::now(),
+        supersedes: None,
+        tags: vec!["greeting".to_string()],
+        source: None,
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+    };
+
+    index.on_ingest(&item).unwrap();
+    index.commit().unwrap();
+
+    // Reader needs a moment to reload after commit. Tantivy's
+    // ReloadPolicy::OnCommitWithDelay handles this asynchronously.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(index.doc_count().unwrap(), 1);
 }
