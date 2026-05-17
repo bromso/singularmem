@@ -14,9 +14,8 @@ pub mod testing;
 
 pub use crate::error::{Error, Result};
 
-pub use crate::retriever::{MemoryBlock, RetrieveOptions, RetrievedContext};
+pub use crate::retriever::{MemoryBlock, RetrieveOptions, RetrievedContext, Retriever};
 
 // Re-exports activated in subsequent tasks:
 // pub use crate::adapter::{Adapter, PlainAdapter};
-// pub use crate::retriever::Retriever;
 // pub use crate::testing::MockAdapter;

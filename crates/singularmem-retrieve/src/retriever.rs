@@ -68,6 +68,30 @@ pub struct MemoryBlock {
     pub created_at: Timestamp,
 }
 
+use singularmem_core::Store;
+use singularmem_search::HybridSearcher;
+
+/// Composes a hybrid search + per-hit store reads into prompt-ready
+/// `MemoryBlock`s.
+///
+/// Borrows references to `Store` and `HybridSearcher` — same borrow pattern
+/// `HybridSearcher` uses for its underlying indexes. Callers retain
+/// ownership of the underlying components.
+pub struct Retriever<'a> {
+    /// Borrowed reference to the underlying memory store.
+    pub store: &'a Store,
+    /// Borrowed reference to the hybrid searcher.
+    pub searcher: &'a HybridSearcher<'a>,
+}
+
+impl<'a> Retriever<'a> {
+    /// Construct a `Retriever` borrowing the given store and searcher.
+    #[must_use]
+    pub const fn new(store: &'a Store, searcher: &'a HybridSearcher<'a>) -> Self {
+        Self { store, searcher }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +103,25 @@ mod tests {
         assert!((o.min_score - 0.0).abs() < f32::EPSILON);
         // search field defaults pulled from HybridSearchOptions; we don't
         // re-assert those here because sub-project 2c already tests them.
+    }
+
+    use singularmem_core::Store;
+    use singularmem_search::testing::MockEmbedder;
+    use singularmem_search::{EmbedderIndex, HybridSearcher, Index};
+    use tempfile::TempDir;
+
+    #[test]
+    fn new_holds_references_to_store_and_searcher() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("store.db")).unwrap();
+        let lex = Index::open(dir.path().join("lex")).unwrap();
+        let sem =
+            EmbedderIndex::open(dir.path().join("sem"), Box::new(MockEmbedder::default()))
+                .unwrap();
+        let searcher = HybridSearcher::new(&lex, &sem);
+        let retriever = Retriever::new(&store, &searcher);
+        // The struct fields are public; we can observe the borrowed references.
+        assert!(std::ptr::eq(retriever.store, &store));
+        assert!(std::ptr::eq(retriever.searcher, &searcher));
     }
 }
