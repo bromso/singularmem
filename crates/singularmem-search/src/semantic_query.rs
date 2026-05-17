@@ -18,11 +18,15 @@ pub struct SemanticSearchOptions {
 
 impl Default for SemanticSearchOptions {
     fn default() -> Self {
-        Self { limit: 20, min_score: 0.0 }
+        Self {
+            limit: 20,
+            min_score: 0.0,
+        }
     }
 }
 
 /// The results of a semantic search query.
+#[derive(Debug)]
 pub struct SemanticSearchResults {
     /// Hits in descending score order, filtered by
     /// [`SemanticSearchOptions::min_score`].
@@ -34,6 +38,7 @@ pub struct SemanticSearchResults {
 }
 
 /// A single hit from a semantic search query.
+#[derive(Debug)]
 pub struct SemanticHit {
     /// The item identifier.
     pub id: ItemId,
