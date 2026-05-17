@@ -4,6 +4,23 @@ Thank you for considering a contribution. Singularmem is a
 constitution-governed project; before opening a non-trivial PR, please
 read [`.specify/memory/constitution.md`](.specify/memory/constitution.md).
 
+## Default behaviour: cheap-vs-heavy rule
+
+Features in Singularmem follow a simple rule for whether they default on
+or default off:
+
+- **Cheap features default ON** — trivial per-op cost, no downloads, no
+  large dep tree. Example: the Tantivy lexical index (sub-project 2a) is
+  default-on and bundled.
+- **Heavy features default OFF (opt-in)** — features requiring downloads,
+  large dep trees, or non-trivial per-op cost. Example: ONNX embeddings
+  (sub-project 2b) require an ~80 MB model download + ~10-50 ms per
+  ingest, so they're off until the user runs `singularmem reindex
+  --with-embeddings` to opt in.
+
+When proposing a new feature, ask: "does this require something the user
+didn't ask for the first time they run it?" If yes, default off.
+
 ## Development environment
 
 You will need:
