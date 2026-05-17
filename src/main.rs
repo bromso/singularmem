@@ -47,7 +47,7 @@ enum Command {
     Search(SearchArgs),
     /// Rebuild the Tantivy index from the `SQLite` store.
     Reindex(ReindexArgs),
-    /// Semantic (vector) search over the store.
+    /// [DEPRECATED] Semantic (vector) search. Use `search --mode semantic`.
     SemanticSearch(SemanticSearchArgs),
 }
 
@@ -233,7 +233,8 @@ fn main() -> ExitCode {
         }
         Err(CliError::Search(
             e @ (singularmem_search::Error::NoIndexes
-            | singularmem_search::Error::HybridMissingIndex { .. }),
+            | singularmem_search::Error::HybridMissingIndex { .. }
+            | singularmem_search::Error::IndexMissing { .. }),
         )) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
@@ -632,63 +633,26 @@ fn render_search_results(
 }
 
 fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(), CliError> {
-    let vectors_path = derive_vectors_path(store_path);
+    use std::sync::OnceLock;
+    static DEPRECATION_NOTICE: OnceLock<()> = OnceLock::new();
+    DEPRECATION_NOTICE.get_or_init(|| {
+        eprintln!("note: 'semantic-search' is deprecated; use 'search --mode semantic'");
+    });
 
-    // The .vectors/ directory is the opt-in signal: it is created by
-    // `reindex --with-embeddings`. If it doesn't exist, semantic search is not
-    // available for this store yet.
-    if !vectors_path.exists() {
-        return Err(CliError::IndexOpen(format!(
-            "vector index not found at {}; run `singularmem reindex --with-embeddings` first",
-            vectors_path.display()
-        )));
-    }
-
-    // Production CLI uses FastembedEmbedder. Tests inject MockEmbedder via env var
-    // to stay fast and network-free.
-    let embedder: Box<dyn singularmem_search::Embedder> =
-        match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-            Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
-            _ => Box::new(
-                singularmem_search::FastembedEmbedder::new()
-                    .map_err(|e| CliError::IndexOpen(format!("embedder init failed: {e}")))?,
-            ),
-        };
-    let idx = singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
-        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
-    let query_str = args.queries.join(" ");
-    let results = idx
-        .semantic_search(
-            &query_str,
-            &singularmem_search::SemanticSearchOptions {
-                limit: args.limit,
-                min_score: args.min_score,
-            },
-        )
-        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
-
-    if results.hits.is_empty() {
-        tracing::info!("0 matches");
-        return Ok(());
-    }
-    let mut out = io::stdout().lock();
-    for hit in &results.hits {
-        match args.format {
-            ListFormat::Ids => writeln!(out, "{}", hit.id)?,
-            ListFormat::Jsonl => {
-                serde_json::to_writer(
-                    &mut out,
-                    &serde_json::json!({
-                        "id": hit.id.to_string(),
-                        "score": hit.score,
-                    }),
-                )?;
-                writeln!(out)?;
-            }
-            ListFormat::Table => writeln!(out, "{:.4}\t{}", hit.score, hit.id)?,
-        }
-    }
-    Ok(())
+    // Forward through cmd_search with mode=Semantic.
+    let forwarded = SearchArgs {
+        queries: args.queries.clone(),
+        mode: SearchMode::Semantic,
+        limit: args.limit,
+        offset: 0,
+        fetch_multiplier: 3,
+        rrf_k: 60,
+        no_snippets: true, // semantic mode has no snippets anyway
+        show_ranks: false,
+        json: matches!(args.format, ListFormat::Jsonl),
+        format: args.format,
+    };
+    cmd_search(store_path, &forwarded)
 }
 
 fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {

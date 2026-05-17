@@ -882,3 +882,43 @@ fn search_json_flag_emits_valid_json() {
     assert!(h0.get("lexical_rank").is_some());
     assert!(h0.get("semantic_rank").is_some());
 }
+
+#[test]
+fn semantic_search_deprecated_alias_still_works() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "deprecation alias fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "deprecation alias fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cos="))
+        .stderr(predicate::str::contains("deprecated"));
+}
