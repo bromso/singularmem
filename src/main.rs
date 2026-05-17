@@ -393,7 +393,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
 fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
     vec![
         Box::new(singularmem_retrieve::PlainAdapter),
-        // 3b will add: Box::new(singularmem_adapter_claude::ClaudeAdapter),
+        Box::new(singularmem_adapter_claude::ClaudeAdapter),
         // 3c will add: Box::new(singularmem_adapter_openai::OpenAiAdapter),
         // 3d will add: Box::new(singularmem_adapter_gemini::GeminiAdapter),
     ]

@@ -2747,6 +2747,7 @@ dependencies = [
  "dirs",
  "predicates",
  "serde_json",
+ "singularmem-adapter-claude",
  "singularmem-core",
  "singularmem-retrieve",
  "singularmem-search",
