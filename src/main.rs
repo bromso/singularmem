@@ -231,9 +231,12 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
-        Err(CliError::QueryParse(ref e)) => {
-            eprintln!("singularmem: invalid search query: {e}");
-            ExitCode::from(1)
+        Err(CliError::Search(
+            e @ (singularmem_search::Error::NoIndexes
+            | singularmem_search::Error::HybridMissingIndex { .. }),
+        )) => {
+            eprintln!("singularmem: {e}");
+            ExitCode::from(2)
         }
         Err(e) => {
             eprintln!("singularmem: {e}");
@@ -256,8 +259,8 @@ enum CliError {
     InvalidId(#[from] ulid::DecodeError),
     #[error("could not open Tantivy index: {0}")]
     IndexOpen(String),
-    #[error("invalid search query: {0}")]
-    QueryParse(String),
+    #[error("{0}")]
+    Search(#[from] singularmem_search::Error),
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
@@ -482,50 +485,147 @@ fn cmd_export(store: &Store) -> Result<(), CliError> {
 }
 
 fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
-    use singularmem_search::{Index, Query, SearchOptions};
-    // Suppress unused-arg warnings; Task 10 wires these through.
-    let _ = (
-        &args.mode,
-        args.fetch_multiplier,
-        args.rrf_k,
-        args.show_ranks,
-        args.json,
-    );
-    let index_path = derive_index_path(store_path);
-    let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
+
+    let tantivy_path = derive_index_path(store_path);
+    let vectors_path = derive_vectors_path(store_path);
+    let has_lexical = tantivy_path.exists();
+    let has_vectors = vectors_path.exists();
+
+    // Resolve --mode auto → concrete mode (or NoIndexes error).
+    let resolved = match args.mode {
+        SearchMode::Auto => match (has_lexical, has_vectors) {
+            (true, true) => SearchMode::Hybrid,
+            (true, false) => {
+                tracing::info!(
+                    path = %vectors_path.display(),
+                    "no vector index; using lexical-only search"
+                );
+                SearchMode::Lexical
+            }
+            (false, true) => {
+                tracing::info!(
+                    path = %tantivy_path.display(),
+                    "no lexical index; using semantic-only search"
+                );
+                SearchMode::Semantic
+            }
+            (false, false) => return Err(CliError::Search(singularmem_search::Error::NoIndexes)),
+        },
+        m => m,
+    };
+
+    // Explicit-mode pre-flight checks (--mode auto bypasses these because it
+    // already degraded above).
+    match resolved {
+        SearchMode::Hybrid => {
+            if !has_lexical {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "lexical",
+                        path: tantivy_path,
+                    },
+                ));
+            }
+            if !has_vectors {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "semantic",
+                        path: vectors_path,
+                    },
+                ));
+            }
+        }
+        SearchMode::Lexical if !has_lexical => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: tantivy_path,
+            }));
+        }
+        SearchMode::Semantic if !has_vectors => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: vectors_path,
+            }));
+        }
+        _ => {}
+    }
+
     let query_str = args.queries.join(" ");
-    let query = Query::parse(&query_str).map_err(|e| CliError::QueryParse(e.to_string()))?;
-    let opts = SearchOptions {
+    let opts = HybridSearchOptions {
         limit: args.limit,
-        offset: args.offset,
+        fetch_multiplier: args.fetch_multiplier,
+        rrf_k: args.rrf_k,
         include_snippets: !args.no_snippets,
     };
-    let results = index
-        .search(&query, opts)
-        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
 
-    if results.total_matched == 0 {
+    // Open whichever indexes the resolved mode requires.
+    let lex_opt: Option<Index> = if matches!(resolved, SearchMode::Lexical | SearchMode::Hybrid) {
+        Some(Index::open(&tantivy_path)?)
+    } else {
+        None
+    };
+    let sem_opt: Option<EmbedderIndex> =
+        if matches!(resolved, SearchMode::Semantic | SearchMode::Hybrid) {
+            let embedder: Box<dyn singularmem_search::Embedder> =
+                match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                    Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
+                    _ => Box::new(singularmem_search::FastembedEmbedder::new()?),
+                };
+            Some(EmbedderIndex::open(&vectors_path, embedder)?)
+        } else {
+            None
+        };
+
+    let searcher = match (&lex_opt, &sem_opt) {
+        (Some(l), Some(s)) => HybridSearcher::new(l, s),
+        (Some(l), None) => HybridSearcher::lexical_only(l),
+        (None, Some(s)) => HybridSearcher::semantic_only(s),
+        (None, None) => unreachable!("pre-flight guarantees at least one index"),
+    };
+    let results = searcher.search(&query_str, &opts)?;
+
+    render_search_results(&results, args)?;
+    Ok(())
+}
+
+fn render_search_results(
+    results: &singularmem_search::HybridSearchResults,
+    args: &SearchArgs,
+) -> Result<(), CliError> {
+    use singularmem_search::ScoreKind;
+
+    if results.hits.is_empty() {
         tracing::info!("0 matches");
         return Ok(());
     }
 
     let mut out = io::stdout().lock();
+    if args.json {
+        serde_json::to_writer(&mut out, results)?;
+        writeln!(out)?;
+        return Ok(());
+    }
+
     for hit in &results.hits {
-        match args.format {
-            ListFormat::Ids => writeln!(out, "{}", hit.id)?,
-            ListFormat::Jsonl => {
-                let line = serde_json::json!({
-                    "id": hit.id.to_string(),
-                    "score": hit.score,
-                    "snippet": hit.snippet,
-                });
-                serde_json::to_writer(&mut out, &line)?;
-                writeln!(out)?;
-            }
-            ListFormat::Table => {
-                let snip = hit.snippet.as_deref().unwrap_or("").replace('\n', " ");
-                writeln!(out, "{:.4}\t{}\t{}", hit.score, hit.id, snip)?;
-            }
+        let tag = match hit.score_kind {
+            ScoreKind::Rrf => "rrf",
+            ScoreKind::Bm25 => "bm25",
+            ScoreKind::Cosine => "cos",
+        };
+        let snip = hit.snippet.as_deref().unwrap_or("").replace('\n', " ");
+        if args.show_ranks {
+            let lex = hit
+                .lexical_rank
+                .map_or_else(|| "—".to_string(), |r| r.to_string());
+            let sem = hit
+                .semantic_rank
+                .map_or_else(|| "—".to_string(), |r| r.to_string());
+            writeln!(
+                out,
+                "{}  {}={:.4}  lex={}  sem={}  {}",
+                hit.id, tag, hit.score, lex, sem, snip
+            )?;
+        } else {
+            writeln!(out, "{}  {}={:.4}  {}", hit.id, tag, hit.score, snip)?;
         }
     }
     Ok(())
