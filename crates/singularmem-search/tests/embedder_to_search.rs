@@ -15,7 +15,9 @@ fn ingest_then_semantic_search_finds_item() {
     let embedder_idx =
         EmbedderIndex::open(&vectors_path, Box::new(MockEmbedder::default())).unwrap();
     let store = Store::open_with_hook(&store_path, Box::new(embedder_idx)).unwrap();
-    let item = store.ingest(NewItem::text("the cat sat on the mat")).unwrap();
+    let item = store
+        .ingest(NewItem::text("the cat sat on the mat"))
+        .unwrap();
     drop(store);
 
     // Re-open EmbedderIndex for search; the hook's instance is now dropped.

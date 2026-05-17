@@ -230,10 +230,7 @@ impl Store {
     ///
     /// # Errors
     /// Same as `Store::open`.
-    pub fn open_with_hooks(
-        path: impl AsRef<Path>,
-        hooks: Vec<Box<dyn IndexHook>>,
-    ) -> Result<Self> {
+    pub fn open_with_hooks(path: impl AsRef<Path>, hooks: Vec<Box<dyn IndexHook>>) -> Result<Self> {
         Self::open_with_hook(path, Box::new(crate::hook::MultiHook::new(hooks)))
     }
 

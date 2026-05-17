@@ -82,11 +82,10 @@ impl FastembedEmbedder {
         let init = fastembed::InitOptions::new(model.fastembed())
             .with_cache_dir(cache)
             .with_show_download_progress(true);
-        let inner =
-            fastembed::TextEmbedding::try_new(init).map_err(|e| Error::ModelDownload {
-                model: model.model_id().to_string(),
-                reason: format!("{e}"),
-            })?;
+        let inner = fastembed::TextEmbedding::try_new(init).map_err(|e| Error::ModelDownload {
+            model: model.model_id().to_string(),
+            reason: format!("{e}"),
+        })?;
         Ok(Self {
             inner,
             model_id: model.model_id().to_string(),
@@ -108,8 +107,7 @@ impl FastembedEmbedder {
     pub fn from_files(model_dir: &Path, _model_id: &str) -> crate::Result<Self> {
         Err(Error::InvalidModelFiles {
             path: model_dir.to_path_buf(),
-            reason: "from_files is a planned v0.3.1 feature; not implemented in v0.3.0"
-                .to_string(),
+            reason: "from_files is a planned v0.3.1 feature; not implemented in v0.3.0".to_string(),
         })
     }
 }

@@ -525,4 +525,3 @@ fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings
         .assert()
         .success();
 }
-

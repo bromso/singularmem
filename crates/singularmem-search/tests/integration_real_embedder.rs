@@ -12,7 +12,10 @@ fn fastembed_default_model_works() {
     let v = e.embed("hello world").unwrap();
     assert_eq!(v.len(), 384);
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 0.01, "vector should be unit-length, got norm={norm}");
+    assert!(
+        (norm - 1.0).abs() < 0.01,
+        "vector should be unit-length, got norm={norm}"
+    );
 }
 
 #[test]

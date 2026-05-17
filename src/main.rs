@@ -260,9 +260,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         if vectors_path.exists() {
             let embedder: Box<dyn singularmem_search::Embedder> =
                 match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-                    Some("mock") => {
-                        Box::new(singularmem_search::testing::MockEmbedder::default())
-                    }
+                    Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
                     _ => match singularmem_search::FastembedEmbedder::new() {
                         Ok(e) => Box::new(e),
                         Err(e) => {
@@ -290,9 +288,9 @@ fn run(cli: Cli) -> Result<(), CliError> {
         }
 
         if !hooks.is_empty() {
-            store.set_hook(Some(Box::new(
-                singularmem_core::hook::MultiHook::new(hooks),
-            )));
+            store.set_hook(Some(Box::new(singularmem_core::hook::MultiHook::new(
+                hooks,
+            ))));
         }
     }
 
@@ -593,14 +591,16 @@ fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(
             "all-mini-lm-l6-v2" => singularmem_search::EmbeddingModel::AllMiniLmL6V2,
             "bge-small-en" => singularmem_search::EmbeddingModel::BgeSmallEnV15,
             "nomic-embed" => singularmem_search::EmbeddingModel::NomicEmbedTextV15,
-            other => return Err(CliError::Usage(format!("unknown --embedding-model: {other}"))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown --embedding-model: {other}"
+                )))
+            }
         };
 
         let embedder: Box<dyn singularmem_search::Embedder> =
             match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-                Some("mock") => {
-                    Box::new(singularmem_search::testing::MockEmbedder::default())
-                }
+                Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
                 _ => Box::new(
                     singularmem_search::FastembedEmbedder::with_model(model)
                         .map_err(|e| CliError::IndexOpen(format!("embedder init: {e}")))?,

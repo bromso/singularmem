@@ -49,19 +49,39 @@ pub enum Error {
 
     /// Embedding inference failure.
     #[error("embedding inference failed during {context}: {reason}")]
-    Embedding { context: &'static str, reason: String },
+    Embedding {
+        /// Short tag naming what the library was doing when inference failed.
+        context: &'static str,
+        /// Human-readable explanation from the underlying inference engine.
+        reason: String,
+    },
 
     /// Could not download embedding model weights.
     #[error("could not download embedding model {model}: {reason}")]
-    ModelDownload { model: String, reason: String },
+    ModelDownload {
+        /// The `model_id` the library attempted to download.
+        model: String,
+        /// Human-readable explanation from the downloader.
+        reason: String,
+    },
 
     /// Model files on disk are missing or invalid.
     #[error("invalid model files at {path}: {reason}; expected ONNX weights + tokenizer")]
-    InvalidModelFiles { path: std::path::PathBuf, reason: String },
+    InvalidModelFiles {
+        /// Filesystem path that was attempted.
+        path: std::path::PathBuf,
+        /// Human-readable explanation of what's missing or wrong.
+        reason: String,
+    },
 
     /// Vector dimension mismatch between the index metadata and the embedder.
     #[error("vector dimension mismatch: expected {expected}, got {got}")]
-    DimMismatch { expected: usize, got: usize },
+    DimMismatch {
+        /// Dimensionality expected by the index (from `VectorIndexMeta.dim`).
+        expected: usize,
+        /// Dimensionality supplied by the caller (from `Embedder::dim()` or the input vector).
+        got: usize,
+    },
 
     /// The vector index was built with a different model than the current one.
     #[error(
@@ -70,12 +90,20 @@ pub enum Error {
          run `singularmem reindex --with-embeddings --reset-vectors --force` to rebuild"
     )]
     ModelMismatch {
+        /// Filesystem path of the vector index directory.
         path: std::path::PathBuf,
+        /// The `model_id` recorded in `.meta.json`.
         found_model: String,
+        /// The `model_id` the current `Embedder` advertises.
         expected_model: String,
     },
 
     /// `USearch` library error.
     #[error("USearch error during {context}: {reason}")]
-    Usearch { context: &'static str, reason: String },
+    Usearch {
+        /// Short tag naming what the library was doing when `USearch` errored.
+        context: &'static str,
+        /// Human-readable explanation from `USearch`.
+        reason: String,
+    },
 }

@@ -7,7 +7,11 @@ use singularmem_search::Embedder;
 #[test]
 fn mock_embedder_has_consistent_dim() {
     let e = MockEmbedder::default();
-    assert_eq!(e.dim(), 384, "MockEmbedder uses the same default dim as all-MiniLM-L6-v2");
+    assert_eq!(
+        e.dim(),
+        384,
+        "MockEmbedder uses the same default dim as all-MiniLM-L6-v2"
+    );
 }
 
 #[test]

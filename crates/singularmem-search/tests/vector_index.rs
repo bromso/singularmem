@@ -55,7 +55,11 @@ fn reopen_with_different_model_returns_model_mismatch() {
 
     let result = VectorIndex::open(&path, &OtherMock);
     match result {
-        Err(singularmem_search::Error::ModelMismatch { found_model, expected_model, .. }) => {
+        Err(singularmem_search::Error::ModelMismatch {
+            found_model,
+            expected_model,
+            ..
+        }) => {
             assert_eq!(found_model, "mock-embedder@v1");
             assert_eq!(expected_model, "different-model@v1");
         }
@@ -67,7 +71,11 @@ fn reopen_with_different_model_returns_model_mismatch() {
 fn open_with_options_respects_hnsw_params() {
     let dir = TempDir::new().unwrap();
     let e = MockEmbedder::default();
-    let opts = VectorIndexOptions { hnsw_m: 32, hnsw_ef_construction: 256, expansion_search: 128 };
+    let opts = VectorIndexOptions {
+        hnsw_m: 32,
+        hnsw_ef_construction: 256,
+        expansion_search: 128,
+    };
     let idx = VectorIndex::open_with_options(dir.path().join("v"), &e, opts).unwrap();
     assert_eq!(idx.meta().hnsw_m, 32);
 }
@@ -102,7 +110,13 @@ fn add_with_wrong_dim_returns_dim_mismatch() {
     let id = ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
     let too_small = vec![0.0_f32; 128];
     let err = idx.add(id, &too_small).unwrap_err();
-    assert!(matches!(err, singularmem_search::Error::DimMismatch { expected: 384, got: 128 }));
+    assert!(matches!(
+        err,
+        singularmem_search::Error::DimMismatch {
+            expected: 384,
+            got: 128
+        }
+    ));
 }
 
 #[test]
@@ -111,7 +125,8 @@ fn remove_absent_id_is_noop() {
     let e = MockEmbedder::default();
     let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
     let id = ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
-    idx.remove(id).expect("remove of absent ID is no-op, not error");
+    idx.remove(id)
+        .expect("remove of absent ID is no-op, not error");
 }
 
 #[test]
@@ -129,7 +144,11 @@ fn add_increments_doc_count_and_remove_decrements_it() {
     assert!(idx.contains(id), "id should be present after add");
 
     idx.remove(id).unwrap();
-    assert_eq!(idx.doc_count().unwrap(), 0, "remove should decrement doc_count");
+    assert_eq!(
+        idx.doc_count().unwrap(),
+        0,
+        "remove should decrement doc_count"
+    );
     assert!(!idx.contains(id), "id should be absent after remove");
 }
 
@@ -142,7 +161,13 @@ fn search_with_wrong_dim_returns_dim_mismatch() {
     let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
     let wrong_dim = vec![0.0_f32; 128];
     let err = idx.search(&wrong_dim, 1).unwrap_err();
-    assert!(matches!(err, singularmem_search::Error::DimMismatch { expected: 384, got: 128 }));
+    assert!(matches!(
+        err,
+        singularmem_search::Error::DimMismatch {
+            expected: 384,
+            got: 128
+        }
+    ));
 }
 
 #[test]
@@ -163,5 +188,9 @@ fn search_returns_nearest_neighbours_by_cosine() {
     let hits = idx.search(&query, 2).unwrap();
     assert!(!hits.is_empty());
     assert_eq!(hits[0].id, id1, "highest similarity = same vector = id1");
-    assert!(hits[0].score > 0.99, "self-similarity should be ~1.0, got {}", hits[0].score);
+    assert!(
+        hits[0].score > 0.99,
+        "self-similarity should be ~1.0, got {}",
+        hits[0].score
+    );
 }

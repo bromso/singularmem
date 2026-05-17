@@ -27,4 +27,6 @@ pub use crate::model::EmbeddingModel;
 pub use crate::query::{Field, Query, QueryBuilder};
 pub use crate::result::{Hit, SearchOptions, SearchResults};
 pub use crate::semantic_query::{SemanticHit, SemanticSearchOptions, SemanticSearchResults};
-pub use crate::vector_index::{EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions};
+pub use crate::vector_index::{
+    EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions,
+};
