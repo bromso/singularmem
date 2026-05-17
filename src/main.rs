@@ -47,6 +47,8 @@ enum Command {
     Search(SearchArgs),
     /// Rebuild the Tantivy index from the `SQLite` store.
     Reindex(ReindexArgs),
+    /// Retrieve memory blocks formatted for an LLM prompt.
+    Retrieve(RetrieveArgs),
     /// \[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`.
     SemanticSearch(SemanticSearchArgs),
 }
@@ -211,6 +213,39 @@ struct SemanticSearchArgs {
     format: ListFormat,
 }
 
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+struct RetrieveArgs {
+    /// One or more query tokens. Multiple tokens are joined with a space
+    /// before being passed to the underlying hybrid search.
+    queries: Vec<String>,
+    /// Which adapter to use for formatting. Defaults to `plain`.
+    /// Sub-projects 3b/3c/3d add `claude`, `openai`, `gemini` to the registry.
+    #[arg(short = 'a', long, default_value = "plain")]
+    adapter: String,
+    /// Max memory blocks to include in the formatted output.
+    #[arg(short = 'l', long, default_value = "10")]
+    limit: usize,
+    /// Minimum score for a hit to be included.
+    #[arg(long, default_value = "0.0")]
+    min_score: f32,
+    /// Underlying search mode (passed through to `HybridSearcher`).
+    #[arg(short = 'm', long, value_enum, default_value_t = SearchMode::Auto)]
+    mode: SearchMode,
+    /// Per-ranker overfetch factor (hybrid only).
+    #[arg(long, default_value = "3")]
+    fetch_multiplier: usize,
+    /// RRF damping constant (hybrid only).
+    #[arg(long, default_value = "60")]
+    rrf_k: usize,
+    /// Emit `RetrievedContext` as JSON instead of adapter-formatted output.
+    #[arg(long)]
+    json: bool,
+    /// Print "Retrieved N blocks in Xms" to stderr after the formatted output.
+    #[arg(long)]
+    show_elapsed: bool,
+}
+
 fn main() -> ExitCode {
     // Subscribe tracing to stderr at WARN level by default; user can override
     // with RUST_LOG=… environment variable.
@@ -332,6 +367,22 @@ fn run(cli: Cli) -> Result<(), CliError> {
     run_command(cli.command, &store, &store_path)
 }
 
+/// Registry of available adapters. Sub-projects 3b/3c/3d each add one line
+/// here AND one line to the root `Cargo.toml` `[dependencies]` section.
+///
+/// Order matters for the unknown-adapter error message: list adapters in
+/// the order they should appear when the CLI tells the user what's
+/// available.
+#[allow(dead_code)]
+fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
+    vec![
+        Box::new(singularmem_retrieve::PlainAdapter),
+        // 3b will add: Box::new(singularmem_adapter_claude::ClaudeAdapter),
+        // 3c will add: Box::new(singularmem_adapter_openai::OpenAiAdapter),
+        // 3d will add: Box::new(singularmem_adapter_gemini::GeminiAdapter),
+    ]
+}
+
 fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(), CliError> {
     match command {
         Command::Ingest(args) => cmd_ingest(store, args),
@@ -341,6 +392,7 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::Export => cmd_export(store),
         Command::Search(args) => cmd_search(store_path, &args),
         Command::Reindex(args) => cmd_reindex(store, store_path, &args),
+        Command::Retrieve(args) => cmd_retrieve(store, store_path, &args),
         Command::SemanticSearch(args) => cmd_semantic_search(store_path, &args),
     }
 }
@@ -665,6 +717,14 @@ fn render_search_results(
         }
     }
     Ok(())
+}
+
+fn cmd_retrieve(_store: &Store, _store_path: &Path, _args: &RetrieveArgs) -> Result<(), CliError> {
+    // Task 11 implements this. The stub exists so Task 10's --help test
+    // compiles without dragging in retrieval logic.
+    Err(CliError::Usage(
+        "cmd_retrieve not yet implemented; see Task 11".into(),
+    ))
 }
 
 fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(), CliError> {

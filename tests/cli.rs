@@ -884,6 +884,23 @@ fn search_json_flag_emits_valid_json() {
 }
 
 #[test]
+fn retrieve_help_lists_flags_and_default_adapter() {
+    singularmem()
+        .args(["retrieve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--adapter"))
+        .stdout(predicate::str::contains("--limit"))
+        .stdout(predicate::str::contains("--min-score"))
+        .stdout(predicate::str::contains("--mode"))
+        .stdout(predicate::str::contains("--fetch-multiplier"))
+        .stdout(predicate::str::contains("--rrf-k"))
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--show-elapsed"))
+        .stdout(predicate::str::contains("default: plain"));
+}
+
+#[test]
 fn semantic_search_deprecated_alias_still_works() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("store.db");
