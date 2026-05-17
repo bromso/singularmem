@@ -47,6 +47,8 @@ enum Command {
     Search(SearchArgs),
     /// Rebuild the Tantivy index from the `SQLite` store.
     Reindex(ReindexArgs),
+    /// Retrieve memory blocks formatted for an LLM prompt.
+    Retrieve(RetrieveArgs),
     /// \[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`.
     SemanticSearch(SemanticSearchArgs),
 }
@@ -211,6 +213,39 @@ struct SemanticSearchArgs {
     format: ListFormat,
 }
 
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+struct RetrieveArgs {
+    /// One or more query tokens. Multiple tokens are joined with a space
+    /// before being passed to the underlying hybrid search.
+    queries: Vec<String>,
+    /// Which adapter to use for formatting. Defaults to `plain`.
+    /// Sub-projects 3b/3c/3d add `claude`, `openai`, `gemini` to the registry.
+    #[arg(short = 'a', long, default_value = "plain")]
+    adapter: String,
+    /// Max memory blocks to include in the formatted output.
+    #[arg(short = 'l', long, default_value = "10")]
+    limit: usize,
+    /// Minimum score for a hit to be included.
+    #[arg(long, default_value = "0.0")]
+    min_score: f32,
+    /// Underlying search mode (passed through to `HybridSearcher`).
+    #[arg(short = 'm', long, value_enum, default_value_t = SearchMode::Auto)]
+    mode: SearchMode,
+    /// Per-ranker overfetch factor (hybrid only).
+    #[arg(long, default_value = "3")]
+    fetch_multiplier: usize,
+    /// RRF damping constant (hybrid only).
+    #[arg(long, default_value = "60")]
+    rrf_k: usize,
+    /// Emit `RetrievedContext` as JSON instead of adapter-formatted output.
+    #[arg(long)]
+    json: bool,
+    /// Print "Retrieved N blocks in Xms" to stderr after the formatted output.
+    #[arg(long)]
+    show_elapsed: bool,
+}
+
 fn main() -> ExitCode {
     // Subscribe tracing to stderr at WARN level by default; user can override
     // with RUST_LOG=… environment variable.
@@ -239,6 +274,21 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
+        Err(CliError::Retrieve(ref e)) => {
+            // Map retrieve-crate errors to the same exit codes as their
+            // underlying search/core errors, plus EmptyQuery → 1.
+            let code = match e {
+                singularmem_retrieve::Error::Search(
+                    singularmem_search::Error::NoIndexes
+                    | singularmem_search::Error::HybridMissingIndex { .. }
+                    | singularmem_search::Error::IndexMissing { .. },
+                )
+                | singularmem_retrieve::Error::Core(singularmem_core::Error::NotFound { .. }) => 2,
+                _ => 1,
+            };
+            eprintln!("singularmem: {e}");
+            ExitCode::from(code)
+        }
         Err(e) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(1)
@@ -262,6 +312,8 @@ enum CliError {
     IndexOpen(String),
     #[error("{0}")]
     Search(#[from] singularmem_search::Error),
+    #[error("{0}")]
+    Retrieve(#[from] singularmem_retrieve::Error),
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
@@ -332,6 +384,21 @@ fn run(cli: Cli) -> Result<(), CliError> {
     run_command(cli.command, &store, &store_path)
 }
 
+/// Registry of available adapters. Sub-projects 3b/3c/3d each add one line
+/// here AND one line to the root `Cargo.toml` `[dependencies]` section.
+///
+/// Order matters for the unknown-adapter error message: list adapters in
+/// the order they should appear when the CLI tells the user what's
+/// available.
+fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
+    vec![
+        Box::new(singularmem_retrieve::PlainAdapter),
+        // 3b will add: Box::new(singularmem_adapter_claude::ClaudeAdapter),
+        // 3c will add: Box::new(singularmem_adapter_openai::OpenAiAdapter),
+        // 3d will add: Box::new(singularmem_adapter_gemini::GeminiAdapter),
+    ]
+}
+
 fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(), CliError> {
     match command {
         Command::Ingest(args) => cmd_ingest(store, args),
@@ -341,6 +408,7 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::Export => cmd_export(store),
         Command::Search(args) => cmd_search(store_path, &args),
         Command::Reindex(args) => cmd_reindex(store, store_path, &args),
+        Command::Retrieve(args) => cmd_retrieve(store, store_path, &args),
         Command::SemanticSearch(args) => cmd_semantic_search(store_path, &args),
     }
 }
@@ -355,6 +423,95 @@ fn derive_vectors_path(store_path: &Path) -> PathBuf {
     let mut s = store_path.to_path_buf().into_os_string();
     s.push(".vectors");
     PathBuf::from(s)
+}
+
+/// Result of resolving a `SearchMode` for a given store path. Returned by
+/// `resolve_search_mode`.
+struct ResolvedSearchMode {
+    /// The concrete search mode (never `Auto` after resolution).
+    mode: SearchMode,
+    /// Tantivy sidecar path.
+    tantivy_path: PathBuf,
+    /// Vectors sidecar path.
+    vectors_path: PathBuf,
+}
+
+/// Probe the store's sidecar directories and resolve `requested_mode`
+/// (which may be `Auto`) into a concrete mode (`Lexical`, `Semantic`,
+/// or `Hybrid`). Surfaces the same set of errors `cmd_search` does:
+/// `NoIndexes` for auto + neither sidecar, `HybridMissingIndex` for
+/// explicit hybrid + one missing, `IndexMissing` for explicit
+/// lexical/semantic + that sidecar missing.
+fn resolve_search_mode(
+    store_path: &Path,
+    requested_mode: SearchMode,
+) -> Result<ResolvedSearchMode, CliError> {
+    let tantivy_path = derive_index_path(store_path);
+    let vectors_path = derive_vectors_path(store_path);
+    let has_lexical = tantivy_path.exists();
+    let has_vectors = vectors_path.exists();
+
+    // Resolve --mode auto → concrete mode (or NoIndexes error).
+    let resolved = match requested_mode {
+        SearchMode::Auto => match (has_lexical, has_vectors) {
+            (true, true) => SearchMode::Hybrid,
+            (true, false) => {
+                tracing::info!(
+                    path = %vectors_path.display(),
+                    "no vector index; using lexical-only search"
+                );
+                SearchMode::Lexical
+            }
+            (false, true) => {
+                tracing::info!(
+                    path = %tantivy_path.display(),
+                    "no lexical index; using semantic-only search"
+                );
+                SearchMode::Semantic
+            }
+            (false, false) => return Err(CliError::Search(singularmem_search::Error::NoIndexes)),
+        },
+        m => m,
+    };
+
+    // Explicit-mode pre-flight checks (Auto bypassed via the degradation above).
+    match resolved {
+        SearchMode::Hybrid => {
+            if !has_lexical {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "lexical",
+                        path: tantivy_path,
+                    },
+                ));
+            }
+            if !has_vectors {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "semantic",
+                        path: vectors_path,
+                    },
+                ));
+            }
+        }
+        SearchMode::Lexical if !has_lexical => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: tantivy_path,
+            }));
+        }
+        SearchMode::Semantic if !has_vectors => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: vectors_path,
+            }));
+        }
+        _ => {}
+    }
+
+    Ok(ResolvedSearchMode {
+        mode: resolved,
+        tantivy_path,
+        vectors_path,
+    })
 }
 
 fn default_store_path() -> PathBuf {
@@ -488,67 +645,12 @@ fn cmd_export(store: &Store) -> Result<(), CliError> {
 fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
-    let tantivy_path = derive_index_path(store_path);
-    let vectors_path = derive_vectors_path(store_path);
-    let has_lexical = tantivy_path.exists();
-    let has_vectors = vectors_path.exists();
-
-    // Resolve --mode auto → concrete mode (or NoIndexes error).
-    let resolved = match args.mode {
-        SearchMode::Auto => match (has_lexical, has_vectors) {
-            (true, true) => SearchMode::Hybrid,
-            (true, false) => {
-                tracing::info!(
-                    path = %vectors_path.display(),
-                    "no vector index; using lexical-only search"
-                );
-                SearchMode::Lexical
-            }
-            (false, true) => {
-                tracing::info!(
-                    path = %tantivy_path.display(),
-                    "no lexical index; using semantic-only search"
-                );
-                SearchMode::Semantic
-            }
-            (false, false) => return Err(CliError::Search(singularmem_search::Error::NoIndexes)),
-        },
-        m => m,
-    };
-
-    // Explicit-mode pre-flight checks (--mode auto bypasses these because it
-    // already degraded above).
-    match resolved {
-        SearchMode::Hybrid => {
-            if !has_lexical {
-                return Err(CliError::Search(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "lexical",
-                        path: tantivy_path,
-                    },
-                ));
-            }
-            if !has_vectors {
-                return Err(CliError::Search(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "semantic",
-                        path: vectors_path,
-                    },
-                ));
-            }
-        }
-        SearchMode::Lexical if !has_lexical => {
-            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
-                path: tantivy_path,
-            }));
-        }
-        SearchMode::Semantic if !has_vectors => {
-            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
-                path: vectors_path,
-            }));
-        }
-        _ => {}
-    }
+    let resolved = resolve_search_mode(store_path, args.mode)?;
+    let ResolvedSearchMode {
+        mode: resolved_mode,
+        tantivy_path,
+        vectors_path,
+    } = resolved;
 
     let query_str = args.queries.join(" ");
     let opts = HybridSearchOptions {
@@ -559,13 +661,14 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     };
 
     // Open whichever indexes the resolved mode requires.
-    let lex_opt: Option<Index> = if matches!(resolved, SearchMode::Lexical | SearchMode::Hybrid) {
-        Some(Index::open(&tantivy_path)?)
-    } else {
-        None
-    };
+    let lex_opt: Option<Index> =
+        if matches!(resolved_mode, SearchMode::Lexical | SearchMode::Hybrid) {
+            Some(Index::open(&tantivy_path)?)
+        } else {
+            None
+        };
     let sem_opt: Option<EmbedderIndex> =
-        if matches!(resolved, SearchMode::Semantic | SearchMode::Hybrid) {
+        if matches!(resolved_mode, SearchMode::Semantic | SearchMode::Hybrid) {
             let embedder: Box<dyn singularmem_search::Embedder> =
                 match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
                     Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
@@ -628,6 +731,97 @@ fn render_search_results(
         } else {
             writeln!(out, "{}  {}={:.4}  {}", hit.id, tag, hit.score, snip)?;
         }
+    }
+    Ok(())
+}
+
+fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result<(), CliError> {
+    use singularmem_retrieve::{Adapter, RetrieveOptions, Retriever};
+    use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
+
+    // Adapter lookup before any I/O so unknown-adapter errors fail fast.
+    let adapters = known_adapters();
+    let adapter: &dyn Adapter = adapters
+        .iter()
+        .find(|a| a.name() == args.adapter.as_str())
+        .map(std::convert::AsRef::as_ref)
+        .ok_or_else(|| {
+            let known: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
+            CliError::Usage(format!(
+                "unknown adapter '{}'; known adapters: {}",
+                args.adapter,
+                known.join(", ")
+            ))
+        })?;
+
+    // Mode resolution + sidecar probing — same helper cmd_search uses.
+    let ResolvedSearchMode {
+        mode: resolved_mode,
+        tantivy_path,
+        vectors_path,
+    } = resolve_search_mode(store_path, args.mode)?;
+
+    let query_str = args.queries.join(" ");
+    let search_opts = HybridSearchOptions {
+        limit: args
+            .limit
+            .saturating_mul(args.fetch_multiplier)
+            .max(args.limit),
+        fetch_multiplier: args.fetch_multiplier,
+        rrf_k: args.rrf_k,
+        include_snippets: false, // we use full content, not snippets
+    };
+    let opts = RetrieveOptions {
+        max_blocks: args.limit,
+        min_score: args.min_score,
+        search: search_opts,
+    };
+
+    // Open whichever indexes the resolved mode requires.
+    let lex_opt: Option<Index> =
+        if matches!(resolved_mode, SearchMode::Lexical | SearchMode::Hybrid) {
+            Some(Index::open(&tantivy_path)?)
+        } else {
+            None
+        };
+    let sem_opt: Option<EmbedderIndex> =
+        if matches!(resolved_mode, SearchMode::Semantic | SearchMode::Hybrid) {
+            let embedder: Box<dyn singularmem_search::Embedder> =
+                match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                    Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
+                    _ => Box::new(singularmem_search::FastembedEmbedder::new()?),
+                };
+            Some(EmbedderIndex::open(&vectors_path, embedder)?)
+        } else {
+            None
+        };
+
+    let searcher = match (&lex_opt, &sem_opt) {
+        (Some(l), Some(s)) => HybridSearcher::new(l, s),
+        (Some(l), None) => HybridSearcher::lexical_only(l),
+        (None, Some(s)) => HybridSearcher::semantic_only(s),
+        (None, None) => unreachable!("pre-flight guarantees at least one index"),
+    };
+    let retriever = Retriever::new(store, &searcher);
+    let context = retriever.retrieve(&query_str, &opts)?;
+
+    let mut out = io::stdout().lock();
+    if args.json {
+        serde_json::to_writer(&mut out, &context)?;
+        writeln!(out)?;
+    } else {
+        let formatted = adapter.format(&context);
+        write!(out, "{formatted}")?;
+    }
+    drop(out);
+
+    if args.show_elapsed {
+        eprintln!(
+            "Retrieved {} blocks in {:.2}ms (considered {})",
+            context.blocks.len(),
+            context.elapsed.as_secs_f64() * 1000.0,
+            context.total_considered
+        );
     }
     Ok(())
 }

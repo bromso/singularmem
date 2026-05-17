@@ -2748,6 +2748,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "singularmem-core",
+ "singularmem-retrieve",
  "singularmem-search",
  "tempfile",
  "thiserror 2.0.18",
@@ -2771,6 +2772,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "singularmem-retrieve"
+version = "0.4.0"
+dependencies = [
+ "jiff",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "singularmem-core",
+ "singularmem-search",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
