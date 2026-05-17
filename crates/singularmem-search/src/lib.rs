@@ -13,6 +13,7 @@ pub mod model;
 pub mod query;
 pub mod result;
 pub mod testing;
+pub mod vector_index;
 
 mod hook;
 mod reindex;
@@ -24,3 +25,4 @@ pub use crate::index::{Index, IndexOptions};
 pub use crate::model::EmbeddingModel;
 pub use crate::query::{Field, Query, QueryBuilder};
 pub use crate::result::{Hit, SearchOptions, SearchResults};
+pub use crate::vector_index::{VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions};

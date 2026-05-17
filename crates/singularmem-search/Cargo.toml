@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 jiff = { workspace = true }
 fastembed = { workspace = true }
 usearch = { workspace = true }
+bincode = { workspace = true }
 dirs = "5"
 # ort-sys is a transitive dep of fastembed via ort. Cargo resolves ort v2.0.0-rc.9
 # to ort-sys rc.12+, but those versions changed the API in a way that is
