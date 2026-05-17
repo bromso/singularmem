@@ -9,7 +9,8 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use singularmem_core::{NewItem, Store};
-use singularmem_search::{Index, Query, SearchOptions};
+use singularmem_search::testing::MockEmbedder;
+use singularmem_search::{EmbedderIndex, Index, Query, SearchOptions, SemanticSearchOptions};
 use tempfile::TempDir;
 
 /// Seed `n` items into a fresh store+index (hook-wired) and return the
@@ -66,5 +67,44 @@ fn bench_reindex_throughput(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_search_latency, bench_reindex_throughput);
+fn bench_embed_throughput(c: &mut Criterion) {
+    use singularmem_search::Embedder;
+    let e = MockEmbedder::default();
+    c.bench_function("embed_throughput", |b| {
+        b.iter(|| {
+            e.embed("benchmark item with moderate content length")
+                .unwrap()
+        });
+    });
+}
+
+fn bench_semantic_search_latency(c: &mut Criterion) {
+    let dir = TempDir::new().unwrap();
+    let embedder_idx =
+        EmbedderIndex::open(dir.path().join("v"), Box::new(MockEmbedder::default())).unwrap();
+    let store = Store::open_with_hook(dir.path().join("store.db"), Box::new(embedder_idx)).unwrap();
+    for i in 0..10_000 {
+        store
+            .ingest(NewItem::text(format!("seed item number {i}")))
+            .unwrap();
+    }
+    drop(store);
+    let embedder_idx =
+        EmbedderIndex::open(dir.path().join("v"), Box::new(MockEmbedder::default())).unwrap();
+    c.bench_function("semantic_search_latency", |b| {
+        b.iter(|| {
+            embedder_idx
+                .semantic_search("seed item number 5000", &SemanticSearchOptions::default())
+                .unwrap()
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_search_latency,
+    bench_reindex_throughput,
+    bench_embed_throughput,
+    bench_semantic_search_latency,
+);
 criterion_main!(benches);
