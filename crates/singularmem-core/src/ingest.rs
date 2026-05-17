@@ -24,7 +24,7 @@ impl Store {
     ///
     /// Panics if the internal connection `Mutex` is poisoned (i.e. another
     /// thread panicked while holding the lock).
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn ingest(&self, item: NewItem) -> Result<Item> {
         self.assert_writable("ingest")?;
 
@@ -107,6 +107,41 @@ impl Store {
             source: e,
         })?;
 
+        // Invoke the IndexHook if one is attached. Per Principle VII,
+        // hook failures DO NOT roll back the SQLite write — the item is
+        // durably stored, and the hook implementation is expected to log
+        // a warning naming the item ID so the user can recover via
+        // `singularmem reindex`.
+        if let Some(hook) = self
+            .hook
+            .lock()
+            .expect("store hook mutex poisoned")
+            .as_ref()
+        {
+            let item_for_hook = Item {
+                id,
+                content: item.content.clone(),
+                created_at: now,
+                supersedes: item.supersedes,
+                tags: normalised_tags.clone(),
+                source: item.source.clone(),
+                metadata: item.metadata.clone(),
+            };
+            if let Err(e) = hook.on_ingest(&item_for_hook) {
+                tracing::warn!(
+                    item_id = %id,
+                    error = %e,
+                    "IndexHook::on_ingest failed; item is durably stored in SQLite but un-searchable. Run `singularmem reindex` to recover."
+                );
+            } else if let Err(e) = hook.commit() {
+                tracing::warn!(
+                    item_id = %id,
+                    error = %e,
+                    "IndexHook::commit failed after on_ingest; item may or may not be searchable until next commit succeeds. Run `singularmem reindex` to be sure."
+                );
+            }
+        }
+
         Ok(Item {
             id,
             content: item.content,
@@ -129,7 +164,7 @@ impl Store {
     ///
     /// Panics if the internal connection `Mutex` is poisoned (i.e. another
     /// thread panicked while holding the lock).
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn ingest_many<I: IntoIterator<Item = NewItem>>(&self, items: I) -> Result<Vec<Item>> {
         self.assert_writable("ingest_many")?;
 
@@ -224,6 +259,30 @@ impl Store {
             context: "committing bulk ingest transaction",
             source: e,
         })?;
+
+        // Hook integration: per-item on_ingest, then ONE commit at the end.
+        if let Some(hook) = self
+            .hook
+            .lock()
+            .expect("store hook mutex poisoned")
+            .as_ref()
+        {
+            for item in &out {
+                if let Err(e) = hook.on_ingest(item) {
+                    tracing::warn!(
+                        item_id = %item.id,
+                        error = %e,
+                        "IndexHook::on_ingest failed during bulk ingest; item is durably stored but un-searchable. Run `singularmem reindex` to recover."
+                    );
+                }
+            }
+            if let Err(e) = hook.commit() {
+                tracing::warn!(
+                    error = %e,
+                    "IndexHook::commit failed after bulk ingest; items may or may not be searchable until next commit succeeds. Run `singularmem reindex` to be sure."
+                );
+            }
+        }
 
         Ok(out)
     }
