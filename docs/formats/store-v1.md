@@ -186,3 +186,132 @@ stable across Tantivy major version bumps; a future Singularmem release
 that upgrades Tantivy may require `singularmem reindex` (or auto-trigger
 one) on first open. See Tantivy's upstream documentation for the
 canonical format reference.
+
+## USearch vector sidecar (optional, format unstable across USearch versions)
+
+Singularmem v0.3.0+ creates an optional USearch vector index in a sidecar
+directory next to the SQLite store. Like the Tantivy sidecar, this is
+**additive** — it does NOT bump `format_version` and a third-party loader
+that only reads SQLite is unaffected by its presence or absence. The vector
+sidecar is **opt-in**: it is only created when the user runs
+`singularmem reindex --with-embeddings`.
+
+### Directory layout
+
+```
+<store_path>.vectors/          ← sidecar root (e.g. store.db.vectors/)
+├── .meta.json                 ← VectorIndexMeta (JSON, stable schema)
+├── index.usearch              ← USearch HNSW graph (binary, version-pinned)
+└── keymap.bin                 ← BTreeMap<u64, ItemId> forward map (bincode)
+```
+
+The path convention is `<store_path>.vectors/` (e.g. if the store is at
+`/data/store.db`, the vector sidecar is at `/data/store.db.vectors/`).
+
+### `.meta.json` — VectorIndexMeta schema
+
+The metadata file is a single JSON object with the following fields:
+
+```json
+{
+  "format_version": "1",
+  "model_id": "sentence-transformers/all-MiniLM-L6-v2@v1",
+  "dim": 384,
+  "distance": "cosine",
+  "hnsw_m": 16,
+  "hnsw_ef_construction": 128,
+  "created_at": "2026-05-17T12:00:00.000000000Z"
+}
+```
+
+| Field | Type | Purpose |
+|---|---|---|
+| `format_version` | `"1"` (string) | Metadata schema version. Currently always `"1"`. |
+| `model_id` | string | Stable embedding model identifier, e.g. `"sentence-transformers/all-MiniLM-L6-v2@v1"`. The `@v1` suffix anchors to a specific weight revision; future weight updates use a new suffix and trigger a reindex prompt. |
+| `dim` | integer | Embedding dimension. Must match the model's output dimension (e.g. 384 for all-MiniLM-L6-v2). |
+| `distance` | `"cosine"` | Distance metric used in the HNSW graph. Currently always `"cosine"`. |
+| `hnsw_m` | integer | HNSW connectivity parameter M. Default: 16. Higher values improve recall at the cost of build time and memory. |
+| `hnsw_ef_construction` | integer | HNSW ef parameter during construction. Default: 128. Higher values improve recall at the cost of build time. |
+| `created_at` | RFC 3339 | Wall-clock time the sidecar was first created. |
+
+When opening an existing sidecar, Singularmem reads `.meta.json` and
+compares `model_id` and `dim` against the current embedder. If either
+differs, `Error::ModelMismatch` is returned and the user must run
+`singularmem reindex --with-embeddings --reset-vectors --force` to rebuild.
+
+### `keymap.bin` — forward keymap schema
+
+`keymap.bin` is a [bincode](https://docs.rs/bincode/1/) serialisation of
+the `Keymap` struct, which contains a `BTreeMap<u64, ItemId>` (forward map:
+USearch key → ULID) and a parallel reverse map. The canonical persisted
+shape (the one a third-party loader needs to read) is the forward map only:
+
+```
+BTreeMap<u64, ItemId>
+  key   — sequential u64 assigned at insertion time, starting at 0.
+  value — 26-character ULID string (Crockford base32, uppercase).
+```
+
+Bincode encoding: little-endian, variable-length integers disabled (bincode
+1.x defaults). The map is preceded by its length as a `u64` element count,
+followed by `(u64_key, [u8; 26])` pairs in ascending key order.
+
+A third-party loader that only needs to translate USearch result keys to
+item IDs can deserialise the forward map with any bincode 1.x-compatible
+library.
+
+### HNSW parameters (v0.3.0 defaults)
+
+| Parameter | Value | Notes |
+|---|---|---|
+| `hnsw_m` | 16 | Connectivity. Increase to 32–64 for higher recall on large collections. |
+| `hnsw_ef_construction` | 128 | Build-time ef. Increase to 256 for higher recall at slower build. |
+| `expansion_search` | 64 | Query-time ef. Increase to 128 for higher recall at ~2× query time. |
+| Distance metric | Cosine | Vectors are L2-normalised before insertion; cosine similarity = dot product. |
+| Scalar type | f32 | 32-bit floats. |
+
+### USearch version pin and upgrade path
+
+The `index.usearch` binary format is owned by the USearch project and is
+**NOT guaranteed stable across USearch major or minor version bumps**.
+Singularmem v0.3.0 pins `usearch = "=2.15.3"`. If a future Singularmem
+release upgrades USearch (e.g. to `=3.x`), the binary format may change
+and existing `index.usearch` files will not load correctly.
+
+**Version-bump → reindex requirement:** After a Singularmem upgrade that
+includes a USearch version bump, run:
+
+```bash
+singularmem reindex --with-embeddings --reset-vectors --force
+```
+
+This deletes the existing `index.usearch` (and `keymap.bin`) and rebuilds
+from SQLite using the new USearch library. The `.meta.json` is rewritten
+with the same `model_id` (assuming the embedding model was not also
+changed). If both USearch and the embedding model change simultaneously,
+use the same command — `--reset-vectors` clears the entire sidecar
+directory.
+
+### Writing a third-party vector loader
+
+A third-party tool that wants to read Singularmem's vector index without
+linking against the Singularmem crate can follow these steps:
+
+1. Confirm `<store_path>.vectors/.meta.json` exists. If absent, the store
+   has no vector sidecar (opt-in feature not activated).
+2. Read `.meta.json`. Validate `format_version == "1"`. Note `model_id`,
+   `dim`, and `distance`.
+3. Read `keymap.bin` with a bincode 1.x deserialiser as
+   `BTreeMap<u64, String>` (the value is the ULID string, 26 ASCII bytes).
+4. Open `index.usearch` with USearch `=2.15.3` (or the version in the
+   Singularmem release you are targeting). Construct an index with the same
+   `dim` and `distance` as in `.meta.json`, then call `index.load(path)`.
+5. Issue KNN queries: `index.search(query_vector, k)` returns `(keys, distances)`.
+   Translate `key → ItemId` via the forward keymap from step 3.
+6. Look up the full item in SQLite using the `ItemId` (see the "Writing a
+   third-party loader" section above for the SQLite walkthrough).
+
+**Important:** `index.usearch` was written by USearch `=2.15.3`. Using a
+different USearch version to open it may segfault or return corrupt data.
+If you need to load the data with a different version, re-embed from SQLite
+and build a new index.

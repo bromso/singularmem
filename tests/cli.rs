@@ -355,3 +355,173 @@ fn no_index_flag_skips_hook_wiring() {
         .assert()
         .success();
 }
+
+// ── Task 10 (Phase E): semantic-search verb ────────────────────────────────
+
+fn derive_vectors_path_for_test(db: &std::path::Path) -> std::path::PathBuf {
+    let mut s = db.to_path_buf().into_os_string();
+    s.push(".vectors");
+    std::path::PathBuf::from(s)
+}
+
+#[test]
+fn semantic_search_with_mock_embedder_finds_ingested_item() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Pre-create the .vectors/ dir so auto-wiring fires during ingest.
+    // (reindex --with-embeddings creates this in production; we shortcut here.)
+    let vectors_path = derive_vectors_path_for_test(&db);
+    std::fs::create_dir_all(&vectors_path).unwrap();
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "cat sat on mat",
+        ])
+        .assert()
+        .success();
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "cat sat on mat",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("01")); // any ULID prefix = a hit
+}
+
+#[test]
+fn semantic_search_missing_index_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    // No .vectors/ dir — EmbedderIndex::open should fail → exit 2.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+// ── Task 11 (Phase E): reindex --with-embeddings ──────────────────────────
+
+#[test]
+fn reindex_with_embeddings_creates_vectors_dir() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let vectors_path = derive_vectors_path_for_test(&db);
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "first item",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        !vectors_path.exists(),
+        ".vectors/ should not exist before reindex --with-embeddings"
+    );
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .assert()
+        .success();
+
+    assert!(vectors_path.exists(), ".vectors/ should be created");
+}
+
+#[test]
+fn reset_vectors_without_force_fails() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+            "--reset-vectors",
+        ])
+        .assert()
+        .failure();
+}
+
+// ── Task 12 (Phase E): auto-wiring MultiHook ─────────────────────────────
+
+#[test]
+fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Trigger .vectors/ creation via reindex --with-embeddings.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .assert()
+        .success();
+
+    // Now ingest. Both Tantivy and Embedder hooks should fire because .vectors/ exists.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "auto-wired-both item",
+        ])
+        .assert()
+        .success();
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Lexical search finds it.
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "auto-wired-both"])
+        .assert()
+        .success();
+
+    // Semantic search finds it.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "auto-wired-both",
+        ])
+        .assert()
+        .success();
+}

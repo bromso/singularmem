@@ -2,7 +2,8 @@
 //! consistent state.
 
 use singularmem_core::{NewItem, Store};
-use singularmem_search::{Index, Query, SearchOptions};
+use singularmem_search::testing::MockEmbedder;
+use singularmem_search::{EmbedderIndex, Index, Query, SearchOptions, SemanticSearchOptions};
 use std::sync::Arc;
 use std::thread;
 use tempfile::TempDir;
@@ -71,4 +72,59 @@ fn parallel_readers_during_reindex_see_consistent_state() {
     let query = Query::parse("seed").unwrap();
     let results = index.search(&query, SearchOptions::default()).unwrap();
     assert_eq!(results.total_matched, 500);
+}
+
+/// Readers that open their own [`EmbedderIndex`] concurrently with a
+/// reindexing writer should not panic or deadlock. `USearch`'s writer-lock
+/// may serialise the opens; this test accepts either serialised or truly
+/// concurrent behaviour — the invariant is that all operations return `Ok`.
+///
+/// Note: reader count is 4 and iteration count is 20 to keep the test fast
+/// even if `USearch` serialises all opens under an internal mutex.
+#[test]
+fn parallel_semantic_searchers_during_reindex_see_consistent_state() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("store.db");
+    let vectors_path = dir.path().join("v");
+
+    // Seed 200 items with embedder attached.
+    {
+        let embedder_idx =
+            EmbedderIndex::open(&vectors_path, Box::new(MockEmbedder::default())).unwrap();
+        let store = Store::open_with_hook(&store_path, Box::new(embedder_idx)).unwrap();
+        for i in 0..200 {
+            store.ingest(NewItem::text(format!("item {i}"))).unwrap();
+        }
+    }
+
+    let vectors_arc = Arc::new(vectors_path.clone());
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let path = Arc::clone(&vectors_arc);
+        readers.push(thread::spawn(move || {
+            for _ in 0..20 {
+                let idx = EmbedderIndex::open(&*path, Box::new(MockEmbedder::default())).unwrap();
+                let _ = idx
+                    .semantic_search("item 50", &SemanticSearchOptions::default())
+                    .unwrap();
+            }
+        }));
+    }
+
+    // Move vectors_path and store_path into the closure directly (no clone needed
+    // because the main thread no longer uses them after this point).
+    let reindexer = thread::spawn(move || {
+        use singularmem_core::IndexHook as _;
+        let store = Store::open(&store_path).unwrap();
+        let idx = EmbedderIndex::open(&vectors_path, Box::new(MockEmbedder::default())).unwrap();
+        for item in store.list().unwrap().filter_map(Result::ok) {
+            idx.on_reindex(&item).unwrap();
+        }
+        idx.commit().unwrap();
+    });
+
+    for r in readers {
+        r.join().unwrap();
+    }
+    reindexer.join().unwrap();
 }
