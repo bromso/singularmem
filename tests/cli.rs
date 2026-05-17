@@ -473,3 +473,56 @@ fn reset_vectors_without_force_fails() {
         .failure();
 }
 
+// ── Task 12 (Phase E): auto-wiring MultiHook ─────────────────────────────
+
+#[test]
+fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Trigger .vectors/ creation via reindex --with-embeddings.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .assert()
+        .success();
+
+    // Now ingest. Both Tantivy and Embedder hooks should fire because .vectors/ exists.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "auto-wired-both item",
+        ])
+        .assert()
+        .success();
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Lexical search finds it.
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "auto-wired-both"])
+        .assert()
+        .success();
+
+    // Semantic search finds it.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "auto-wired-both",
+        ])
+        .assert()
+        .success();
+}
+
