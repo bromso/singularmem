@@ -144,3 +144,45 @@ Rules:
 
 A loader that follows these steps interoperates with any Singularmem
 store at `format_version = 1` regardless of which binary wrote it.
+
+## Tantivy sidecar index (optional, format unstable across Tantivy versions)
+
+Singularmem v0.2.0+ creates an optional Tantivy index in a sidecar
+directory next to the SQLite store. The sidecar is **additive** — it does
+NOT bump `format_version` and a third-party loader that only reads SQLite
+is unaffected by its presence or absence.
+
+### Path convention
+
+Default: `<store_path>.tantivy/` (e.g. `store.db.tantivy/`).
+Configurable via `StoreOptions.index_path` in the Rust library; the CLI's
+`--store PATH` flag implies `PATH.tantivy/` and there is no separate
+override at v0.2.0.
+
+### Schema (Tantivy 0.22.1)
+
+| Field name   | Type     | Options                       | Purpose |
+|--------------|----------|-------------------------------|---------|
+| `content`    | text     | TEXT + STORED                 | Searchable item text; default-search field. |
+| `tags`       | text     | STRING + STORED               | Exact-match tag queries via `tags:value`. |
+| `source`     | text     | TEXT + STORED                 | Tokenized provenance label; default-search field. |
+| `id`         | text     | STRING + STORED               | ULID for hit→Item lookup. |
+| `created_at` | date     | INDEXED + STORED + FAST       | Range filtering (reserved for v0.3+). |
+| `supersedes` | text     | STRING + STORED               | Revision pointer (reserved for v0.3+). |
+
+`metadata` is intentionally NOT indexed in v0.2.0.
+
+### Rebuild from SQLite
+
+The Tantivy sidecar can be deleted at any time. The next `Store::open_with_hook`
+auto-rebuilds it from a full SQLite iteration on first ingest (one-time
+cost), or the user can run `singularmem reindex` to rebuild ahead of time.
+
+### Tantivy on-disk format compatibility
+
+The Tantivy index directory's on-disk format is owned by the Tantivy
+project (`tantivy = 0.22.1` in v0.2.0). The format is NOT guaranteed
+stable across Tantivy major version bumps; a future Singularmem release
+that upgrades Tantivy may require `singularmem reindex` (or auto-trigger
+one) on first open. See Tantivy's upstream documentation for the
+canonical format reference.
