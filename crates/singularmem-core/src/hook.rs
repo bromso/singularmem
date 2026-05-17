@@ -40,3 +40,64 @@ pub trait IndexHook: Send + Sync {
     /// Returns an error if the commit fails.
     fn commit(&self) -> Result<()>;
 }
+
+/// Composite `IndexHook` that fans calls out to multiple underlying hooks.
+///
+/// Each hook runs independently; one hook's failure does NOT prevent later
+/// hooks from running (the loop catches errors per-hook, logs via
+/// `tracing::warn!`, and returns the FIRST error after all hooks have been
+/// tried).
+///
+/// Use this when you need to wire two or more `IndexHook` implementations
+/// (e.g. Tantivy lexical + `USearch` vector) into a single `Store`. The
+/// `Store::open_with_hooks` constructor wraps a `Vec<Box<dyn IndexHook>>`
+/// into a `MultiHook` for you.
+pub struct MultiHook {
+    hooks: Vec<Box<dyn IndexHook>>,
+}
+
+impl MultiHook {
+    /// Construct from an ordered list of hooks. Order is preserved: hooks
+    /// run in the order given, which only matters for visibility of
+    /// `tracing::warn!` lines.
+    #[must_use]
+    pub fn new(hooks: Vec<Box<dyn IndexHook>>) -> Self {
+        Self { hooks }
+    }
+}
+
+impl IndexHook for MultiHook {
+    fn on_ingest(&self, item: &crate::Item) -> crate::Result<()> {
+        run_all(self.hooks.iter(), "on_ingest", |h| h.on_ingest(item))
+    }
+
+    fn on_reindex(&self, item: &crate::Item) -> crate::Result<()> {
+        run_all(self.hooks.iter(), "on_reindex", |h| h.on_reindex(item))
+    }
+
+    fn commit(&self) -> crate::Result<()> {
+        run_all(self.hooks.iter(), "commit", |h| h.commit())
+    }
+}
+
+fn run_all<'a, I, F>(hooks: I, op: &'static str, mut call: F) -> crate::Result<()>
+where
+    I: Iterator<Item = &'a Box<dyn IndexHook>>,
+    F: FnMut(&dyn IndexHook) -> crate::Result<()>,
+{
+    let mut first_err: Option<crate::Error> = None;
+    for (i, hook) in hooks.enumerate() {
+        if let Err(e) = call(hook.as_ref()) {
+            tracing::warn!(
+                hook_index = i,
+                op = op,
+                error = %e,
+                "MultiHook member failed; other hooks will still run"
+            );
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}

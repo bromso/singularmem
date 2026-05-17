@@ -225,6 +225,18 @@ impl Store {
         Ok(store)
     }
 
+    /// Open with multiple `IndexHook`s. Equivalent to constructing a
+    /// `MultiHook` from the list and calling `open_with_hook`.
+    ///
+    /// # Errors
+    /// Same as `Store::open`.
+    pub fn open_with_hooks(
+        path: impl AsRef<Path>,
+        hooks: Vec<Box<dyn IndexHook>>,
+    ) -> Result<Self> {
+        Self::open_with_hook(path, Box::new(crate::hook::MultiHook::new(hooks)))
+    }
+
     /// Replace the `IndexHook` on an already-open store. Pass `None` to detach.
     ///
     /// # Panics
