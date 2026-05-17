@@ -417,3 +417,59 @@ fn semantic_search_missing_index_exits_2() {
         .code(2);
 }
 
+// ── Task 11 (Phase E): reindex --with-embeddings ──────────────────────────
+
+#[test]
+fn reindex_with_embeddings_creates_vectors_dir() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let vectors_path = derive_vectors_path_for_test(&db);
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "first item",
+        ])
+        .assert()
+        .success();
+
+    assert!(
+        !vectors_path.exists(),
+        ".vectors/ should not exist before reindex --with-embeddings"
+    );
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .assert()
+        .success();
+
+    assert!(vectors_path.exists(), ".vectors/ should be created");
+}
+
+#[test]
+fn reset_vectors_without_force_fails() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+            "--reset-vectors",
+        ])
+        .assert()
+        .failure();
+}
+
