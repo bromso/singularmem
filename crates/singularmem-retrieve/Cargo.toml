@@ -1,0 +1,29 @@
+[package]
+name = "singularmem-retrieve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Retrieval + adapter contract for Singularmem memory stores."
+
+[features]
+testing = []
+
+[lints]
+workspace = true
+
+[dependencies]
+singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search" }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+singularmem-search = { path = "../singularmem-search", features = ["testing"] }
+singularmem-core = { path = "../singularmem-core" }
