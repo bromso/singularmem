@@ -114,6 +114,25 @@ fn remove_absent_id_is_noop() {
     idx.remove(id).expect("remove of absent ID is no-op, not error");
 }
 
+#[test]
+fn add_increments_doc_count_and_remove_decrements_it() {
+    let dir = TempDir::new().unwrap();
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+    let id = ItemId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+    assert_eq!(idx.doc_count().unwrap(), 0, "fresh index has zero docs");
+    assert!(!idx.contains(id), "id not yet added");
+
+    let v = e.embed("hello").unwrap();
+    idx.add(id, &v).unwrap();
+    assert_eq!(idx.doc_count().unwrap(), 1);
+    assert!(idx.contains(id), "id should be present after add");
+
+    idx.remove(id).unwrap();
+    assert_eq!(idx.doc_count().unwrap(), 0, "remove should decrement doc_count");
+    assert!(!idx.contains(id), "id should be absent after remove");
+}
+
 // ── Task 7: search (KNN) ──────────────────────────────────────────────────
 
 #[test]

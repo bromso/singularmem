@@ -369,6 +369,18 @@ impl VectorIndex {
         Ok(self.inner.lock().expect("usearch mutex poisoned").size() as u64)
     }
 
+    /// Returns `true` if the given [`ItemId`] is present in the index.
+    ///
+    /// This is an O(1) lookup via the in-memory keymap reverse index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the keymap mutex is poisoned.
+    #[must_use]
+    pub fn contains(&self, id: ItemId) -> bool {
+        self.keymap.lock().expect("keymap mutex poisoned").reverse.contains_key(&id)
+    }
+
     // ── Search ────────────────────────────────────────────────────────────
 
     /// Find the `k` nearest neighbours to `query_vector` by cosine similarity.
