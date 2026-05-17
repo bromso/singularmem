@@ -12,10 +12,9 @@ pub mod error;
 pub mod retriever;
 pub mod testing;
 
-pub use crate::adapter::Adapter;
+pub use crate::adapter::{Adapter, PlainAdapter};
 pub use crate::error::{Error, Result};
 pub use crate::retriever::{MemoryBlock, RetrieveOptions, RetrievedContext, Retriever};
 
 // Re-exports activated in subsequent tasks:
-// pub use crate::adapter::PlainAdapter;
 // pub use crate::testing::MockAdapter;
