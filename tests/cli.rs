@@ -473,6 +473,33 @@ fn reset_vectors_without_force_fails() {
         .failure();
 }
 
+// ── Task 9: new search flags ──────────────────────────────────────────────
+
+#[test]
+fn search_help_lists_mode_flag() {
+    singularmem()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--mode"))
+        .stdout(predicate::str::contains("auto"))
+        .stdout(predicate::str::contains("lexical"))
+        .stdout(predicate::str::contains("semantic"))
+        .stdout(predicate::str::contains("hybrid"));
+}
+
+#[test]
+fn search_help_lists_show_ranks_and_json_flags() {
+    singularmem()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--show-ranks"))
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--fetch-multiplier"))
+        .stdout(predicate::str::contains("--rrf-k"));
+}
+
 // ── Task 12 (Phase E): auto-wiring MultiHook ─────────────────────────────
 
 #[test]

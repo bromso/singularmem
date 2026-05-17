@@ -127,20 +127,51 @@ struct RevisionsArgs {
     format: ListFormat,
 }
 
+/// Which search backend(s) to use for `search`.
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+enum SearchMode {
+    /// Use hybrid when both `.tantivy/` and `.vectors/` exist; degrade to
+    /// whichever single index is present; error when neither exists.
+    Auto,
+    /// Tantivy BM25 only.
+    Lexical,
+    /// `USearch` cosine only.
+    Semantic,
+    /// RRF-fused lexical + semantic; error if either is missing.
+    Hybrid,
+}
+
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct SearchArgs {
     /// One or more query tokens. Multiple tokens become an implicit AND.
     queries: Vec<String>,
+    /// Which backend(s) to use. `auto` picks hybrid when both sidecars exist,
+    /// falls back to whichever one is present, and errors when neither is.
+    #[arg(short = 'm', long, value_enum, default_value_t = SearchMode::Auto)]
+    mode: SearchMode,
     /// Max hits to return.
-    #[arg(long, default_value = "20")]
+    #[arg(short = 'l', long, default_value = "20")]
     limit: usize,
-    /// Skip first N hits (pagination).
+    /// Skip first N hits (pagination, lexical mode only).
     #[arg(long, default_value = "0")]
     offset: usize,
+    /// Per-ranker overfetch factor; hybrid only. Default 3.
+    #[arg(long, default_value = "3")]
+    fetch_multiplier: usize,
+    /// RRF damping constant; hybrid only. Default 60.
+    #[arg(long, default_value = "60")]
+    rrf_k: usize,
     /// Suppress snippet highlighting (faster).
     #[arg(long)]
     no_snippets: bool,
-    /// Output format.
+    /// Include per-ranker rank columns in human output.
+    #[arg(long)]
+    show_ranks: bool,
+    /// Emit JSON results instead of human-readable output.
+    #[arg(long)]
+    json: bool,
+    /// Output format. (Legacy; `--json` and `--show-ranks` are preferred.)
     #[arg(long, value_enum, default_value_t = ListFormat::Table)]
     format: ListFormat,
 }
@@ -452,6 +483,14 @@ fn cmd_export(store: &Store) -> Result<(), CliError> {
 
 fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{Index, Query, SearchOptions};
+    // Suppress unused-arg warnings; Task 10 wires these through.
+    let _ = (
+        &args.mode,
+        args.fetch_multiplier,
+        args.rrf_k,
+        args.show_ranks,
+        args.json,
+    );
     let index_path = derive_index_path(store_path);
     let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
     let query_str = args.queries.join(" ");
