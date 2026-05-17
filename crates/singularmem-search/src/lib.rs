@@ -25,4 +25,4 @@ pub use crate::index::{Index, IndexOptions};
 pub use crate::model::EmbeddingModel;
 pub use crate::query::{Field, Query, QueryBuilder};
 pub use crate::result::{Hit, SearchOptions, SearchResults};
-pub use crate::vector_index::{VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions};
+pub use crate::vector_index::{EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions};

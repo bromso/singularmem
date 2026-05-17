@@ -101,7 +101,7 @@ pub(crate) struct Keymap {
 ///
 /// # Thread safety
 ///
-/// Both the inner `usearch::Index` and the [`Keymap`] are guarded by [`Mutex`].
+/// Both the inner `usearch::Index` and the keymap are guarded by [`Mutex`].
 /// Multiple threads can call [`add`](VectorIndex::add),
 /// [`remove`](VectorIndex::remove), and [`search`](VectorIndex::search)
 /// concurrently; each operation acquires its own lock. [`save`](VectorIndex::save)
@@ -438,4 +438,85 @@ pub struct VectorHit {
     /// Cosine similarity score in `[-1.0, 1.0]`. Higher = more similar.
     /// Self-similarity of an L2-normalised vector is 1.0.
     pub score: f32,
+}
+
+// ── EmbedderIndex ─────────────────────────────────────────────────────────
+
+/// Composite [`singularmem_core::IndexHook`] that embeds ingested items and
+/// stores their vectors in a [`VectorIndex`].
+///
+/// `EmbedderIndex` bridges the core trait boundary: `on_ingest` embeds the
+/// item's content via the [`Embedder`] and adds the vector to the
+/// [`VectorIndex`]; `commit` flushes both the `USearch` binary and `keymap.bin`
+/// to disk.
+///
+/// Wire into a [`singularmem_core::Store`] via
+/// [`Store::open_with_hook`](singularmem_core::Store::open_with_hook) (single
+/// hook) or [`Store::open_with_hooks`](singularmem_core::Store::open_with_hooks)
+/// (alongside a Tantivy `Index` via `MultiHook`).
+pub struct EmbedderIndex {
+    embedder: Box<dyn Embedder>,
+    vector_index: VectorIndex,
+}
+
+impl EmbedderIndex {
+    /// Open (or create) an `EmbedderIndex` at `dir` using the given `embedder`.
+    ///
+    /// Delegates to [`VectorIndex::open`] for the on-disk setup and
+    /// model-identity check.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`VectorIndex::open`].
+    pub fn open(dir: impl AsRef<Path>, embedder: Box<dyn Embedder>) -> Result<Self> {
+        let vector_index = VectorIndex::open(dir, embedder.as_ref())?;
+        Ok(Self { embedder, vector_index })
+    }
+
+    /// Returns a reference to the underlying [`VectorIndex`].
+    pub const fn vector_index(&self) -> &VectorIndex {
+        &self.vector_index
+    }
+
+    /// Returns a reference to the underlying [`Embedder`].
+    pub fn embedder(&self) -> &dyn Embedder {
+        self.embedder.as_ref()
+    }
+}
+
+impl singularmem_core::IndexHook for EmbedderIndex {
+    /// Embed `item.content` and add the vector to the [`VectorIndex`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`singularmem_core::Error::Io`] wrapping the search error
+    /// message if embedding or indexing fails.
+    fn on_ingest(&self, item: &singularmem_core::Item) -> singularmem_core::Result<()> {
+        let v = self.embedder.embed(&item.content).map_err(|ref e| to_core_err(e))?;
+        self.vector_index.add(item.id, &v).map_err(|ref e| to_core_err(e))
+    }
+
+    /// Equivalent to `on_ingest`: re-embed and re-index.
+    fn on_reindex(&self, item: &singularmem_core::Item) -> singularmem_core::Result<()> {
+        self.on_ingest(item)
+    }
+
+    /// Flush the [`VectorIndex`] to disk (`index.usearch` + `keymap.bin`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`singularmem_core::Error::Io`] wrapping the search error
+    /// message if the flush fails.
+    fn commit(&self) -> singularmem_core::Result<()> {
+        self.vector_index.save().map_err(|ref e| to_core_err(e))
+    }
+}
+
+/// Convert a search crate [`Error`] into a [`singularmem_core::Error`].
+///
+/// The core trait cannot reference the search error type without creating a
+/// circular dependency, so we wrap as `Error::Io` carrying the full message.
+/// Type information is lost but the full string survives for logging.
+fn to_core_err(e: &crate::Error) -> singularmem_core::Error {
+    singularmem_core::Error::Io(std::io::Error::other(e.to_string()))
 }
