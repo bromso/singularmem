@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "getrandom 0.2.17",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-retrieve"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jiff",
  "rusqlite",
@@ -2791,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-search"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bincode",
  "criterion",
