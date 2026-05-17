@@ -200,10 +200,7 @@ impl HybridSearcher<'_> {
         match (self.lexical, self.semantic) {
             (Some(lex), None) => Self::search_lexical_only(lex, query, opts, fetch_n, start),
             (None, Some(sem)) => Self::search_semantic_only(sem, query, opts, fetch_n, start),
-            (Some(_lex), Some(_sem)) => {
-                // Task 7 replaces this stub with RRF fusion.
-                Err(Error::NoIndexes)
-            }
+            (Some(lex), Some(sem)) => Self::search_hybrid(lex, sem, query, opts, fetch_n, start),
             (None, None) => Err(Error::NoIndexes),
         }
     }
@@ -280,6 +277,75 @@ impl HybridSearcher<'_> {
             elapsed: start.elapsed(),
             total_fused,
             lexical_hits: None,
+            semantic_hits,
+        })
+    }
+
+    fn search_hybrid(
+        lex: &Index,
+        sem: &EmbedderIndex,
+        query: &str,
+        opts: &HybridSearchOptions,
+        fetch_n: usize,
+        start: std::time::Instant,
+    ) -> Result<HybridSearchResults> {
+        // Lexical sub-search: overfetch by fetch_multiplier; snippets only if
+        // requested (we still need the lex `Hit`s for snippet provenance below).
+        let parsed = crate::Query::parse(query)?;
+        let lex_opts = SearchOptions {
+            limit: fetch_n,
+            offset: 0,
+            include_snippets: opts.include_snippets,
+        };
+        let lex_res = lex.search(&parsed, lex_opts)?;
+        let lexical_hits = Some(lex_res.total_matched);
+
+        // Semantic sub-search: overfetch likewise.
+        let sem_opts = SemanticSearchOptions {
+            limit: fetch_n,
+            min_score: 0.0,
+        };
+        let sem_res = sem.semantic_search(query, &sem_opts)?;
+        let semantic_hits = Some(sem_res.total_indexed);
+
+        // Build ItemId-keyed lookups so we can re-attach ranks + snippets after
+        // fusion.
+        let lex_ids: Vec<ItemId> = lex_res.hits.iter().map(|h| h.id).collect();
+        let sem_ids: Vec<ItemId> = sem_res.hits.iter().map(|h| h.id).collect();
+        let lex_rank: HashMap<ItemId, usize> = lex_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i + 1))
+            .collect();
+        let sem_rank: HashMap<ItemId, usize> = sem_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i + 1))
+            .collect();
+        let snippets: HashMap<ItemId, Option<String>> =
+            lex_res.hits.into_iter().map(|h| (h.id, h.snippet)).collect();
+
+        // Fuse and truncate to `limit`.
+        let fused = rrf_fuse(&lex_ids, &sem_ids, opts.rrf_k);
+        let total_fused = fused.len();
+        let hits: Vec<HybridHit> = fused
+            .into_iter()
+            .take(opts.limit)
+            .map(|(id, rrf_score)| HybridHit {
+                id,
+                score: rrf_score,
+                score_kind: ScoreKind::Rrf,
+                lexical_rank: lex_rank.get(&id).copied(),
+                semantic_rank: sem_rank.get(&id).copied(),
+                snippet: snippets.get(&id).cloned().flatten(),
+            })
+            .collect();
+
+        Ok(HybridSearchResults {
+            hits,
+            elapsed: start.elapsed(),
+            total_fused,
+            lexical_hits,
             semantic_hits,
         })
     }
@@ -489,5 +555,120 @@ mod tests {
         }
         assert_eq!(r.lexical_hits, None);
         assert!(r.semantic_hits.is_some());
+    }
+
+    #[test]
+    fn hybrid_search_fuses_lexical_and_semantic() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+        let sem_path = dir.path().join("sem");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let sem_hook =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi = singularmem_core::hook::MultiHook::new(vec![
+            Box::new(lex_hook),
+            Box::new(sem_hook),
+        ]);
+        let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+        store
+            .ingest(NewItem::text("the quick brown fox jumps over"))
+            .unwrap();
+        store
+            .ingest(NewItem::text("lazy dogs sleep all day"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let lex = Index::open(&lex_path).unwrap();
+        let sem =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let searcher = HybridSearcher::new(&lex, &sem);
+        let opts = HybridSearchOptions::default();
+        let r = searcher.search("fox", &opts).expect("search ok");
+
+        assert!(!r.hits.is_empty());
+        // First hit should have score_kind Rrf and at least one rank populated.
+        let h0 = &r.hits[0];
+        assert_eq!(h0.score_kind, ScoreKind::Rrf);
+        assert!(h0.lexical_rank.is_some() || h0.semantic_rank.is_some());
+        assert!(r.lexical_hits.is_some());
+        assert!(r.semantic_hits.is_some());
+    }
+
+    #[test]
+    fn hybrid_snippet_provenance_from_lexical() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+        let sem_path = dir.path().join("sem");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let sem_hook =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi = singularmem_core::hook::MultiHook::new(vec![
+            Box::new(lex_hook),
+            Box::new(sem_hook),
+        ]);
+        let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+        store
+            .ingest(NewItem::text("a memorable phrase about foxes"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let lex = Index::open(&lex_path).unwrap();
+        let sem =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let searcher = HybridSearcher::new(&lex, &sem);
+        let r = searcher
+            .search("foxes", &HybridSearchOptions::default())
+            .unwrap();
+        // For a doc that appears in the lexical ranker, snippet must be Some.
+        let hit_with_lex_rank = r
+            .hits
+            .iter()
+            .find(|h| h.lexical_rank.is_some())
+            .expect("expected at least one lexically-matched hit");
+        assert!(
+            hit_with_lex_rank.snippet.is_some(),
+            "doc with lexical_rank must carry a snippet when include_snippets=true"
+        );
+    }
+
+    #[test]
+    fn hybrid_search_respects_limit() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+        let sem_path = dir.path().join("sem");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let sem_hook =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi = singularmem_core::hook::MultiHook::new(vec![
+            Box::new(lex_hook),
+            Box::new(sem_hook),
+        ]);
+        let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+        for i in 0..30 {
+            store
+                .ingest(NewItem::text(format!("repeated word number {i}")))
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let lex = Index::open(&lex_path).unwrap();
+        let sem =
+            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let searcher = HybridSearcher::new(&lex, &sem);
+        let opts = HybridSearchOptions {
+            limit: 5,
+            ..HybridSearchOptions::default()
+        };
+        let r = searcher.search("repeated", &opts).unwrap();
+        assert!(r.hits.len() <= 5, "got {} hits, expected ≤ 5", r.hits.len());
     }
 }
