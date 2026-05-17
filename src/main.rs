@@ -274,6 +274,21 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
+        Err(CliError::Retrieve(ref e)) => {
+            // Map retrieve-crate errors to the same exit codes as their
+            // underlying search/core errors, plus EmptyQuery → 1.
+            let code = match e {
+                singularmem_retrieve::Error::Search(
+                    singularmem_search::Error::NoIndexes
+                    | singularmem_search::Error::HybridMissingIndex { .. }
+                    | singularmem_search::Error::IndexMissing { .. },
+                )
+                | singularmem_retrieve::Error::Core(singularmem_core::Error::NotFound { .. }) => 2,
+                _ => 1,
+            };
+            eprintln!("singularmem: {e}");
+            ExitCode::from(code)
+        }
         Err(e) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(1)
@@ -297,6 +312,8 @@ enum CliError {
     IndexOpen(String),
     #[error("{0}")]
     Search(#[from] singularmem_search::Error),
+    #[error("{0}")]
+    Retrieve(#[from] singularmem_retrieve::Error),
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
@@ -373,7 +390,6 @@ fn run(cli: Cli) -> Result<(), CliError> {
 /// Order matters for the unknown-adapter error message: list adapters in
 /// the order they should appear when the CLI tells the user what's
 /// available.
-#[allow(dead_code)]
 fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
     vec![
         Box::new(singularmem_retrieve::PlainAdapter),
@@ -719,12 +735,95 @@ fn render_search_results(
     Ok(())
 }
 
-fn cmd_retrieve(_store: &Store, _store_path: &Path, _args: &RetrieveArgs) -> Result<(), CliError> {
-    // Task 11 implements this. The stub exists so Task 10's --help test
-    // compiles without dragging in retrieval logic.
-    Err(CliError::Usage(
-        "cmd_retrieve not yet implemented; see Task 11".into(),
-    ))
+fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result<(), CliError> {
+    use singularmem_retrieve::{Adapter, RetrieveOptions, Retriever};
+    use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
+
+    // Adapter lookup before any I/O so unknown-adapter errors fail fast.
+    let adapters = known_adapters();
+    let adapter: &dyn Adapter = adapters
+        .iter()
+        .find(|a| a.name() == args.adapter.as_str())
+        .map(std::convert::AsRef::as_ref)
+        .ok_or_else(|| {
+            let known: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
+            CliError::Usage(format!(
+                "unknown adapter '{}'; known adapters: {}",
+                args.adapter,
+                known.join(", ")
+            ))
+        })?;
+
+    // Mode resolution + sidecar probing — same helper cmd_search uses.
+    let ResolvedSearchMode {
+        mode: resolved_mode,
+        tantivy_path,
+        vectors_path,
+    } = resolve_search_mode(store_path, args.mode)?;
+
+    let query_str = args.queries.join(" ");
+    let search_opts = HybridSearchOptions {
+        limit: args
+            .limit
+            .saturating_mul(args.fetch_multiplier)
+            .max(args.limit),
+        fetch_multiplier: args.fetch_multiplier,
+        rrf_k: args.rrf_k,
+        include_snippets: false, // we use full content, not snippets
+    };
+    let opts = RetrieveOptions {
+        max_blocks: args.limit,
+        min_score: args.min_score,
+        search: search_opts,
+    };
+
+    // Open whichever indexes the resolved mode requires.
+    let lex_opt: Option<Index> =
+        if matches!(resolved_mode, SearchMode::Lexical | SearchMode::Hybrid) {
+            Some(Index::open(&tantivy_path)?)
+        } else {
+            None
+        };
+    let sem_opt: Option<EmbedderIndex> =
+        if matches!(resolved_mode, SearchMode::Semantic | SearchMode::Hybrid) {
+            let embedder: Box<dyn singularmem_search::Embedder> =
+                match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                    Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
+                    _ => Box::new(singularmem_search::FastembedEmbedder::new()?),
+                };
+            Some(EmbedderIndex::open(&vectors_path, embedder)?)
+        } else {
+            None
+        };
+
+    let searcher = match (&lex_opt, &sem_opt) {
+        (Some(l), Some(s)) => HybridSearcher::new(l, s),
+        (Some(l), None) => HybridSearcher::lexical_only(l),
+        (None, Some(s)) => HybridSearcher::semantic_only(s),
+        (None, None) => unreachable!("pre-flight guarantees at least one index"),
+    };
+    let retriever = Retriever::new(store, &searcher);
+    let context = retriever.retrieve(&query_str, &opts)?;
+
+    let mut out = io::stdout().lock();
+    if args.json {
+        serde_json::to_writer(&mut out, &context)?;
+        writeln!(out)?;
+    } else {
+        let formatted = adapter.format(&context);
+        write!(out, "{formatted}")?;
+    }
+    drop(out);
+
+    if args.show_elapsed {
+        eprintln!(
+            "Retrieved {} blocks in {:.2}ms (considered {})",
+            context.blocks.len(),
+            context.elapsed.as_secs_f64() * 1000.0,
+            context.total_considered
+        );
+    }
+    Ok(())
 }
 
 fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(), CliError> {

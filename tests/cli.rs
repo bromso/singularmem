@@ -939,3 +939,28 @@ fn semantic_search_deprecated_alias_still_works() {
         .stdout(predicate::str::contains("cos="))
         .stderr(predicate::str::contains("deprecated"));
 }
+
+#[test]
+fn retrieve_with_default_adapter_emits_plain_format() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "the quick brown fox jumps",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "retrieve", "fox"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## memory 1"))
+        .stdout(predicate::str::contains("the quick brown fox"));
+}
