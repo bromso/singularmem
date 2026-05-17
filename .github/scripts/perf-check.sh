@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Enforce the five perf budgets from Constitution Principle X.
+# Enforce the six perf budgets from Constitution Principle X.
 # Reads criterion's per-bench estimates.json (stable JSON schema) rather
 # than parsing CLI bencher output.
-# Exit codes: 0 success, 11=size, 12=cold start, 13=ingest, 14=query, 15=semantic.
+# Exit codes: 0 success, 11=size, 12=cold start, 13=ingest, 14=query,
+# 15=semantic, 16=hybrid.
 
 set -euo pipefail
 
@@ -78,9 +79,20 @@ if awk -v v="$SEM_MS" 'BEGIN { exit !(v >= 100) }'; then
     exit 15
 fi
 
+# 6. Hybrid search latency: < 150 ms (median of criterion estimates.json)
+# bench path: target/criterion/hybrid_search_latency/new/estimates.json
+# (same single-level path as search_latency_p95 and semantic_search_latency.)
+HYBRID_NS=$(read_median_ns "hybrid_search_latency")
+HYBRID_MS=$(awk -v ns="$HYBRID_NS" 'BEGIN { printf "%.2f", ns / 1e6 }')
+if awk -v v="$HYBRID_MS" 'BEGIN { exit !(v >= 150) }'; then
+    echo "FAIL: hybrid search latency ${HYBRID_MS} ms exceeds 150 ms" >&2
+    exit 16
+fi
+
 echo "All perf budgets satisfied:"
 echo "  binary size:       ${SIZE_BYTES} bytes (limit ${SIZE_LIMIT})"
 echo "  cold start (p50):  ${COLD_START_P50} ms (limit 200)"
 echo "  ingest throughput: ${THROUGHPUT} items/s (limit 50)"
 echo "  search latency:    ${QUERY_MS} ms (limit 100)"
 echo "  semantic search:   ${SEM_MS} ms (limit 100)"
+echo "  hybrid search:     ${HYBRID_MS} ms (limit 150)"
