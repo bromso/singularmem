@@ -6,15 +6,18 @@
 
 #![forbid(unsafe_code)]
 
+pub mod embedder;
 pub mod error;
 pub mod index;
 pub mod query;
 pub mod result;
+pub mod testing;
 
 mod hook;
 mod reindex;
 mod schema;
 
+pub use crate::embedder::Embedder;
 pub use crate::error::{Error, Result};
 pub use crate::index::{Index, IndexOptions};
 pub use crate::query::{Field, Query, QueryBuilder};
