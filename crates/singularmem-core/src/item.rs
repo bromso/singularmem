@@ -18,7 +18,7 @@ use ulid::Ulid;
 /// # Display and parsing
 ///
 /// `Display` always emits uppercase. `FromStr` accepts either case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ItemId(Ulid);
 
@@ -325,5 +325,17 @@ mod tests {
         item.metadata = serde_json::json!({"k": "v"});
         let normalised = validate(&item).expect("valid");
         assert_eq!(normalised, vec!["bar", "foo"]); // sorted
+    }
+
+    #[test]
+    fn item_id_orders_by_ulid_bytes() {
+        // Two ULIDs in known order; the first lexicographically precedes the second.
+        let a: ItemId = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("valid");
+        let b: ItemId = "01BX5ZZKBKACTAV9WEVGEMMVRZ".parse().expect("valid");
+        assert!(a < b, "lexicographically smaller ULID must sort first");
+
+        let mut v = vec![b, a];
+        v.sort();
+        assert_eq!(v, vec![a, b], "sort must produce ascending order");
     }
 }
