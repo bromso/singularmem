@@ -796,3 +796,89 @@ fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings
         .assert()
         .success();
 }
+
+#[test]
+fn search_show_ranks_flag_includes_columns() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "show ranks fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--show-ranks",
+            "show ranks fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lex="))
+        .stdout(predicate::str::contains("sem="));
+}
+
+#[test]
+fn search_json_flag_emits_valid_json() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "json output fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--json",
+            "fixture",
+        ])
+        .output()
+        .expect("ran");
+    assert!(out.status.success(), "expected success, got {out:?}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let hits = parsed
+        .get("hits")
+        .expect("hits field")
+        .as_array()
+        .expect("array");
+    assert!(!hits.is_empty(), "expected at least one hit");
+    let h0 = &hits[0];
+    assert!(h0.get("id").is_some(), "hit must have id");
+    assert!(h0.get("score").is_some(), "hit must have score");
+    assert!(h0.get("score_kind").is_some(), "hit must have score_kind");
+    // lexical_rank/semantic_rank may be null but the keys must exist.
+    assert!(h0.get("lexical_rank").is_some());
+    assert!(h0.get("semantic_rank").is_some());
+}
