@@ -44,7 +44,11 @@ pub struct VectorIndexOptions {
 
 impl Default for VectorIndexOptions {
     fn default() -> Self {
-        Self { hnsw_m: 16, hnsw_ef_construction: 128, expansion_search: 64 }
+        Self {
+            hnsw_m: 16,
+            hnsw_ef_construction: 128,
+            expansion_search: 64,
+        }
     }
 }
 
@@ -171,11 +175,10 @@ impl VectorIndex {
         // ── Load or create meta ───────────────────────────────────────────
         let meta = if meta_path.exists() {
             let text = fs::read_to_string(&meta_path).map_err(Error::Io)?;
-            let m: VectorIndexMeta =
-                serde_json::from_str(&text).map_err(|e| Error::Embedding {
-                    context: "parsing existing .meta.json",
-                    reason: format!("{e}"),
-                })?;
+            let m: VectorIndexMeta = serde_json::from_str(&text).map_err(|e| Error::Embedding {
+                context: "parsing existing .meta.json",
+                reason: format!("{e}"),
+            })?;
             if m.model_id != embedder.model_id() {
                 return Err(Error::ModelMismatch {
                     path: dir.to_path_buf(),
@@ -184,7 +187,10 @@ impl VectorIndex {
                 });
             }
             if m.dim != embedder.dim() {
-                return Err(Error::DimMismatch { expected: m.dim, got: embedder.dim() });
+                return Err(Error::DimMismatch {
+                    expected: m.dim,
+                    got: embedder.dim(),
+                });
             }
             m
         } else {
@@ -201,11 +207,10 @@ impl VectorIndex {
 
         // ── Persist meta on first open ────────────────────────────────────
         if !meta_path.exists() {
-            let text =
-                serde_json::to_string_pretty(&meta).map_err(|e| Error::Embedding {
-                    context: "serializing .meta.json",
-                    reason: format!("{e}"),
-                })?;
+            let text = serde_json::to_string_pretty(&meta).map_err(|e| Error::Embedding {
+                context: "serializing .meta.json",
+                reason: format!("{e}"),
+            })?;
             fs::write(&meta_path, text).map_err(Error::Io)?;
         }
 
@@ -226,10 +231,12 @@ impl VectorIndex {
 
         // Load existing data if present; otherwise reserve initial capacity.
         if usearch_path.exists() {
-            inner.load(usearch_path.to_str().unwrap()).map_err(|e| Error::Usearch {
-                context: "loading existing usearch index",
-                reason: format!("{e}"),
-            })?;
+            inner
+                .load(usearch_path.to_str().unwrap())
+                .map_err(|e| Error::Usearch {
+                    context: "loading existing usearch index",
+                    reason: format!("{e}"),
+                })?;
         } else {
             inner.reserve(1024).map_err(|e| Error::Usearch {
                 context: "reserving initial usearch capacity",
@@ -280,7 +287,10 @@ impl VectorIndex {
     /// another thread panicked while holding the lock).
     pub fn add(&self, id: ItemId, vector: &[f32]) -> Result<()> {
         if vector.len() != self.meta.dim {
-            return Err(Error::DimMismatch { expected: self.meta.dim, got: vector.len() });
+            return Err(Error::DimMismatch {
+                expected: self.meta.dim,
+                got: vector.len(),
+            });
         }
         let key = {
             let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
@@ -290,11 +300,23 @@ impl VectorIndex {
             keymap.reverse.insert(id, key);
             key
         };
-        self.inner
-            .lock()
-            .expect("usearch mutex poisoned")
-            .add(key, vector)
-            .map_err(|e| Error::Usearch { context: "usearch add", reason: format!("{e}") })
+        let inner = self.inner.lock().expect("usearch mutex poisoned");
+        // USearch requires explicit reservation before insertions when the
+        // index was loaded from disk (capacity does not auto-grow). Reserve
+        // in doubling increments to amortise the cost.
+        let size = inner.size();
+        let capacity = inner.capacity();
+        if size >= capacity {
+            let new_cap = (capacity + 1).max(size + 1024);
+            inner.reserve(new_cap).map_err(|e| Error::Usearch {
+                context: "auto-reserving usearch capacity before add",
+                reason: format!("{e}"),
+            })?;
+        }
+        inner.add(key, vector).map_err(|e| Error::Usearch {
+            context: "usearch add",
+            reason: format!("{e}"),
+        })
     }
 
     /// Remove an item by [`ItemId`]. If the ID is not present, this is a no-op
@@ -354,7 +376,10 @@ impl VectorIndex {
             // segfault on some platforms; we avoid generating such files.
             inner
                 .save(self.usearch_path.to_str().unwrap())
-                .map_err(|e| Error::Usearch { context: "usearch save", reason: format!("{e}") })?;
+                .map_err(|e| Error::Usearch {
+                    context: "usearch save",
+                    reason: format!("{e}"),
+                })?;
         } else if self.usearch_path.exists() {
             // Remove any stale usearch file so the next open starts fresh.
             fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
@@ -392,7 +417,11 @@ impl VectorIndex {
     /// Panics if the keymap mutex is poisoned.
     #[must_use]
     pub fn contains(&self, id: ItemId) -> bool {
-        self.keymap.lock().expect("keymap mutex poisoned").reverse.contains_key(&id)
+        self.keymap
+            .lock()
+            .expect("keymap mutex poisoned")
+            .reverse
+            .contains_key(&id)
     }
 
     // ── Search ────────────────────────────────────────────────────────────
@@ -426,7 +455,10 @@ impl VectorIndex {
             .lock()
             .expect("usearch mutex poisoned")
             .search(query_vector, k)
-            .map_err(|e| Error::Usearch { context: "usearch search", reason: format!("{e}") })?;
+            .map_err(|e| Error::Usearch {
+                context: "usearch search",
+                reason: format!("{e}"),
+            })?;
 
         let keymap = self.keymap.lock().expect("keymap mutex poisoned");
         Ok(matches
@@ -436,7 +468,10 @@ impl VectorIndex {
             .filter_map(|(key, dist)| {
                 // USearch cosine returns distance in [0, 2]; convert to similarity.
                 let score = 1.0 - dist;
-                keymap.forward.get(key).map(|id| VectorHit { id: *id, score })
+                keymap
+                    .forward
+                    .get(key)
+                    .map(|id| VectorHit { id: *id, score })
             })
             .collect())
     }
@@ -484,7 +519,10 @@ impl EmbedderIndex {
     /// Returns the same errors as [`VectorIndex::open`].
     pub fn open(dir: impl AsRef<Path>, embedder: Box<dyn Embedder>) -> Result<Self> {
         let vector_index = VectorIndex::open(dir, embedder.as_ref())?;
-        Ok(Self { embedder, vector_index })
+        Ok(Self {
+            embedder,
+            vector_index,
+        })
     }
 
     /// Returns a reference to the underlying [`VectorIndex`].
@@ -506,8 +544,13 @@ impl singularmem_core::IndexHook for EmbedderIndex {
     /// Returns [`singularmem_core::Error::Io`] wrapping the search error
     /// message if embedding or indexing fails.
     fn on_ingest(&self, item: &singularmem_core::Item) -> singularmem_core::Result<()> {
-        let v = self.embedder.embed(&item.content).map_err(|ref e| to_core_err(e))?;
-        self.vector_index.add(item.id, &v).map_err(|ref e| to_core_err(e))
+        let v = self
+            .embedder
+            .embed(&item.content)
+            .map_err(|ref e| to_core_err(e))?;
+        self.vector_index
+            .add(item.id, &v)
+            .map_err(|ref e| to_core_err(e))
     }
 
     /// Equivalent to `on_ingest`: re-embed and re-index.
@@ -547,9 +590,16 @@ impl EmbedderIndex {
         let hits: Vec<SemanticHit> = raw
             .into_iter()
             .filter(|h| h.score >= opts.min_score)
-            .map(|h| SemanticHit { id: h.id, score: h.score })
+            .map(|h| SemanticHit {
+                id: h.id,
+                score: h.score,
+            })
             .collect();
-        Ok(SemanticSearchResults { hits, elapsed: start.elapsed(), total_indexed })
+        Ok(SemanticSearchResults {
+            hits,
+            elapsed: start.elapsed(),
+            total_indexed,
+        })
     }
 }
 
