@@ -4,8 +4,10 @@
 
 use std::path::PathBuf;
 
+/// Alias for `std::result::Result<T, Error>` used throughout this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors returned by `singularmem-search` operations.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Tantivy library error during a named operation.

@@ -10,8 +10,11 @@ use crate::schema::build_schema;
 /// Schema field for `QueryBuilder::term`.
 #[derive(Copy, Clone, Debug)]
 pub enum Field {
+    /// The main textual body of an item (`content` field in the index).
     Content,
+    /// Free-form tag labels attached to an item (`tags` field in the index).
     Tags,
+    /// Optional provenance string for an item (`source` field in the index).
     Source,
 }
 
@@ -51,6 +54,7 @@ pub struct QueryBuilder {
 }
 
 impl QueryBuilder {
+    /// Create a new empty `QueryBuilder`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
