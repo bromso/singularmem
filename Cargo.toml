@@ -19,7 +19,8 @@ thiserror = "2.0"
 jiff = { version = "0.1", features = ["serde"] }
 tracing = "0.1"
 tantivy = "=0.22.1"
-fastembed = { version = "=4.4.0", default-features = false, features = ["ort-download-binaries"] }
+# online feature enables TextEmbedding::try_new (gated by #[cfg(feature="online")])
+fastembed = { version = "=4.4.0", default-features = false, features = ["ort-download-binaries", "online"] }
 usearch = "=2.15.3"
 bincode = "1.3"
 

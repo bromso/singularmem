@@ -46,4 +46,36 @@ pub enum Error {
     /// Filesystem or I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Embedding inference failure.
+    #[error("embedding inference failed during {context}: {reason}")]
+    Embedding { context: &'static str, reason: String },
+
+    /// Could not download embedding model weights.
+    #[error("could not download embedding model {model}: {reason}")]
+    ModelDownload { model: String, reason: String },
+
+    /// Model files on disk are missing or invalid.
+    #[error("invalid model files at {path}: {reason}; expected ONNX weights + tokenizer")]
+    InvalidModelFiles { path: std::path::PathBuf, reason: String },
+
+    /// Vector dimension mismatch between the index metadata and the embedder.
+    #[error("vector dimension mismatch: expected {expected}, got {got}")]
+    DimMismatch { expected: usize, got: usize },
+
+    /// The vector index was built with a different model than the current one.
+    #[error(
+        "vector index at {path} was built with model {found_model}; \
+         current Embedder uses {expected_model}; \
+         run `singularmem reindex --with-embeddings --reset-vectors --force` to rebuild"
+    )]
+    ModelMismatch {
+        path: std::path::PathBuf,
+        found_model: String,
+        expected_model: String,
+    },
+
+    /// `USearch` library error.
+    #[error("USearch error during {context}: {reason}")]
+    Usearch { context: &'static str, reason: String },
 }

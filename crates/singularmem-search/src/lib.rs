@@ -9,6 +9,7 @@
 pub mod embedder;
 pub mod error;
 pub mod index;
+pub mod model;
 pub mod query;
 pub mod result;
 pub mod testing;
@@ -17,8 +18,9 @@ mod hook;
 mod reindex;
 mod schema;
 
-pub use crate::embedder::Embedder;
+pub use crate::embedder::{Embedder, FastembedEmbedder};
 pub use crate::error::{Error, Result};
 pub use crate::index::{Index, IndexOptions};
+pub use crate::model::EmbeddingModel;
 pub use crate::query::{Field, Query, QueryBuilder};
 pub use crate::result::{Hit, SearchOptions, SearchResults};
