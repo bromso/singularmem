@@ -2758,6 +2758,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "singularmem-adapter-claude"
+version = "0.5.0"
+dependencies = [
+ "singularmem-retrieve",
+]
+
+[[package]]
 name = "singularmem-core"
 version = "0.5.0"
 dependencies = [
