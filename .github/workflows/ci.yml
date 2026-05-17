@@ -67,8 +67,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ADVISORY (non-blocking) — see commit message + Risks section in the
-  # Memory Store v0 spec. GitHub Actions disables unprivileged user
+  # ADVISORY (non-blocking) — explicit non-goal for sub-project 2a
+  # (Search v0 Lexical). GitHub Actions disables unprivileged user
   # namespaces and sudo strips PATH/RUSTUP_HOME, both of which fight
   # `unshare --net`. Until the CI infrastructure can run the namespace
   # check reliably, this job runs advisory; Principle VI is verified
@@ -89,16 +89,13 @@ jobs:
           CARGO_BIN="$HOME/.rustup/toolchains/$TOOLCHAIN/bin/cargo"
           sudo unshare --net -- "$CARGO_BIN" test --workspace --all-targets --offline
 
-  # ADVISORY (non-blocking). The criterion bench output parsing in
-  # perf-check.sh is sensitive to the exact bencher format produced by
-  # the installed criterion version; small CI/runtime drift trips the
-  # script. The actual measurements are recorded in the bench output even
-  # when the script fails. Re-promote to blocking once the parser is
-  # hardened (probably by switching to criterion's --output-format=json).
+  # Re-promoted to blocking in v0.2.0 (Search v0 Lexical, sub-project 2a).
+  # Task 15 of the search-v0-lexical plan rewrote perf-check.sh to parse
+  # criterion's estimates.json (stable schema) rather than CLI stdout, making
+  # the parser reliable enough to gate CI on.
   perf-budgets:
-    name: perf-budgets (Principle X) — ADVISORY
+    name: perf-budgets (Principle X)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
