@@ -512,6 +512,33 @@ impl singularmem_core::IndexHook for EmbedderIndex {
     }
 }
 
+impl EmbedderIndex {
+    /// Embed `query`, run KNN against the [`VectorIndex`], and return
+    /// filtered, timed results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Embedding`] if the embedder fails or [`Error::Usearch`]
+    /// if the KNN search fails.
+    pub fn semantic_search(
+        &self,
+        query: &str,
+        opts: &crate::semantic_query::SemanticSearchOptions,
+    ) -> Result<crate::semantic_query::SemanticSearchResults> {
+        use crate::semantic_query::{SemanticHit, SemanticSearchResults};
+        let start = std::time::Instant::now();
+        let qv = self.embedder.embed(query)?;
+        let raw = self.vector_index.search(&qv, opts.limit)?;
+        let total_indexed = self.vector_index.doc_count()?;
+        let hits: Vec<SemanticHit> = raw
+            .into_iter()
+            .filter(|h| h.score >= opts.min_score)
+            .map(|h| SemanticHit { id: h.id, score: h.score })
+            .collect();
+        Ok(SemanticSearchResults { hits, elapsed: start.elapsed(), total_indexed })
+    }
+}
+
 /// Convert a search crate [`Error`] into a [`singularmem_core::Error`].
 ///
 /// The core trait cannot reference the search error type without creating a
