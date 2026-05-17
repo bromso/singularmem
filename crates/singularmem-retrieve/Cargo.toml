@@ -25,5 +25,6 @@ jiff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
 singularmem-search = { path = "../singularmem-search", features = ["testing"] }
 singularmem-core = { path = "../singularmem-core" }
