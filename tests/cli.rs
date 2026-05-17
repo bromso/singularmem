@@ -249,19 +249,17 @@ fn search_finds_ingested_item() {
 }
 
 #[test]
-fn search_missing_index_exits_2() {
+fn search_errors_when_both_indexes_missing() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("store.db");
 
-    // Create store but never ingest (and never create the .tantivy dir).
+    // Create store but never ingest and never run reindex.
     singularmem()
         .args(["--store", db.to_str().unwrap(), "list"])
         .assert()
         .success();
 
-    // Search auto-creates an empty index directory if absent. The result is
-    // 0 matches → exit 0. `--no-index` only suppresses auto-wiring of the
-    // hook on Store::open; cmd_search opens its own Index regardless.
+    // With neither .tantivy/ nor .vectors/ on disk, auto mode must error.
     singularmem()
         .args([
             "--store",
@@ -271,13 +269,27 @@ fn search_missing_index_exits_2() {
             "anything",
         ])
         .assert()
-        .success();
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("no search index exists"));
 }
 
 #[test]
 fn search_malformed_query_exits_1() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("store.db");
+
+    // Ingest first so .tantivy/ exists; auto mode can then reach query parsing.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "test content for malformed query",
+        ])
+        .assert()
+        .success();
 
     singularmem()
         .args(["--store", db.to_str().unwrap(), "search", "tags:"])
@@ -343,7 +355,8 @@ fn no_index_flag_skips_hook_wiring() {
         ])
         .assert()
         .success();
-    // Search opens a fresh index (auto-created empty). 0 matches; exit 0.
+    // --no-index on ingest skips hook wiring so .tantivy/ is never created.
+    // With neither .tantivy/ nor .vectors/ present, auto mode errors (exit 2).
     singularmem()
         .args([
             "--store",
@@ -353,7 +366,8 @@ fn no_index_flag_skips_hook_wiring() {
             "searchable",
         ])
         .assert()
-        .success();
+        .failure()
+        .code(2);
 }
 
 // ── Task 10 (Phase E): semantic-search verb ────────────────────────────────
@@ -473,6 +487,261 @@ fn reset_vectors_without_force_fails() {
         .failure();
 }
 
+// ── Task 9: new search flags ──────────────────────────────────────────────
+
+#[test]
+fn search_help_lists_mode_flag() {
+    singularmem()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--mode"))
+        .stdout(predicate::str::contains("auto"))
+        .stdout(predicate::str::contains("lexical"))
+        .stdout(predicate::str::contains("semantic"))
+        .stdout(predicate::str::contains("hybrid"));
+}
+
+#[test]
+fn search_help_lists_show_ranks_and_json_flags() {
+    singularmem()
+        .args(["search", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--show-ranks"))
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--fetch-multiplier"))
+        .stdout(predicate::str::contains("--rrf-k"));
+}
+
+// ── Task 10: mode dispatch tests ─────────────────────────────────────────
+
+#[test]
+fn search_default_mode_uses_hybrid_when_vectors_exist() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "the quick brown fox jumps over the lazy dog",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Build the vector sidecar so auto mode picks hybrid.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "fox"])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rrf="));
+}
+
+#[test]
+fn search_default_mode_falls_back_to_lexical_when_no_vectors() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "a memorable phrase about brown foxes",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // No reindex --with-embeddings, so .vectors/ does not exist.
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "search", "foxes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bm25="));
+}
+
+#[test]
+fn search_mode_lexical_explicit_works() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "lexical mode test fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--mode",
+            "lexical",
+            "lexical",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bm25="));
+}
+
+#[test]
+fn search_mode_semantic_explicit_works() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "semantic mode test fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--mode",
+            "semantic",
+            "semantic mode test fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cos="));
+}
+
+#[test]
+fn search_mode_hybrid_errors_when_vectors_missing() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "lexical only fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--mode",
+            "hybrid",
+            "fixture",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "hybrid search requires both indexes",
+        ))
+        .stderr(predicate::str::contains("semantic index missing"));
+}
+
+#[test]
+fn search_mode_hybrid_errors_when_lexical_missing() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Ingest with --no-index so .tantivy/ is never created. Then run
+    // reindex --with-embeddings only (which currently always builds the
+    // tantivy sidecar too). To get a vectors-only state we delete .tantivy/
+    // after the reindex.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "--no-index",
+            "ingest",
+            "--content",
+            "semantic only fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+    // Delete the tantivy sidecar that reindex built.
+    let tantivy_dir = {
+        let mut s = db.clone().into_os_string();
+        s.push(".tantivy");
+        std::path::PathBuf::from(s)
+    };
+    std::fs::remove_dir_all(&tantivy_dir).expect("remove tantivy dir");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--mode",
+            "hybrid",
+            "fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "hybrid search requires both indexes",
+        ))
+        .stderr(predicate::str::contains("lexical index missing"));
+}
+
 // ── Task 12 (Phase E): auto-wiring MultiHook ─────────────────────────────
 
 #[test]
@@ -507,8 +776,10 @@ fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings
 
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    // Lexical search finds it.
+    // Lexical search finds it. Both sidecars exist so auto mode picks hybrid;
+    // inject mock embedder to stay fast and network-free.
     singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
         .args(["--store", db.to_str().unwrap(), "search", "auto-wired-both"])
         .assert()
         .success();
@@ -524,4 +795,130 @@ fn auto_wiring_writes_to_both_tantivy_and_embedder_after_reindex_with_embeddings
         ])
         .assert()
         .success();
+}
+
+#[test]
+fn search_show_ranks_flag_includes_columns() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "show ranks fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--show-ranks",
+            "show ranks fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lex="))
+        .stdout(predicate::str::contains("sem="));
+}
+
+#[test]
+fn search_json_flag_emits_valid_json() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "json output fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--json",
+            "fixture",
+        ])
+        .output()
+        .expect("ran");
+    assert!(out.status.success(), "expected success, got {out:?}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let hits = parsed
+        .get("hits")
+        .expect("hits field")
+        .as_array()
+        .expect("array");
+    assert!(!hits.is_empty(), "expected at least one hit");
+    let h0 = &hits[0];
+    assert!(h0.get("id").is_some(), "hit must have id");
+    assert!(h0.get("score").is_some(), "hit must have score");
+    assert!(h0.get("score_kind").is_some(), "hit must have score_kind");
+    // lexical_rank/semantic_rank may be null but the keys must exist.
+    assert!(h0.get("lexical_rank").is_some());
+    assert!(h0.get("semantic_rank").is_some());
+}
+
+#[test]
+fn semantic_search_deprecated_alias_still_works() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "deprecation alias fixture",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "reindex",
+            "--with-embeddings",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "deprecation alias fixture",
+        ])
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cos="))
+        .stderr(predicate::str::contains("deprecated"));
 }

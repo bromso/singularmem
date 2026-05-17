@@ -106,4 +106,64 @@ pub enum Error {
         /// Human-readable explanation from `USearch`.
         reason: String,
     },
+
+    /// Neither lexical nor vector index exists for this store.
+    #[error(
+        "no search index exists for this store; \
+         run `singularmem reindex` (and optionally `--with-embeddings`) first"
+    )]
+    NoIndexes,
+
+    /// User requested `--mode hybrid` but only one of the two indexes exists.
+    #[error(
+        "hybrid search requires both indexes; {missing} index missing at {path}; \
+         run `singularmem reindex --with-embeddings` to build both"
+    )]
+    HybridMissingIndex {
+        /// Which side was missing — `"lexical"` or `"semantic"`.
+        missing: &'static str,
+        /// Path that was probed.
+        path: std::path::PathBuf,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn no_indexes_error_message_mentions_reindex() {
+        let e = Error::NoIndexes;
+        let msg = e.to_string();
+        assert!(
+            msg.contains("no search index exists"),
+            "message should explain the failure: got {msg:?}"
+        );
+        assert!(
+            msg.contains("reindex"),
+            "message should tell the user the fix: got {msg:?}"
+        );
+    }
+
+    #[test]
+    fn hybrid_missing_index_error_names_the_missing_side() {
+        let e = Error::HybridMissingIndex {
+            missing: "semantic",
+            path: PathBuf::from("/tmp/foo.vectors"),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("semantic"),
+            "missing side must appear: {msg:?}"
+        );
+        assert!(
+            msg.contains("/tmp/foo.vectors"),
+            "path must appear: {msg:?}"
+        );
+        assert!(
+            msg.contains("reindex --with-embeddings"),
+            "fix must appear: {msg:?}"
+        );
+    }
 }
