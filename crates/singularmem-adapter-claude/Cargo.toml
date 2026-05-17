@@ -13,3 +13,8 @@ workspace = true
 
 [dependencies]
 singularmem-retrieve = { path = "../singularmem-retrieve" }
+
+[dev-dependencies]
+singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search" }
+jiff = { workspace = true }

@@ -2761,7 +2761,10 @@ dependencies = [
 name = "singularmem-adapter-claude"
 version = "0.5.0"
 dependencies = [
+ "jiff",
+ "singularmem-core",
  "singularmem-retrieve",
+ "singularmem-search",
 ]
 
 [[package]]
