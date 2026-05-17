@@ -332,6 +332,11 @@ impl VectorIndex {
     /// Flush both the `USearch` binary (`index.usearch`) and the keymap
     /// (`keymap.bin`) to disk.
     ///
+    /// When the index is empty, the `USearch` binary is not written (or is
+    /// removed if a stale file exists). `keymap.bin` is always written so that
+    /// re-opens can distinguish "never indexed" from "index is empty but was
+    /// committed".
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Usearch`] on `USearch` serialisation failure or
@@ -341,11 +346,20 @@ impl VectorIndex {
     ///
     /// Panics if the inner index or keymap mutex is poisoned.
     pub fn save(&self) -> Result<()> {
-        self.inner
-            .lock()
-            .expect("usearch mutex poisoned")
-            .save(self.usearch_path.to_str().unwrap())
-            .map_err(|e| Error::Usearch { context: "usearch save", reason: format!("{e}") })?;
+        let inner = self.inner.lock().expect("usearch mutex poisoned");
+        let count = inner.size();
+        if count > 0 {
+            // Only persist the USearch binary when there is at least one item.
+            // usearch::Index::load on a file saved from an empty index may
+            // segfault on some platforms; we avoid generating such files.
+            inner
+                .save(self.usearch_path.to_str().unwrap())
+                .map_err(|e| Error::Usearch { context: "usearch save", reason: format!("{e}") })?;
+        } else if self.usearch_path.exists() {
+            // Remove any stale usearch file so the next open starts fresh.
+            fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
+        }
+        drop(inner);
 
         let bytes = bincode::serialize(&*self.keymap.lock().expect("keymap mutex poisoned"))
             .map_err(|e| Error::Embedding {

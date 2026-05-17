@@ -355,3 +355,65 @@ fn no_index_flag_skips_hook_wiring() {
         .assert()
         .success();
 }
+
+// ── Task 10 (Phase E): semantic-search verb ────────────────────────────────
+
+fn derive_vectors_path_for_test(db: &std::path::Path) -> std::path::PathBuf {
+    let mut s = db.to_path_buf().into_os_string();
+    s.push(".vectors");
+    std::path::PathBuf::from(s)
+}
+
+#[test]
+fn semantic_search_with_mock_embedder_finds_ingested_item() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Pre-create the .vectors/ dir so auto-wiring fires during ingest.
+    // (reindex --with-embeddings creates this in production; we shortcut here.)
+    let vectors_path = derive_vectors_path_for_test(&db);
+    std::fs::create_dir_all(&vectors_path).unwrap();
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "cat sat on mat",
+        ])
+        .assert()
+        .success();
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "cat sat on mat",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("01")); // any ULID prefix = a hit
+}
+
+#[test]
+fn semantic_search_missing_index_exits_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    // No .vectors/ dir — EmbedderIndex::open should fail → exit 2.
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "semantic-search",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .code(2);
+}
+

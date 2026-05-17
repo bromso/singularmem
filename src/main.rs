@@ -47,6 +47,8 @@ enum Command {
     Search(SearchArgs),
     /// Rebuild the Tantivy index from the `SQLite` store.
     Reindex(ReindexArgs),
+    /// Semantic (vector) search over the store.
+    SemanticSearch(SemanticSearchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -144,10 +146,38 @@ struct SearchArgs {
 }
 
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 struct ReindexArgs {
     /// Suppress progress output.
     #[arg(long)]
     quiet: bool,
+    /// Also rebuild the vector index.
+    #[arg(long)]
+    with_embeddings: bool,
+    /// Which embedding model to use. Only meaningful with --with-embeddings.
+    #[arg(long, default_value = "all-mini-lm-l6-v2")]
+    embedding_model: String,
+    /// Destructive — delete .vectors/ before reindex (e.g. to switch models).
+    #[arg(long)]
+    reset_vectors: bool,
+    /// Required to confirm --reset-vectors.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Args, Debug)]
+struct SemanticSearchArgs {
+    /// One or more query tokens. Multiple tokens are joined with a space.
+    queries: Vec<String>,
+    /// Max hits to return.
+    #[arg(long, default_value = "20")]
+    limit: usize,
+    /// Minimum cosine-similarity score (0.0–1.0) for a hit to be included.
+    #[arg(long, default_value = "0.0")]
+    min_score: f32,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+    format: ListFormat,
 }
 
 fn main() -> ExitCode {
@@ -206,39 +236,91 @@ fn run(cli: Cli) -> Result<(), CliError> {
     };
     let mut store = Store::open_with_options(&store_path, opts)?;
 
-    // Auto-wire the Tantivy hook for write commands so live ingest populates
-    // the index. Read/search commands open their own Index instances; if we
-    // auto-wired here AND those commands opened again, Tantivy's writer lock
-    // would conflict (single-writer-per-Directory).
+    // Auto-wire hooks for write commands so live ingest populates the indices.
+    // Read/search commands open their own Index instances; if we auto-wired here
+    // AND those commands opened again, Tantivy's writer lock would conflict
+    // (single-writer-per-Directory).
     let needs_hook = matches!(cli.command, Command::Ingest(_));
     if needs_hook && !cli.no_index {
+        let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
+
+        // Tantivy lexical-search hook (sub-project 2a behaviour — always attempt).
         let index_path = derive_index_path(&store_path);
         match singularmem_search::Index::open(&index_path) {
-            Ok(index) => store.set_hook(Some(Box::new(index))),
-            Err(e) => {
-                tracing::warn!(
+            Ok(idx) => hooks.push(Box::new(idx)),
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %index_path.display(),
+                "could not open Tantivy index; lexical search will not work until reindex"
+            ),
+        }
+
+        // Embedder / vector hook — opt-in: only when .vectors/ already exists.
+        let vectors_path = derive_vectors_path(&store_path);
+        if vectors_path.exists() {
+            let embedder: Box<dyn singularmem_search::Embedder> =
+                match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                    Some("mock") => {
+                        Box::new(singularmem_search::testing::MockEmbedder::default())
+                    }
+                    _ => match singularmem_search::FastembedEmbedder::new() {
+                        Ok(e) => Box::new(e),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "embedder construction failed; semantic search will not work"
+                            );
+                            // Skip embedder hook; proceed with whatever hooks were assembled.
+                            if !hooks.is_empty() {
+                                store.set_hook(Some(Box::new(
+                                    singularmem_core::hook::MultiHook::new(hooks),
+                                )));
+                            }
+                            return run_command(cli.command, &store, &store_path);
+                        }
+                    },
+                };
+            match singularmem_search::EmbedderIndex::open(&vectors_path, embedder) {
+                Ok(idx) => hooks.push(Box::new(idx)),
+                Err(e) => tracing::warn!(
                     error = %e,
-                    path = %index_path.display(),
-                    "could not open Tantivy index; search will not work until `singularmem reindex` runs"
-                );
+                    "vector index open failed; semantic search will not work"
+                ),
             }
+        }
+
+        if !hooks.is_empty() {
+            store.set_hook(Some(Box::new(
+                singularmem_core::hook::MultiHook::new(hooks),
+            )));
         }
     }
 
-    match cli.command {
-        Command::Ingest(args) => cmd_ingest(&store, args),
-        Command::Get(args) => cmd_get(&store, &args),
-        Command::List(args) => cmd_list(&store, &args),
-        Command::Revisions(args) => cmd_revisions(&store, &args),
-        Command::Export => cmd_export(&store),
-        Command::Search(args) => cmd_search(&store_path, &args),
-        Command::Reindex(args) => cmd_reindex(&store, &store_path, &args),
+    run_command(cli.command, &store, &store_path)
+}
+
+fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(), CliError> {
+    match command {
+        Command::Ingest(args) => cmd_ingest(store, args),
+        Command::Get(args) => cmd_get(store, &args),
+        Command::List(args) => cmd_list(store, &args),
+        Command::Revisions(args) => cmd_revisions(store, &args),
+        Command::Export => cmd_export(store),
+        Command::Search(args) => cmd_search(store_path, &args),
+        Command::Reindex(args) => cmd_reindex(store, store_path, &args),
+        Command::SemanticSearch(args) => cmd_semantic_search(store_path, &args),
     }
 }
 
 fn derive_index_path(store_path: &Path) -> PathBuf {
     let mut s = store_path.to_path_buf().into_os_string();
     s.push(".tantivy");
+    PathBuf::from(s)
+}
+
+fn derive_vectors_path(store_path: &Path) -> PathBuf {
+    let mut s = store_path.to_path_buf().into_os_string();
+    s.push(".vectors");
     PathBuf::from(s)
 }
 
@@ -412,18 +494,134 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(), CliError> {
+    let vectors_path = derive_vectors_path(store_path);
+
+    // The .vectors/ directory is the opt-in signal: it is created by
+    // `reindex --with-embeddings`. If it doesn't exist, semantic search is not
+    // available for this store yet.
+    if !vectors_path.exists() {
+        return Err(CliError::IndexOpen(format!(
+            "vector index not found at {}; run `singularmem reindex --with-embeddings` first",
+            vectors_path.display()
+        )));
+    }
+
+    // Production CLI uses FastembedEmbedder. Tests inject MockEmbedder via env var
+    // to stay fast and network-free.
+    let embedder: Box<dyn singularmem_search::Embedder> =
+        match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+            Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
+            _ => Box::new(
+                singularmem_search::FastembedEmbedder::new()
+                    .map_err(|e| CliError::IndexOpen(format!("embedder init failed: {e}")))?,
+            ),
+        };
+    let idx = singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
+        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    let query_str = args.queries.join(" ");
+    let results = idx
+        .semantic_search(
+            &query_str,
+            &singularmem_search::SemanticSearchOptions {
+                limit: args.limit,
+                min_score: args.min_score,
+            },
+        )
+        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+
+    if results.hits.is_empty() {
+        tracing::info!("0 matches");
+        return Ok(());
+    }
+    let mut out = io::stdout().lock();
+    for hit in &results.hits {
+        match args.format {
+            ListFormat::Ids => writeln!(out, "{}", hit.id)?,
+            ListFormat::Jsonl => {
+                serde_json::to_writer(
+                    &mut out,
+                    &serde_json::json!({
+                        "id": hit.id.to_string(),
+                        "score": hit.score,
+                    }),
+                )?;
+                writeln!(out)?;
+            }
+            ListFormat::Table => writeln!(out, "{:.4}\t{}", hit.score, hit.id)?,
+        }
+    }
+    Ok(())
+}
+
 fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {
     use singularmem_search::Index;
+
+    // Phase 1: Tantivy lexical reindex (always).
     let index_path = derive_index_path(store_path);
     let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
     let progress = |n: u64| {
         if !args.quiet {
-            tracing::info!("reindex: {n} items processed");
+            tracing::info!("reindex (tantivy): {n} items processed");
         }
     };
     let count = index
         .reindex_from(store.list()?.filter_map(Result::ok), progress)
         .map_err(|e| CliError::IndexOpen(e.to_string()))?;
-    tracing::info!("reindex: {count} items total");
+    tracing::info!("reindex (tantivy): {count} items total");
+
+    // Phase 2: Embedder / vector reindex (only when --with-embeddings is given).
+    if args.with_embeddings {
+        let vectors_path = derive_vectors_path(store_path);
+
+        if args.reset_vectors {
+            if !args.force {
+                return Err(CliError::Usage(
+                    "--reset-vectors requires --force to confirm the destructive operation".into(),
+                ));
+            }
+            if vectors_path.exists() {
+                std::fs::remove_dir_all(&vectors_path).map_err(CliError::Io)?;
+                tracing::warn!(
+                    path = %vectors_path.display(),
+                    "deleted existing vector index"
+                );
+            }
+        }
+
+        let model = match args.embedding_model.as_str() {
+            "all-mini-lm-l6-v2" => singularmem_search::EmbeddingModel::AllMiniLmL6V2,
+            "bge-small-en" => singularmem_search::EmbeddingModel::BgeSmallEnV15,
+            "nomic-embed" => singularmem_search::EmbeddingModel::NomicEmbedTextV15,
+            other => return Err(CliError::Usage(format!("unknown --embedding-model: {other}"))),
+        };
+
+        let embedder: Box<dyn singularmem_search::Embedder> =
+            match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                Some("mock") => {
+                    Box::new(singularmem_search::testing::MockEmbedder::default())
+                }
+                _ => Box::new(
+                    singularmem_search::FastembedEmbedder::with_model(model)
+                        .map_err(|e| CliError::IndexOpen(format!("embedder init: {e}")))?,
+                ),
+            };
+
+        let embedder_idx = singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
+            .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+
+        for (i, item_r) in store.list()?.enumerate() {
+            let item = item_r?;
+            singularmem_core::IndexHook::on_reindex(&embedder_idx, &item)
+                .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+            if !args.quiet && (i + 1) % 100 == 0 {
+                tracing::info!("reindex (embeddings): {} items", i + 1);
+            }
+        }
+        singularmem_core::IndexHook::commit(&embedder_idx)
+            .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+        tracing::info!("reindex (embeddings) complete");
+    }
+
     Ok(())
 }
