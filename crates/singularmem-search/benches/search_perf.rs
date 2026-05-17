@@ -10,7 +10,9 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use singularmem_core::{NewItem, Store};
 use singularmem_search::testing::MockEmbedder;
-use singularmem_search::{EmbedderIndex, Index, Query, SearchOptions, SemanticSearchOptions};
+use singularmem_search::{
+    EmbedderIndex, HybridSearcher, Index, Query, SearchOptions, SemanticSearchOptions,
+};
 use tempfile::TempDir;
 
 /// Seed `n` items into a fresh store+index (hook-wired) and return the
@@ -100,11 +102,43 @@ fn bench_semantic_search_latency(c: &mut Criterion) {
     });
 }
 
+fn bench_hybrid_search_latency(c: &mut Criterion) {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("store.db");
+    let lex_path = dir.path().join("lex");
+    let sem_path = dir.path().join("sem");
+
+    let lex_hook = Index::open(&lex_path).unwrap();
+    let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+    let multi =
+        singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
+    let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+    for i in 0..1_000 {
+        store
+            .ingest(NewItem::text(format!("benchmark hybrid item number {i}")))
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(store);
+
+    let lex = Index::open(&lex_path).unwrap();
+    let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+    let searcher = HybridSearcher::new(&lex, &sem);
+    let opts = singularmem_search::HybridSearchOptions::default();
+
+    c.bench_function("hybrid_search_latency", |b| {
+        b.iter(|| {
+            let _ = searcher.search("benchmark hybrid item", &opts).unwrap();
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_search_latency,
     bench_reindex_throughput,
     bench_embed_throughput,
     bench_semantic_search_latency,
+    bench_hybrid_search_latency,
 );
 criterion_main!(benches);
