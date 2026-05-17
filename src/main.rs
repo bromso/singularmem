@@ -357,6 +357,95 @@ fn derive_vectors_path(store_path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Result of resolving a `SearchMode` for a given store path. Returned by
+/// `resolve_search_mode`.
+struct ResolvedSearchMode {
+    /// The concrete search mode (never `Auto` after resolution).
+    mode: SearchMode,
+    /// Tantivy sidecar path.
+    tantivy_path: PathBuf,
+    /// Vectors sidecar path.
+    vectors_path: PathBuf,
+}
+
+/// Probe the store's sidecar directories and resolve `requested_mode`
+/// (which may be `Auto`) into a concrete mode (`Lexical`, `Semantic`,
+/// or `Hybrid`). Surfaces the same set of errors `cmd_search` does:
+/// `NoIndexes` for auto + neither sidecar, `HybridMissingIndex` for
+/// explicit hybrid + one missing, `IndexMissing` for explicit
+/// lexical/semantic + that sidecar missing.
+fn resolve_search_mode(
+    store_path: &Path,
+    requested_mode: SearchMode,
+) -> Result<ResolvedSearchMode, CliError> {
+    let tantivy_path = derive_index_path(store_path);
+    let vectors_path = derive_vectors_path(store_path);
+    let has_lexical = tantivy_path.exists();
+    let has_vectors = vectors_path.exists();
+
+    // Resolve --mode auto → concrete mode (or NoIndexes error).
+    let resolved = match requested_mode {
+        SearchMode::Auto => match (has_lexical, has_vectors) {
+            (true, true) => SearchMode::Hybrid,
+            (true, false) => {
+                tracing::info!(
+                    path = %vectors_path.display(),
+                    "no vector index; using lexical-only search"
+                );
+                SearchMode::Lexical
+            }
+            (false, true) => {
+                tracing::info!(
+                    path = %tantivy_path.display(),
+                    "no lexical index; using semantic-only search"
+                );
+                SearchMode::Semantic
+            }
+            (false, false) => return Err(CliError::Search(singularmem_search::Error::NoIndexes)),
+        },
+        m => m,
+    };
+
+    // Explicit-mode pre-flight checks (Auto bypassed via the degradation above).
+    match resolved {
+        SearchMode::Hybrid => {
+            if !has_lexical {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "lexical",
+                        path: tantivy_path,
+                    },
+                ));
+            }
+            if !has_vectors {
+                return Err(CliError::Search(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "semantic",
+                        path: vectors_path,
+                    },
+                ));
+            }
+        }
+        SearchMode::Lexical if !has_lexical => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: tantivy_path,
+            }));
+        }
+        SearchMode::Semantic if !has_vectors => {
+            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
+                path: vectors_path,
+            }));
+        }
+        _ => {}
+    }
+
+    Ok(ResolvedSearchMode {
+        mode: resolved,
+        tantivy_path,
+        vectors_path,
+    })
+}
+
 fn default_store_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -488,67 +577,12 @@ fn cmd_export(store: &Store) -> Result<(), CliError> {
 fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
-    let tantivy_path = derive_index_path(store_path);
-    let vectors_path = derive_vectors_path(store_path);
-    let has_lexical = tantivy_path.exists();
-    let has_vectors = vectors_path.exists();
-
-    // Resolve --mode auto → concrete mode (or NoIndexes error).
-    let resolved = match args.mode {
-        SearchMode::Auto => match (has_lexical, has_vectors) {
-            (true, true) => SearchMode::Hybrid,
-            (true, false) => {
-                tracing::info!(
-                    path = %vectors_path.display(),
-                    "no vector index; using lexical-only search"
-                );
-                SearchMode::Lexical
-            }
-            (false, true) => {
-                tracing::info!(
-                    path = %tantivy_path.display(),
-                    "no lexical index; using semantic-only search"
-                );
-                SearchMode::Semantic
-            }
-            (false, false) => return Err(CliError::Search(singularmem_search::Error::NoIndexes)),
-        },
-        m => m,
-    };
-
-    // Explicit-mode pre-flight checks (--mode auto bypasses these because it
-    // already degraded above).
-    match resolved {
-        SearchMode::Hybrid => {
-            if !has_lexical {
-                return Err(CliError::Search(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "lexical",
-                        path: tantivy_path,
-                    },
-                ));
-            }
-            if !has_vectors {
-                return Err(CliError::Search(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "semantic",
-                        path: vectors_path,
-                    },
-                ));
-            }
-        }
-        SearchMode::Lexical if !has_lexical => {
-            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
-                path: tantivy_path,
-            }));
-        }
-        SearchMode::Semantic if !has_vectors => {
-            return Err(CliError::Search(singularmem_search::Error::IndexMissing {
-                path: vectors_path,
-            }));
-        }
-        _ => {}
-    }
+    let resolved = resolve_search_mode(store_path, args.mode)?;
+    let ResolvedSearchMode {
+        mode: resolved_mode,
+        tantivy_path,
+        vectors_path,
+    } = resolved;
 
     let query_str = args.queries.join(" ");
     let opts = HybridSearchOptions {
@@ -559,13 +593,14 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     };
 
     // Open whichever indexes the resolved mode requires.
-    let lex_opt: Option<Index> = if matches!(resolved, SearchMode::Lexical | SearchMode::Hybrid) {
-        Some(Index::open(&tantivy_path)?)
-    } else {
-        None
-    };
+    let lex_opt: Option<Index> =
+        if matches!(resolved_mode, SearchMode::Lexical | SearchMode::Hybrid) {
+            Some(Index::open(&tantivy_path)?)
+        } else {
+            None
+        };
     let sem_opt: Option<EmbedderIndex> =
-        if matches!(resolved, SearchMode::Semantic | SearchMode::Hybrid) {
+        if matches!(resolved_mode, SearchMode::Semantic | SearchMode::Hybrid) {
             let embedder: Box<dyn singularmem_search::Embedder> =
                 match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
                     Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
