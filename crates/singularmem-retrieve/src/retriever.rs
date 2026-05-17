@@ -103,15 +103,11 @@ impl<'a> Retriever<'a> {
     ///
     /// # Errors
     ///
-    /// - [`Error::EmptyQuery`] if `query` is empty or whitespace-only.
-    /// - [`Error::Search`] if the underlying hybrid search fails.
-    /// - [`Error::Core`] if [`Store::get`] fails for any matched ID
+    /// - [`crate::Error::EmptyQuery`] if `query` is empty or whitespace-only.
+    /// - [`crate::Error::Search`] if the underlying hybrid search fails.
+    /// - [`crate::Error::Core`] if [`Store::get`] fails for any matched ID
     ///   (e.g., the item was deleted between search and read).
-    pub fn retrieve(
-        &self,
-        query: &str,
-        opts: &RetrieveOptions,
-    ) -> crate::Result<RetrievedContext> {
+    pub fn retrieve(&self, query: &str, opts: &RetrieveOptions) -> crate::Result<RetrievedContext> {
         if query.trim().is_empty() {
             return Err(crate::Error::EmptyQuery);
         }
@@ -174,8 +170,7 @@ mod tests {
         let store = Store::open(dir.path().join("store.db")).unwrap();
         let lex = Index::open(dir.path().join("lex")).unwrap();
         let sem =
-            EmbedderIndex::open(dir.path().join("sem"), Box::new(MockEmbedder::default()))
-                .unwrap();
+            EmbedderIndex::open(dir.path().join("sem"), Box::new(MockEmbedder::default())).unwrap();
         let searcher = HybridSearcher::new(&lex, &sem);
         let retriever = Retriever::new(&store, &searcher);
         // The struct fields are public; we can observe the borrowed references.
@@ -195,12 +190,9 @@ mod tests {
         let sem_path = dir.path().join("sem");
 
         let lex_hook = Index::open(&lex_path).unwrap();
-        let sem_hook =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
-        let multi = singularmem_core::hook::MultiHook::new(vec![
-            Box::new(lex_hook),
-            Box::new(sem_hook),
-        ]);
+        let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
         let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
         for i in 0..n {
             store
@@ -278,8 +270,7 @@ mod tests {
         // Build the vector sidecar with default-dim MockEmbedder.
         let sem_path = dir.path().join("sem");
         {
-            let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default()))
-                .unwrap();
+            let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
             // No need to add anything; mismatch is detected at open time
             // in the next step if we re-open with a different-dim embedder.
             drop(sem);
@@ -287,8 +278,7 @@ mod tests {
 
         // Re-open with a different-dim embedder → ModelMismatch/DimMismatch
         // on EmbedderIndex::open. We confirm the underlying error surfaces.
-        let result =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::with_dim(128)));
+        let result = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::with_dim(128)));
         assert!(
             result.is_err(),
             "expected dim mismatch error from EmbedderIndex::open"
@@ -328,7 +318,10 @@ mod tests {
         let retriever = Retriever::new(&store, &searcher);
         let result = retriever.retrieve("seed memory", &RetrieveOptions::default());
         assert!(
-            matches!(result, Err(Error::Core(singularmem_core::Error::NotFound { .. }))),
+            matches!(
+                result,
+                Err(Error::Core(singularmem_core::Error::NotFound { .. }))
+            ),
             "expected Error::Core(NotFound), got {result:?}"
         );
     }

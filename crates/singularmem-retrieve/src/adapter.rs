@@ -148,9 +148,15 @@ mod tests {
         assert!(out.contains("score=0.0328"), "missing score: {out}");
         assert!(out.contains("score=0.0312"), "missing score: {out}");
         // ID
-        assert!(out.contains("id: 01ARZ3NDEKTSV4RRFFQ69G5FAV"), "missing id: {out}");
+        assert!(
+            out.contains("id: 01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+            "missing id: {out}"
+        );
         // Full content
-        assert!(out.contains("the quick brown fox jumps"), "missing content: {out}");
+        assert!(
+            out.contains("the quick brown fox jumps"),
+            "missing content: {out}"
+        );
         // Separator
         assert!(out.contains("---"), "missing separator: {out}");
     }
@@ -159,10 +165,16 @@ mod tests {
     fn plain_adapter_handles_zero_blocks() {
         let ctx = sample_context(vec![], "nothing here");
         let out = PlainAdapter.format(&ctx);
-        assert!(out.contains("no memories matched"), "missing empty msg: {out}");
+        assert!(
+            out.contains("no memories matched"),
+            "missing empty msg: {out}"
+        );
         assert!(out.contains("nothing here"), "missing query echo: {out}");
         // No memory headings.
-        assert!(!out.contains("## memory"), "should not have memory headings: {out}");
+        assert!(
+            !out.contains("## memory"),
+            "should not have memory headings: {out}"
+        );
     }
 
     #[test]
@@ -173,18 +185,21 @@ mod tests {
         let ctx = sample_context(vec![block], "test");
         let out = PlainAdapter.format(&ctx);
         // No empty source/tags lines.
-        assert!(!out.contains("source:\n"), "empty source line emitted: {out}");
+        assert!(
+            !out.contains("source:\n"),
+            "empty source line emitted: {out}"
+        );
         assert!(!out.contains("tags:\n"), "empty tags line emitted: {out}");
-        assert!(!out.contains("source: \n"), "empty source line emitted: {out}");
+        assert!(
+            !out.contains("source: \n"),
+            "empty source line emitted: {out}"
+        );
         assert!(!out.contains("tags: \n"), "empty tags line emitted: {out}");
     }
 
     #[test]
     fn plain_adapter_is_deterministic() {
-        let ctx = sample_context(
-            vec![sample_block("01ARZ3NDEKTSV4RRFFQ69G5FAV", 0.5)],
-            "fox",
-        );
+        let ctx = sample_context(vec![sample_block("01ARZ3NDEKTSV4RRFFQ69G5FAV", 0.5)], "fox");
         let a = PlainAdapter.format(&ctx);
         let b = PlainAdapter.format(&ctx);
         assert_eq!(a, b, "format must be deterministic");
