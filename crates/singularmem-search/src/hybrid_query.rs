@@ -173,6 +173,118 @@ pub fn rrf_fuse(lexical: &[ItemId], semantic: &[ItemId], k: usize) -> Vec<(ItemI
     fused
 }
 
+use crate::error::{Error, Result};
+use crate::result::SearchOptions;
+use crate::semantic_query::SemanticSearchOptions;
+
+impl HybridSearcher<'_> {
+    /// Run a search against whichever rankers this `HybridSearcher` holds.
+    ///
+    /// - Both present: RRF-fused results, `score_kind = Rrf`.
+    /// - Lexical only: BM25-scored hits, `score_kind = Bm25`.
+    /// - Semantic only: cosine-scored hits, `score_kind = Cosine`.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever error the underlying ranker raises
+    /// ([`Error::QueryParse`], [`Error::Tantivy`], [`Error::Embedding`],
+    /// [`Error::Usearch`], etc.).
+    pub fn search(
+        &self,
+        query: &str,
+        opts: &HybridSearchOptions,
+    ) -> Result<HybridSearchResults> {
+        let start = std::time::Instant::now();
+        let fetch_n = opts.limit.saturating_mul(opts.fetch_multiplier).max(1);
+
+        match (self.lexical, self.semantic) {
+            (Some(lex), None) => Self::search_lexical_only(lex, query, opts, fetch_n, start),
+            (None, Some(sem)) => Self::search_semantic_only(sem, query, opts, fetch_n, start),
+            (Some(_lex), Some(_sem)) => {
+                // Task 7 replaces this stub with RRF fusion.
+                Err(Error::NoIndexes)
+            }
+            (None, None) => Err(Error::NoIndexes),
+        }
+    }
+
+    fn search_lexical_only(
+        lex: &Index,
+        query: &str,
+        opts: &HybridSearchOptions,
+        fetch_n: usize,
+        start: std::time::Instant,
+    ) -> Result<HybridSearchResults> {
+        let parsed = crate::Query::parse(query)?;
+        let lex_opts = SearchOptions {
+            limit: opts.limit,
+            offset: 0,
+            include_snippets: opts.include_snippets,
+        };
+        let _ = fetch_n; // unused in lexical-only (we ask for `limit` directly)
+        let res = lex.search(&parsed, lex_opts)?;
+        let lexical_hits = Some(res.total_matched);
+        let hits: Vec<HybridHit> = res
+            .hits
+            .into_iter()
+            .enumerate()
+            .map(|(rank0, h)| HybridHit {
+                id: h.id,
+                score: h.score,
+                score_kind: ScoreKind::Bm25,
+                lexical_rank: Some(rank0 + 1),
+                semantic_rank: None,
+                snippet: h.snippet,
+            })
+            .collect();
+        let total_fused = hits.len();
+        Ok(HybridSearchResults {
+            hits,
+            elapsed: start.elapsed(),
+            total_fused,
+            lexical_hits,
+            semantic_hits: None,
+        })
+    }
+
+    fn search_semantic_only(
+        sem: &EmbedderIndex,
+        query: &str,
+        opts: &HybridSearchOptions,
+        fetch_n: usize,
+        start: std::time::Instant,
+    ) -> Result<HybridSearchResults> {
+        let sem_opts = SemanticSearchOptions {
+            limit: opts.limit,
+            min_score: 0.0,
+        };
+        let _ = fetch_n; // unused in semantic-only
+        let res = sem.semantic_search(query, &sem_opts)?;
+        let semantic_hits = Some(res.total_indexed);
+        let hits: Vec<HybridHit> = res
+            .hits
+            .into_iter()
+            .enumerate()
+            .map(|(rank0, h)| HybridHit {
+                id: h.id,
+                score: h.score,
+                score_kind: ScoreKind::Cosine,
+                lexical_rank: None,
+                semantic_rank: Some(rank0 + 1),
+                snippet: None,
+            })
+            .collect();
+        let total_fused = hits.len();
+        Ok(HybridSearchResults {
+            hits,
+            elapsed: start.elapsed(),
+            total_fused,
+            lexical_hits: None,
+            semantic_hits,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +415,79 @@ mod tests {
     fn rrf_fuse_empty_inputs_returns_empty() {
         let fused = rrf_fuse(&[], &[], 60);
         assert!(fused.is_empty());
+    }
+
+    #[allow(unused_imports)]
+    use crate::query::Query as ParsedQuery;
+    use singularmem_core::{NewItem, Store};
+
+    #[test]
+    fn lexical_only_search_returns_bm25_scored_hits() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+
+        let hook = Index::open(&lex_path).unwrap();
+        let store = Store::open_with_hook(&store_path, Box::new(hook)).unwrap();
+        store
+            .ingest(NewItem::text("the quick brown fox jumps"))
+            .unwrap();
+        store
+            .ingest(NewItem::text("lazy dogs sleep all day"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let lex = Index::open(&lex_path).unwrap();
+        let searcher = HybridSearcher::lexical_only(&lex);
+        let opts = HybridSearchOptions::default();
+        let r = searcher.search("fox", &opts).expect("search ok");
+
+        assert!(!r.hits.is_empty(), "expected at least one hit");
+        for hit in &r.hits {
+            assert_eq!(hit.score_kind, ScoreKind::Bm25);
+            assert!(hit.lexical_rank.is_some());
+            assert!(
+                hit.semantic_rank.is_none(),
+                "lexical-only must not populate semantic_rank"
+            );
+        }
+        assert_eq!(r.semantic_hits, None);
+        assert!(r.lexical_hits.is_some());
+    }
+
+    #[test]
+    fn semantic_only_search_returns_cosine_scored_hits() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let sem_path = dir.path().join("sem");
+
+        let hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let store = Store::open_with_hook(&store_path, Box::new(hook)).unwrap();
+        store
+            .ingest(NewItem::text("the quick brown fox jumps"))
+            .unwrap();
+        store
+            .ingest(NewItem::text("lazy dogs sleep all day"))
+            .unwrap();
+        drop(store);
+
+        let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let searcher = HybridSearcher::semantic_only(&sem);
+        let opts = HybridSearchOptions::default();
+        let r = searcher.search("fox", &opts).expect("search ok");
+
+        assert!(!r.hits.is_empty());
+        for hit in &r.hits {
+            assert_eq!(hit.score_kind, ScoreKind::Cosine);
+            assert!(hit.semantic_rank.is_some());
+            assert!(hit.lexical_rank.is_none());
+            assert!(
+                hit.snippet.is_none(),
+                "semantic-only has no snippet source"
+            );
+        }
+        assert_eq!(r.lexical_hits, None);
+        assert!(r.semantic_hits.is_some());
     }
 }
