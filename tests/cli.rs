@@ -964,3 +964,241 @@ fn retrieve_with_default_adapter_emits_plain_format() {
         .stdout(predicate::str::contains("## memory 1"))
         .stdout(predicate::str::contains("the quick brown fox"));
 }
+
+#[test]
+fn retrieve_json_flag_emits_valid_json() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "json output fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--json",
+            "fixture",
+        ])
+        .output()
+        .expect("ran");
+    assert!(out.status.success(), "expected success, got {out:?}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    let blocks = parsed
+        .get("blocks")
+        .expect("blocks field")
+        .as_array()
+        .expect("array");
+    assert!(!blocks.is_empty(), "expected at least one block");
+    let b0 = &blocks[0];
+    for field in &[
+        "id",
+        "content",
+        "score",
+        "score_kind",
+        "source",
+        "tags",
+        "created_at",
+    ] {
+        assert!(b0.get(field).is_some(), "block missing field {field}: {b0}");
+    }
+    assert!(parsed.get("query").is_some());
+    assert!(parsed.get("elapsed").is_some());
+    assert!(parsed.get("total_considered").is_some());
+}
+
+#[test]
+fn retrieve_unknown_adapter_errors() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // No need to ingest — the unknown-adapter check fails before any I/O.
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--adapter",
+            "claude",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("unknown adapter 'claude'"))
+        .stderr(predicate::str::contains("known adapters: plain"));
+}
+
+#[test]
+fn retrieve_empty_query_errors() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "anything",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "retrieve", ""])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("query is empty"));
+}
+
+#[test]
+fn retrieve_no_indexes_errors_like_search() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    // Create store but never ingest and never run reindex.
+    singularmem()
+        .args(["--store", db.to_str().unwrap(), "list"])
+        .assert()
+        .success();
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "--no-index",
+            "retrieve",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("no search index exists"));
+}
+
+#[test]
+fn retrieve_mode_hybrid_errors_like_search() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "lexical only fixture",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--mode",
+            "hybrid",
+            "fixture",
+        ])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "hybrid search requires both indexes",
+        ));
+}
+
+#[test]
+fn retrieve_show_elapsed_writes_to_stderr() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "fox jumps",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--show-elapsed",
+            "fox",
+        ])
+        .output()
+        .expect("ran");
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("Retrieved") && stderr.contains("blocks"),
+        "expected timing line in stderr, got: {stderr}"
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        !stdout.contains("Retrieved"),
+        "timing should not be in stdout, got: {stdout}"
+    );
+}
+
+#[test]
+fn retrieve_limit_caps_block_count() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    for i in 0..10 {
+        singularmem()
+            .args([
+                "--store",
+                db.to_str().unwrap(),
+                "ingest",
+                "--content",
+                &format!("repeated word {i}"),
+            ])
+            .assert()
+            .success();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--limit",
+            "2",
+            "repeated",
+        ])
+        .output()
+        .expect("ran");
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let heading_count = stdout.matches("## memory").count();
+    assert_eq!(
+        heading_count, 2,
+        "expected exactly 2 memory headings, got {heading_count} in:\n{stdout}"
+    );
+}

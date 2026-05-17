@@ -57,7 +57,7 @@ impl Adapter for PlainAdapter {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "# Retrieved {} memor{} for query: {:?}",
+            "# {} memor{} for query: {:?}",
             ctx.blocks.len(),
             if ctx.blocks.len() == 1 { "y" } else { "ies" },
             ctx.query
