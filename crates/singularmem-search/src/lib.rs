@@ -8,6 +8,7 @@
 
 pub mod embedder;
 pub mod error;
+pub mod hybrid_query;
 pub mod index;
 pub mod model;
 pub mod query;
@@ -22,6 +23,9 @@ mod schema;
 
 pub use crate::embedder::{Embedder, FastembedEmbedder};
 pub use crate::error::{Error, Result};
+pub use crate::hybrid_query::{
+    HybridHit, HybridSearchOptions, HybridSearchResults, ScoreKind,
+};
 pub use crate::index::{Index, IndexOptions};
 pub use crate::model::EmbeddingModel;
 pub use crate::query::{Field, Query, QueryBuilder};
