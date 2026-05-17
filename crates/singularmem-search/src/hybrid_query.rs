@@ -189,11 +189,7 @@ impl HybridSearcher<'_> {
     /// Returns whatever error the underlying ranker raises
     /// ([`Error::QueryParse`], [`Error::Tantivy`], [`Error::Embedding`],
     /// [`Error::Usearch`], etc.).
-    pub fn search(
-        &self,
-        query: &str,
-        opts: &HybridSearchOptions,
-    ) -> Result<HybridSearchResults> {
+    pub fn search(&self, query: &str, opts: &HybridSearchOptions) -> Result<HybridSearchResults> {
         let start = std::time::Instant::now();
         let fetch_n = opts.limit.saturating_mul(opts.fetch_multiplier).max(1);
 
@@ -322,8 +318,11 @@ impl HybridSearcher<'_> {
             .enumerate()
             .map(|(i, id)| (*id, i + 1))
             .collect();
-        let snippets: HashMap<ItemId, Option<String>> =
-            lex_res.hits.into_iter().map(|h| (h.id, h.snippet)).collect();
+        let snippets: HashMap<ItemId, Option<String>> = lex_res
+            .hits
+            .into_iter()
+            .map(|h| (h.id, h.snippet))
+            .collect();
 
         // Fuse and truncate to `limit`.
         let fused = rrf_fuse(&lex_ids, &sem_ids, opts.rrf_k);
@@ -363,11 +362,8 @@ mod tests {
     fn new_holds_both_index_references() {
         let dir = TempDir::new().unwrap();
         let lex = Index::open(dir.path().join("lex")).unwrap();
-        let sem = EmbedderIndex::open(
-            dir.path().join("sem"),
-            Box::new(MockEmbedder::default()),
-        )
-        .unwrap();
+        let sem =
+            EmbedderIndex::open(dir.path().join("sem"), Box::new(MockEmbedder::default())).unwrap();
         let s = HybridSearcher::new(&lex, &sem);
         assert!(s.lexical.is_some(), "lexical must be set");
         assert!(s.semantic.is_some(), "semantic must be set");
@@ -385,11 +381,8 @@ mod tests {
     #[test]
     fn semantic_only_constructor_omits_lexical() {
         let dir = TempDir::new().unwrap();
-        let sem = EmbedderIndex::open(
-            dir.path().join("sem"),
-            Box::new(MockEmbedder::default()),
-        )
-        .unwrap();
+        let sem =
+            EmbedderIndex::open(dir.path().join("sem"), Box::new(MockEmbedder::default())).unwrap();
         let s = HybridSearcher::semantic_only(&sem);
         assert!(s.lexical.is_none());
         assert!(s.semantic.is_some());
@@ -548,10 +541,7 @@ mod tests {
             assert_eq!(hit.score_kind, ScoreKind::Cosine);
             assert!(hit.semantic_rank.is_some());
             assert!(hit.lexical_rank.is_none());
-            assert!(
-                hit.snippet.is_none(),
-                "semantic-only has no snippet source"
-            );
+            assert!(hit.snippet.is_none(), "semantic-only has no snippet source");
         }
         assert_eq!(r.lexical_hits, None);
         assert!(r.semantic_hits.is_some());
@@ -565,12 +555,9 @@ mod tests {
         let sem_path = dir.path().join("sem");
 
         let lex_hook = Index::open(&lex_path).unwrap();
-        let sem_hook =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
-        let multi = singularmem_core::hook::MultiHook::new(vec![
-            Box::new(lex_hook),
-            Box::new(sem_hook),
-        ]);
+        let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
         let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
         store
             .ingest(NewItem::text("the quick brown fox jumps over"))
@@ -582,8 +569,7 @@ mod tests {
         drop(store);
 
         let lex = Index::open(&lex_path).unwrap();
-        let sem =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
         let searcher = HybridSearcher::new(&lex, &sem);
         let opts = HybridSearchOptions::default();
         let r = searcher.search("fox", &opts).expect("search ok");
@@ -605,12 +591,9 @@ mod tests {
         let sem_path = dir.path().join("sem");
 
         let lex_hook = Index::open(&lex_path).unwrap();
-        let sem_hook =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
-        let multi = singularmem_core::hook::MultiHook::new(vec![
-            Box::new(lex_hook),
-            Box::new(sem_hook),
-        ]);
+        let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
         let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
         store
             .ingest(NewItem::text("a memorable phrase about foxes"))
@@ -619,8 +602,7 @@ mod tests {
         drop(store);
 
         let lex = Index::open(&lex_path).unwrap();
-        let sem =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
         let searcher = HybridSearcher::new(&lex, &sem);
         let r = searcher
             .search("foxes", &HybridSearchOptions::default())
@@ -645,12 +627,9 @@ mod tests {
         let sem_path = dir.path().join("sem");
 
         let lex_hook = Index::open(&lex_path).unwrap();
-        let sem_hook =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
-        let multi = singularmem_core::hook::MultiHook::new(vec![
-            Box::new(lex_hook),
-            Box::new(sem_hook),
-        ]);
+        let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
         let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
         for i in 0..30 {
             store
@@ -661,8 +640,7 @@ mod tests {
         drop(store);
 
         let lex = Index::open(&lex_path).unwrap();
-        let sem =
-            EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
         let searcher = HybridSearcher::new(&lex, &sem);
         let opts = HybridSearchOptions {
             limit: 5,

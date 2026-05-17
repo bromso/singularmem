@@ -153,7 +153,10 @@ mod tests {
             path: PathBuf::from("/tmp/foo.vectors"),
         };
         let msg = e.to_string();
-        assert!(msg.contains("semantic"), "missing side must appear: {msg:?}");
+        assert!(
+            msg.contains("semantic"),
+            "missing side must appear: {msg:?}"
+        );
         assert!(
             msg.contains("/tmp/foo.vectors"),
             "path must appear: {msg:?}"

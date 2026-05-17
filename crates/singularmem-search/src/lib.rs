@@ -24,7 +24,7 @@ mod schema;
 pub use crate::embedder::{Embedder, FastembedEmbedder};
 pub use crate::error::{Error, Result};
 pub use crate::hybrid_query::{
-    HybridHit, HybridSearcher, HybridSearchOptions, HybridSearchResults, ScoreKind,
+    HybridHit, HybridSearchOptions, HybridSearchResults, HybridSearcher, ScoreKind,
 };
 pub use crate::index::{Index, IndexOptions};
 pub use crate::model::EmbeddingModel;
