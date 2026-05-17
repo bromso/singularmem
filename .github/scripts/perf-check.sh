@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Enforce the four perf budgets from Constitution Principle X.
+# Enforce the five perf budgets from Constitution Principle X.
 # Reads criterion's per-bench estimates.json (stable JSON schema) rather
 # than parsing CLI bencher output.
-# Exit codes: 0 success, 11=size, 12=cold start, 13=ingest, 14=query.
+# Exit codes: 0 success, 11=size, 12=cold start, 13=ingest, 14=query, 15=semantic.
 
 set -euo pipefail
 
@@ -67,8 +67,20 @@ if awk -v v="$QUERY_MS" 'BEGIN { exit !(v >= 100) }'; then
     exit 14
 fi
 
+# 5. Semantic search latency: < 100 ms (median of criterion estimates.json)
+# bench path: target/criterion/semantic_search_latency/new/estimates.json
+# (bench_function at top level creates a single-level directory, same
+# convention as search_latency_p95 above.)
+SEM_NS=$(read_median_ns "semantic_search_latency")
+SEM_MS=$(awk -v ns="$SEM_NS" 'BEGIN { printf "%.2f", ns / 1e6 }')
+if awk -v v="$SEM_MS" 'BEGIN { exit !(v >= 100) }'; then
+    echo "FAIL: semantic search latency ${SEM_MS} ms exceeds 100 ms" >&2
+    exit 15
+fi
+
 echo "All perf budgets satisfied:"
 echo "  binary size:       ${SIZE_BYTES} bytes (limit ${SIZE_LIMIT})"
 echo "  cold start (p50):  ${COLD_START_P50} ms (limit 200)"
 echo "  ingest throughput: ${THROUGHPUT} items/s (limit 50)"
 echo "  search latency:    ${QUERY_MS} ms (limit 100)"
+echo "  semantic search:   ${SEM_MS} ms (limit 100)"
