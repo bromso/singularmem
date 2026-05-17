@@ -47,7 +47,7 @@ enum Command {
     Search(SearchArgs),
     /// Rebuild the Tantivy index from the `SQLite` store.
     Reindex(ReindexArgs),
-    /// [DEPRECATED] Semantic (vector) search. Use `search --mode semantic`.
+    /// \[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`.
     SemanticSearch(SemanticSearchArgs),
 }
 
