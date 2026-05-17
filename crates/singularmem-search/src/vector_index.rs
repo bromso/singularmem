@@ -431,6 +431,7 @@ impl VectorIndex {
 // ── VectorHit ─────────────────────────────────────────────────────────────
 
 /// A single result from [`VectorIndex::search`].
+#[derive(Debug, Clone)]
 pub struct VectorHit {
     /// The item identifier.
     pub id: ItemId,

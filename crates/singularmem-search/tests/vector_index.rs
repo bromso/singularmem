@@ -136,6 +136,16 @@ fn add_increments_doc_count_and_remove_decrements_it() {
 // ── Task 7: search (KNN) ──────────────────────────────────────────────────
 
 #[test]
+fn search_with_wrong_dim_returns_dim_mismatch() {
+    let dir = TempDir::new().unwrap();
+    let e = MockEmbedder::default(); // 384
+    let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+    let wrong_dim = vec![0.0_f32; 128];
+    let err = idx.search(&wrong_dim, 1).unwrap_err();
+    assert!(matches!(err, singularmem_search::Error::DimMismatch { expected: 384, got: 128 }));
+}
+
+#[test]
 fn search_returns_nearest_neighbours_by_cosine() {
     let dir = TempDir::new().unwrap();
     let e = MockEmbedder::default();
