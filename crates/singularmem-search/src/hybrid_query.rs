@@ -84,9 +84,98 @@ pub struct HybridSearchResults {
     pub semantic_hits: Option<u64>,
 }
 
+use crate::index::Index;
+use crate::vector_index::EmbedderIndex;
+
+/// Combines an optional lexical ([`Index`]) and an optional semantic
+/// ([`EmbedderIndex`]) backend, dispatching `search` to the appropriate code path
+/// based on which references are present.
+///
+/// Construct via [`HybridSearcher::new`], [`HybridSearcher::lexical_only`], or
+/// [`HybridSearcher::semantic_only`] depending on what's available at the call
+/// site. The CLI's `cmd_search` chooses based on directory probes when
+/// `--mode auto`; explicit modes pick directly.
+pub struct HybridSearcher<'a> {
+    /// Lexical (Tantivy) index, when available.
+    pub lexical: Option<&'a Index>,
+    /// Semantic (`USearch` + embedder) index, when available.
+    pub semantic: Option<&'a EmbedderIndex>,
+}
+
+impl<'a> HybridSearcher<'a> {
+    /// Both rankers present; [`Self::search`] will fuse via RRF.
+    #[must_use]
+    pub const fn new(lexical: &'a Index, semantic: &'a EmbedderIndex) -> Self {
+        Self {
+            lexical: Some(lexical),
+            semantic: Some(semantic),
+        }
+    }
+
+    /// Lexical only; [`Self::search`] returns BM25-scored hits with
+    /// `semantic_rank == None`.
+    #[must_use]
+    pub const fn lexical_only(lexical: &'a Index) -> Self {
+        Self {
+            lexical: Some(lexical),
+            semantic: None,
+        }
+    }
+
+    /// Semantic only; [`Self::search`] returns cosine-scored hits with
+    /// `lexical_rank == None` and `snippet == None`.
+    #[must_use]
+    pub const fn semantic_only(semantic: &'a EmbedderIndex) -> Self {
+        Self {
+            lexical: None,
+            semantic: Some(semantic),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::testing::MockEmbedder;
+    use crate::{EmbedderIndex, Index};
+    use tempfile::TempDir;
+
+    #[test]
+    fn new_holds_both_index_references() {
+        let dir = TempDir::new().unwrap();
+        let lex = Index::open(dir.path().join("lex")).unwrap();
+        let sem = EmbedderIndex::open(
+            dir.path().join("sem"),
+            Box::new(MockEmbedder::default()),
+        )
+        .unwrap();
+        let s = HybridSearcher::new(&lex, &sem);
+        assert!(s.lexical.is_some(), "lexical must be set");
+        assert!(s.semantic.is_some(), "semantic must be set");
+    }
+
+    #[test]
+    fn lexical_only_constructor_omits_semantic() {
+        let dir = TempDir::new().unwrap();
+        let lex = Index::open(dir.path().join("lex")).unwrap();
+        let s = HybridSearcher::lexical_only(&lex);
+        assert!(s.lexical.is_some());
+        assert!(s.semantic.is_none());
+    }
+
+    #[test]
+    fn semantic_only_constructor_omits_lexical() {
+        let dir = TempDir::new().unwrap();
+        let sem = EmbedderIndex::open(
+            dir.path().join("sem"),
+            Box::new(MockEmbedder::default()),
+        )
+        .unwrap();
+        let s = HybridSearcher::semantic_only(&sem);
+        assert!(s.lexical.is_none());
+        assert!(s.semantic.is_some());
+    }
 
     #[test]
     fn default_options_match_spec() {
