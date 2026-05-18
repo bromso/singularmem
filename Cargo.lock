@@ -2769,6 +2769,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "singularmem-adapter-openai"
+version = "0.6.0"
+dependencies = [
+ "jiff",
+ "singularmem-core",
+ "singularmem-retrieve",
+ "singularmem-search",
+]
+
+[[package]]
 name = "singularmem-core"
 version = "0.6.0"
 dependencies = [
