@@ -15,6 +15,10 @@ pub struct Config {
     /// Registered adapters available to clients. Mirrors the root
     /// binary's `known_adapters()` registry.
     pub known_adapters: Vec<Box<dyn Adapter>>,
+    /// When true, the server omits `memory_ingest` from `tools/list`
+    /// and rejects direct calls to it. Read tools open the store with
+    /// `SQLite` read-only mode as a third safety layer.
+    pub read_only: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -24,6 +28,7 @@ impl std::fmt::Debug for Config {
             .field("store_path", &self.store_path)
             .field("default_adapter", &self.default_adapter)
             .field("known_adapters", &adapter_names)
+            .field("read_only", &self.read_only)
             .finish()
     }
 }
@@ -32,7 +37,7 @@ impl Config {
     /// Build a config from CLI args. Adapter registry is hard-coded
     /// to the four constitutional Principle II providers.
     #[must_use]
-    pub fn new(store_path: PathBuf, default_adapter: String) -> Self {
+    pub fn new(store_path: PathBuf, default_adapter: String, read_only: bool) -> Self {
         Self {
             store_path,
             default_adapter,
@@ -42,6 +47,7 @@ impl Config {
                 Box::new(singularmem_adapter_openai::OpenAiAdapter),
                 Box::new(singularmem_adapter_gemini::GeminiAdapter),
             ],
+            read_only,
         }
     }
 }
@@ -52,20 +58,29 @@ mod tests {
 
     #[test]
     fn config_new_registers_four_adapters() {
-        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "plain".to_string());
+        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "plain".to_string(), false);
         let names: Vec<&str> = cfg.known_adapters.iter().map(|a| a.name()).collect();
         assert_eq!(names, vec!["plain", "claude", "openai", "gemini"]);
     }
 
     #[test]
     fn config_new_preserves_store_path() {
-        let cfg = Config::new(PathBuf::from("/tmp/custom.db"), "claude".to_string());
+        let cfg = Config::new(PathBuf::from("/tmp/custom.db"), "claude".to_string(), false);
         assert_eq!(cfg.store_path, PathBuf::from("/tmp/custom.db"));
     }
 
     #[test]
     fn config_new_preserves_default_adapter() {
-        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "openai".to_string());
+        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "openai".to_string(), false);
         assert_eq!(cfg.default_adapter, "openai");
+    }
+
+    #[test]
+    fn config_new_preserves_read_only_flag() {
+        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "plain".to_string(), true);
+        assert!(cfg.read_only);
+
+        let cfg = Config::new(PathBuf::from("/tmp/store.db"), "plain".to_string(), false);
+        assert!(!cfg.read_only);
     }
 }

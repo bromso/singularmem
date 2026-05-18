@@ -3091,6 +3091,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "dirs",
+ "jiff",
  "rmcp",
  "schemars 0.8.22",
  "serde",
