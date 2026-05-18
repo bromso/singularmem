@@ -17,7 +17,10 @@ use rmcp::{
 };
 use serde_json::json;
 
-use crate::tools::{handle_memory_retrieve, MemoryRetrieveArgs};
+use crate::tools::{
+    handle_memory_get, handle_memory_list, handle_memory_retrieve, handle_memory_revisions,
+    MemoryGetArgs, MemoryListArgs, MemoryRetrieveArgs, MemoryRevisionsArgs,
+};
 use crate::{Config, Error, Result};
 
 /// MCP server handler for Singularmem.
@@ -85,9 +88,13 @@ impl ServerHandler for SingularmemServer {
            + '_ {
         std::future::ready(Ok(ListToolsResult::with_all_items(vec![
             Self::memory_retrieve_tool(),
+            crate::tools::get::tool_descriptor(),
+            crate::tools::list::tool_descriptor(),
+            crate::tools::revisions::tool_descriptor(),
         ])))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -128,6 +135,68 @@ impl ServerHandler for SingularmemServer {
                     Err(other) => {
                         Err(McpError::internal_error(other.to_string(), None))
                     }
+                }
+            }
+            "memory_get" => {
+                let args_value = serde_json::Value::Object(request.arguments.unwrap_or_default());
+                let args: MemoryGetArgs = match serde_json::from_value(args_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return std::future::ready(Err(McpError::invalid_params(
+                            format!("failed to parse memory_get arguments: {e}"),
+                            None,
+                        )));
+                    }
+                };
+                match handle_memory_get(&args, &config) {
+                    Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                    Err(Error::InvalidId(msg)) => Err(McpError::invalid_params(
+                        format!("invalid item ID: {msg}"),
+                        None,
+                    )),
+                    Err(Error::Core(singularmem_core::Error::NotFound { id })) => Err(
+                        McpError::invalid_params(format!("memory not found: {id}"), None),
+                    ),
+                    Err(other) => Err(McpError::internal_error(other.to_string(), None)),
+                }
+            }
+            "memory_list" => {
+                let args_value = serde_json::Value::Object(request.arguments.unwrap_or_default());
+                let args: MemoryListArgs = match serde_json::from_value(args_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return std::future::ready(Err(McpError::invalid_params(
+                            format!("failed to parse memory_list arguments: {e}"),
+                            None,
+                        )));
+                    }
+                };
+                match handle_memory_list(&args, &config) {
+                    Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                    Err(other) => Err(McpError::internal_error(other.to_string(), None)),
+                }
+            }
+            "memory_revisions" => {
+                let args_value = serde_json::Value::Object(request.arguments.unwrap_or_default());
+                let args: MemoryRevisionsArgs = match serde_json::from_value(args_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return std::future::ready(Err(McpError::invalid_params(
+                            format!("failed to parse memory_revisions arguments: {e}"),
+                            None,
+                        )));
+                    }
+                };
+                match handle_memory_revisions(&args, &config) {
+                    Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                    Err(Error::InvalidId(msg)) => Err(McpError::invalid_params(
+                        format!("invalid item ID: {msg}"),
+                        None,
+                    )),
+                    Err(Error::Core(singularmem_core::Error::NotFound { id })) => Err(
+                        McpError::invalid_params(format!("memory not found: {id}"), None),
+                    ),
+                    Err(other) => Err(McpError::internal_error(other.to_string(), None)),
                 }
             }
             _other => Err(McpError::method_not_found::<
