@@ -18,7 +18,8 @@ singularmem-retrieve = { path = "../singularmem-retrieve" }
 singularmem-adapter-claude = { path = "../singularmem-adapter-claude" }
 singularmem-adapter-openai = { path = "../singularmem-adapter-openai" }
 singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini" }
-rmcp = { version = "=1.7.0", features = ["server", "transport-io"] }
+rmcp = { version = "=1.7.0", features = ["server", "transport-io", "macros"] }
+schemars = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
 clap = { version = "4.5", features = ["derive", "wrap_help", "env"] }
 dirs = "5"
@@ -27,6 +28,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+singularmem-search = { path = "../singularmem-search", features = ["testing"] }
+singularmem-core = { path = "../singularmem-core" }
 
 [[bin]]
 name = "singularmem-mcp"
