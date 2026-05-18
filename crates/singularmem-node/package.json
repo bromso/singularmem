@@ -1,0 +1,39 @@
+{
+  "name": "singularmem",
+  "version": "0.10.0",
+  "description": "Local-first persistent memory for LLM workflows — native Node bindings",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bromso/singularmem.git",
+    "directory": "crates/singularmem-node"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node",
+    "README.md"
+  ],
+  "napi": {
+    "name": "singularmem",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit test/types.test.mts",
+    "prepublishOnly": "napi prepublish"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

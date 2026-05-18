@@ -4,8 +4,13 @@
 //! and TypeScript consumers. See `package.json` for the npm-side wiring.
 
 #![allow(clippy::needless_pass_by_value)]
-// napi_derive macros will be used in subsequent tasks; allow the re-export now.
-#![allow(unused_imports)]
 
 #[macro_use]
 extern crate napi_derive;
+
+/// Returns the crate version. Used as a smoke-test export.
+#[napi]
+#[allow(clippy::must_use_candidate)]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
