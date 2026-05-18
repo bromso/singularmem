@@ -2808,6 +2808,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "singularmem-mcp"
+version = "0.8.0"
+dependencies = [
+ "clap",
+ "dirs",
+]
+
+[[package]]
 name = "singularmem-retrieve"
 version = "0.8.0"
 dependencies = [
