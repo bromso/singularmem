@@ -60,6 +60,7 @@ fn seed_via_cli(path: &Path, contents: &[&str]) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn handshake_and_retrieve_end_to_end() {
     let dir = TempDir::new().unwrap();
     let store = dir.path().join("store.db");
@@ -132,13 +133,40 @@ fn handshake_and_retrieve_end_to_end() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     );
 
-    // Step 3: tools/call memory_retrieve.
+    // Step 3: tools/list — assert 5 tools are registered.
     send(
         &mut stdin,
-        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_retrieve","arguments":{"query":"fox"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
     );
     let resp = recv_response(&mut reader);
     assert_eq!(resp["id"], 2);
+    let tools = resp["result"]["tools"].as_array().expect("tools array");
+    assert_eq!(
+        tools.len(),
+        5,
+        "expected 5 tools (memory_retrieve + 4 new), got: {tools:?}"
+    );
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    for expected in &[
+        "memory_retrieve",
+        "memory_get",
+        "memory_list",
+        "memory_revisions",
+        "memory_ingest",
+    ] {
+        assert!(
+            names.contains(expected),
+            "tool '{expected}' missing from list: {names:?}"
+        );
+    }
+
+    // Step 5: tools/call memory_retrieve.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_retrieve","arguments":{"query":"fox"}}}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 3);
     let content = resp["result"]["content"].as_array().expect("content array");
     assert!(!content.is_empty(), "empty content array: {resp}");
     let text = content[0]["text"].as_str().expect("text block");
@@ -147,7 +175,7 @@ fn handshake_and_retrieve_end_to_end() {
         "expected ingested memory in response, got: {text}"
     );
 
-    // Step 4: close stdin, wait for exit, check stderr was clean.
+    // Step 6: close stdin, wait for exit, check stderr was clean.
     drop(stdin);
     let exit = child.wait().expect("wait for mcp process");
     assert!(
