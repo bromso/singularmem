@@ -8,6 +8,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors returned by the MCP server.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// Server is launched in read-only mode and the request would write.
+    #[error("server is read-only; memory_ingest is disabled")]
+    ReadOnly,
+
+    /// Could not parse an `ItemId` argument.
+    #[error("invalid item ID: {0}")]
+    InvalidId(String),
+
     /// Underlying retrieve-crate failure.
     #[error("{0}")]
     Retrieve(#[from] singularmem_retrieve::Error),

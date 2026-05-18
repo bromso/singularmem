@@ -45,6 +45,12 @@ struct Args {
     /// `tracing` log level for stderr.
     #[arg(long, env = "RUST_LOG", value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
+
+    /// Open the store in read-only mode. When set, `memory_ingest` is
+    /// omitted from `tools/list` AND direct calls are rejected. Read
+    /// tools open the store with `SQLite` read-only mode.
+    #[arg(long, env = "SINGULARMEM_READ_ONLY", default_value_t = false)]
+    read_only: bool,
 }
 
 /// Adapter choices recognised at startup. Mirrors the registered
@@ -123,8 +129,11 @@ async fn main() -> std::process::ExitCode {
         .try_init();
 
     let store_path = args.store.unwrap_or_else(default_store_path);
-    let config =
-        singularmem_mcp::Config::new(store_path, args.default_adapter.as_str().to_string());
+    let config = singularmem_mcp::Config::new(
+        store_path,
+        args.default_adapter.as_str().to_string(),
+        args.read_only,
+    );
 
     match singularmem_mcp::serve(config).await {
         Ok(()) => std::process::ExitCode::SUCCESS,

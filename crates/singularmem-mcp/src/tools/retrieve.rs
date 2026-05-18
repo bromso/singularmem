@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use singularmem_core::Store;
 use singularmem_retrieve::{Adapter, RetrieveOptions, Retriever};
 use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
@@ -68,7 +67,7 @@ pub fn handle_memory_retrieve(
 
     // 3. Open store + indexes per-request. The spec is explicit: no
     // caching. Microsecond-scale per the v0.1.0 bench numbers.
-    let store = Store::open(&config.store_path)?;
+    let store = crate::tools::util::open_store_for_reading(config)?;
     let tantivy_path = derive_index_path(&config.store_path);
     let vectors_path = derive_vectors_path(&config.store_path);
     let has_lex = tantivy_path.exists();
@@ -128,7 +127,7 @@ fn derive_vectors_path(store_path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use singularmem_core::NewItem;
+    use singularmem_core::{NewItem, Store};
     use tempfile::TempDir;
 
     /// Seed a fresh store + both sidecars with `n` items using
@@ -162,7 +161,7 @@ mod tests {
         // Set the env var so the handler picks MockEmbedder.
         std::env::set_var("SINGULARMEM_TEST_EMBEDDER", "mock");
 
-        let config = Config::new(store_path, default_adapter.to_string());
+        let config = Config::new(store_path, default_adapter.to_string(), false);
         (dir, config)
     }
 
@@ -274,7 +273,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store_path = dir.path().join("store.db");
         let _store = Store::open(&store_path).unwrap();
-        let config = Config::new(store_path, "plain".to_string());
+        let config = Config::new(store_path, "plain".to_string(), false);
 
         let args = MemoryRetrieveArgs {
             query: "anything".to_string(),
