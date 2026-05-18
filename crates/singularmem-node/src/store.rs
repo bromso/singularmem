@@ -19,6 +19,7 @@
 //! calling `into_value` and uses our pre-built error untouched.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
@@ -175,8 +176,8 @@ impl Store {
     ///   (`InvalidStorePath`, `Io`, `Sqlite`, `UnsupportedFormatVersion`, …).
     // Error conditions are documented in the @throws JSDoc above; the
     // `missing_errors_doc` lint does not recognise @throws as a substitute.
-    #[allow(clippy::missing_errors_doc)]
     #[napi]
+    #[allow(clippy::missing_errors_doc)]
     pub fn open(
         path: String,
         options: Option<StoreOptions>,
@@ -207,9 +208,7 @@ impl Store {
     /// @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
-    pub fn get(&self, _env: Env, id: String) -> napi::Result<AsyncTask<GetTask>> {
-        use std::str::FromStr;
-
+    pub fn get(&self, id: String) -> napi::Result<AsyncTask<GetTask>> {
         // Defer ULID parse errors into the Task so that `store.get('bad')`
         // returns a *rejected Promise* rather than throwing synchronously.
         // This mirrors the `Store::open('')` pattern.

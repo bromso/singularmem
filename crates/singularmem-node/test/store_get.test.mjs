@@ -8,11 +8,13 @@ test('Store.get returns the item for a known ID', async () => {
   seedStore(path, [{ content: 'hello world', tags: ['greet'] }]);
   const store = await Store.open(path);
 
-  // Use the CLI export verb to discover the seeded item's ID.
-  const dumpResult = await import('node:child_process').then((cp) =>
-    cp.spawnSync('cargo', ['run', '-q', '-p', 'singularmem', '--', 'export', '--store', path], {
-      stdio: 'pipe', encoding: 'utf8',
-    }),
+  // TODO(Task 7): replace this cargo-export shell-out with `await store.list()`
+  // once Store.list exists.
+  const { spawnSync } = await import('node:child_process');
+  const dumpResult = spawnSync(
+    'cargo',
+    ['run', '-q', '-p', 'singularmem', '--', 'export', '--store', path],
+    { stdio: 'pipe', encoding: 'utf8' },
   );
   if (dumpResult.status !== 0) {
     throw new Error(`export failed: ${dumpResult.stderr}`);
