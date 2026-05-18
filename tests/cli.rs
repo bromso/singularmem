@@ -1040,7 +1040,9 @@ fn retrieve_unknown_adapter_errors() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains("unknown adapter 'nonexistent'"))
-        .stderr(predicate::str::contains("known adapters: plain, claude"));
+        .stderr(predicate::str::contains(
+            "known adapters: plain, claude, openai",
+        ));
 }
 
 #[test]
@@ -1241,4 +1243,39 @@ fn retrieve_with_claude_adapter_emits_xml_documents() {
         .stdout(predicate::str::contains("</document_content>"))
         .stdout(predicate::str::contains("</document>"))
         .stdout(predicate::str::contains("</documents>"));
+}
+
+#[test]
+fn retrieve_with_openai_adapter_emits_bracket_citations() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "the quick brown fox jumps",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--adapter",
+            "openai",
+            "fox",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Use the following retrieved memories. Cite by [N] index.",
+        ))
+        .stdout(predicate::str::contains("[1]"))
+        .stdout(predicate::str::contains("the quick brown fox"));
 }
