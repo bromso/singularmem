@@ -52,6 +52,7 @@ singularmem-core = { path = "crates/singularmem-core" }
 singularmem-search = { path = "crates/singularmem-search", features = ["testing"] }
 singularmem-retrieve = { path = "crates/singularmem-retrieve" }
 singularmem-adapter-claude = { path = "crates/singularmem-adapter-claude" }
+singularmem-adapter-openai = { path = "crates/singularmem-adapter-openai" }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 dirs = "5"
 serde_json = { workspace = true }

@@ -2748,6 +2748,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "singularmem-adapter-claude",
+ "singularmem-adapter-openai",
  "singularmem-core",
  "singularmem-retrieve",
  "singularmem-search",
@@ -2760,6 +2761,16 @@ dependencies = [
 
 [[package]]
 name = "singularmem-adapter-claude"
+version = "0.6.0"
+dependencies = [
+ "jiff",
+ "singularmem-core",
+ "singularmem-retrieve",
+ "singularmem-search",
+]
+
+[[package]]
+name = "singularmem-adapter-openai"
 version = "0.6.0"
 dependencies = [
  "jiff",
