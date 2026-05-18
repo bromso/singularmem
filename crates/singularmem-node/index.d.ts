@@ -6,21 +6,17 @@
 /**
  * An item retrieved from the store.
  *
- * `createdAt` is provided as milliseconds since the Unix epoch (f64).
- * The core stores nanosecond precision; sub-millisecond precision is
- * lost when crossing the boundary. JS callers can wrap with `new Date(ms)`
- * if a `Date` object is preferred.
+ * `createdAt` is a JS `Date` constructed from the wall-clock time the store
+ * assigned at ingest. The core stores nanosecond precision; sub-millisecond
+ * precision is lost when crossing the boundary.
  */
 export interface Item {
   /** 26-character Crockford base32 ULID string. */
   id: string
   /** UTF-8 text content. */
   content: string
-  /**
-   * Wall-clock time the store assigned at ingest, as ms since epoch.
-   * Lossy: ms precision vs core's ns precision.
-   */
-  createdAt: number
+  /** Wall-clock time the store assigned at ingest. Lossy: ms precision vs core's ns precision. */
+  createdAt: Date
   /** ID of the item this supersedes, if any. */
   supersedes?: string
   /** Tags attached to the item. Sorted, deduplicated. */

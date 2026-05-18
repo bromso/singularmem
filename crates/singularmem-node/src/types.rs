@@ -4,18 +4,18 @@
 
 /// An item retrieved from the store.
 ///
-/// `createdAt` is provided as milliseconds since the Unix epoch (f64).
-/// The core stores nanosecond precision; sub-millisecond precision is
-/// lost when crossing the boundary. JS callers can wrap with `new Date(ms)`
-/// if a `Date` object is preferred.
+/// `createdAt` is a JS `Date` constructed from the wall-clock time the store
+/// assigned at ingest. The core stores nanosecond precision; sub-millisecond
+/// precision is lost when crossing the boundary.
 #[napi(object)]
 pub struct Item {
     /// 26-character Crockford base32 ULID string.
     pub id: String,
     /// UTF-8 text content.
     pub content: String,
-    /// Wall-clock time the store assigned at ingest, as ms since epoch.
+    /// Wall-clock time the store assigned at ingest.
     /// Lossy: ms precision vs core's ns precision.
+    #[napi(ts_type = "Date")]
     pub created_at: f64,
     /// ID of the item this supersedes, if any.
     pub supersedes: Option<String>,
@@ -96,5 +96,25 @@ mod tests {
     fn item_metadata_preserved() {
         let item: Item = sample_core_item().into();
         assert_eq!(item.metadata, serde_json::json!({"k": "v"}));
+    }
+
+    #[test]
+    fn item_supersedes_some_round_trips() {
+        let core = singularmem_core::Item {
+            supersedes: Some(ItemId::from_str("01HXCCCCCCCCCCCCCCCCCCCCC0").unwrap()),
+            ..sample_core_item()
+        };
+        let item: Item = core.into();
+        assert_eq!(item.supersedes, Some("01HXCCCCCCCCCCCCCCCCCCCCC0".to_string()));
+    }
+
+    #[test]
+    fn item_source_none_round_trips() {
+        let core = singularmem_core::Item {
+            source: None,
+            ..sample_core_item()
+        };
+        let item: Item = core.into();
+        assert!(item.source.is_none());
     }
 }
