@@ -31,6 +31,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+assert_cmd = { workspace = true }
 singularmem-search = { path = "../singularmem-search", features = ["testing"] }
 singularmem-core = { path = "../singularmem-core" }
 

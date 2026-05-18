@@ -3088,6 +3088,7 @@ dependencies = [
 name = "singularmem-mcp"
 version = "0.8.0"
 dependencies = [
+ "assert_cmd",
  "clap",
  "dirs",
  "rmcp",
