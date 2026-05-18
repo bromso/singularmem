@@ -1,6 +1,6 @@
 {
   "name": "singularmem",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Local-first persistent memory for LLM workflows — native Node bindings",
   "main": "index.js",
   "types": "index.d.ts",
