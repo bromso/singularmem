@@ -52,4 +52,13 @@ export declare class Store {
    *   (`InvalidStorePath`, `Io`, `Sqlite`, `UnsupportedFormatVersion`, …).
    */
   static open(path: string, options?: StoreOptions | undefined | null): Promise<Store>
+  /**
+   * Look up a single item by its ULID.
+   *
+   * @param id A 26-character Crockford base32 ULID string.
+   * @returns The matching item.
+   * @throws `Error` with `.code === "NotFound"` if the ID does not exist.
+   * @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+   */
+  get(id: string): Promise<Item>
 }

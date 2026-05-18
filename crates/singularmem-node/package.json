@@ -24,7 +24,9 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
+    "postbuild": "node scripts/patch-index.js",
     "build:debug": "napi build --platform",
+    "postbuild:debug": "node scripts/patch-index.js",
     "test": "node --test 'test/**/*.test.mjs'",
     "typecheck": "tsc --noEmit test/types.test.mts",
     "prepublishOnly": "napi prepublish"

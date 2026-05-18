@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Error as NapiError, Task};
+use singularmem_core::item::ItemId;
 use singularmem_core::{Store as CoreStore, StoreOptions as CoreStoreOptions};
 
 use crate::error::{coded_error_to_napi_raw, invalid_store_path, node_error_to_napi_with_raw, NodeError};
@@ -89,6 +90,61 @@ impl Task for OpenStoreTask {
     }
 }
 
+// ── GetTask ──────────────────────────────────────────────────────────────────
+
+pub struct GetTask {
+    store: Arc<CoreStore>,
+    /// `None` when the ID failed to parse; `compute` will immediately fail
+    /// via `pre_error` in that case, so the value is never used.
+    id: Option<ItemId>,
+    /// Pre-set error (e.g. ULID parse failure).  When `Some`, `compute`
+    /// immediately returns `Err` so the task rejects the Promise, ensuring
+    /// `store.get('bad')` returns a *rejected Promise* rather than throwing
+    /// synchronously (mirrors the `OpenStoreTask::pre_error` pattern).
+    pre_error: Option<NapiError<&'static str>>,
+    /// Populated by `compute` on core error so `reject` can convert it.
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for GetTask {
+    type Output = singularmem_core::Item;
+    type JsValue = crate::types::Item;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        // Surface any pre-validation error (e.g. ULID parse failure) as a
+        // task failure so the Promise rejects rather than the method throwing.
+        if self.pre_error.is_some() {
+            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+        }
+        let id = self.id.expect("id must be Some when pre_error is None");
+        match self.store.get(id) {
+            Ok(item) => Ok(item),
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(napi::Status::GenericFailure, "get failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into())
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        // Pre-validation error (InvalidId) takes priority.
+        if let Some(coded) = self.pre_error.take() {
+            return Err(coded_error_to_napi_raw(env, coded));
+        }
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown get error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options for `Store.open`.
@@ -104,7 +160,6 @@ pub struct StoreOptions {
 /// A handle to a Singularmem store on disk.
 #[napi]
 pub struct Store {
-    #[allow(dead_code)] // used by later task bindings (get, list, revisions, …)
     pub(crate) inner: Arc<CoreStore>,
 }
 
@@ -139,6 +194,36 @@ impl Store {
         Ok(AsyncTask::new(OpenStoreTask {
             path: PathBuf::from(path),
             read_only,
+            pre_error,
+            failed: None,
+        }))
+    }
+
+    /// Look up a single item by its ULID.
+    ///
+    /// @param id A 26-character Crockford base32 ULID string.
+    /// @returns The matching item.
+    /// @throws `Error` with `.code === "NotFound"` if the ID does not exist.
+    /// @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn get(&self, _env: Env, id: String) -> napi::Result<AsyncTask<GetTask>> {
+        use std::str::FromStr;
+
+        // Defer ULID parse errors into the Task so that `store.get('bad')`
+        // returns a *rejected Promise* rather than throwing synchronously.
+        // This mirrors the `Store::open('')` pattern.
+        let (item_id, pre_error) = match ItemId::from_str(&id) {
+            Ok(id) => (Some(id), None),
+            Err(e) => {
+                let core_err = singularmem_core::Error::from(e);
+                let coded: NapiError<&'static str> = NodeError::from(core_err).into();
+                (None, Some(coded))
+            }
+        };
+        Ok(AsyncTask::new(GetTask {
+            store: self.inner.clone(),
+            id: item_id,
             pre_error,
             failed: None,
         }))

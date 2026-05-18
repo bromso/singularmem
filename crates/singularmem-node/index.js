@@ -310,7 +310,31 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Store, version } = nativeBinding
+const { Store: _NativeStore, version } = nativeBinding
+
+/**
+ * Convert an Item from the native binding into a JS-friendly shape:
+ * `createdAt` is promoted from a number (ms since epoch) to a `Date`.
+ */
+function liftItem(raw) {
+  return Object.assign(Object.create(null), raw, { createdAt: new Date(raw.createdAt) })
+}
+
+/** Public Store class — thin wrapper that promotes `createdAt` to `Date`. */
+class Store {
+  /** @private */
+  constructor(native) {
+    this._native = native
+  }
+
+  static open(path, options) {
+    return _NativeStore.open(path, options).then((native) => new Store(native))
+  }
+
+  get(id) {
+    return this._native.get(id).then(liftItem)
+  }
+}
 
 module.exports.Store = Store
 module.exports.version = version
