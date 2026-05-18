@@ -4,8 +4,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod error;
 pub mod server;
 
+pub use crate::config::Config;
 pub use crate::error::{Error, Result};
 pub use crate::server::serve;

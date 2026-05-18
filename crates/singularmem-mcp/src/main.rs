@@ -122,12 +122,11 @@ async fn main() -> std::process::ExitCode {
         )
         .try_init();
 
-    let _store = args.store.unwrap_or_else(default_store_path);
-    let _adapter = args.default_adapter.as_str();
+    let store_path = args.store.unwrap_or_else(default_store_path);
+    let config =
+        singularmem_mcp::Config::new(store_path, args.default_adapter.as_str().to_string());
 
-    // Task 3 will build a Config from the args + pass it to serve().
-    // For now Task 2 just exercises the rmcp handshake with no tools.
-    match singularmem_mcp::serve().await {
+    match singularmem_mcp::serve(config).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "MCP server exited with error");
