@@ -15,7 +15,10 @@ export interface Item {
   id: string
   /** UTF-8 text content. */
   content: string
-  /** Wall-clock time the store assigned at ingest. Lossy: ms precision vs core's ns precision. */
+  /**
+   * Wall-clock time the store assigned at ingest.
+   * Lossy: ms precision vs core's ns precision.
+   */
   createdAt: Date
   /** ID of the item this supersedes, if any. */
   supersedes?: string
