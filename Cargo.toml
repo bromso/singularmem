@@ -23,6 +23,7 @@ tantivy = "=0.22.1"
 fastembed = { version = "=4.4.0", default-features = false, features = ["ort-download-binaries", "online"] }
 usearch = "=2.15.3"
 bincode = "1.3"
+tokio = "1"
 
 # Dev dependencies (used by both core and root binary tests)
 tempfile = "3.10"

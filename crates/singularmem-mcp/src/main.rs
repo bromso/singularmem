@@ -78,6 +78,8 @@ enum LogLevel {
 }
 
 impl LogLevel {
+    // Used by Config construction in Task 3.
+    #[allow(dead_code)]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Trace => "trace",
@@ -98,12 +100,38 @@ fn default_store_path() -> PathBuf {
         .join("store.db")
 }
 
-fn main() -> std::process::ExitCode {
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
     let args = Args::parse();
+
+    // Configure tracing to write to stderr only. stdout is owned by
+    // rmcp for JSON-RPC framing — any println! or stray stdout write
+    // would corrupt the protocol stream.
+    let filter = match args.log_level {
+        LogLevel::Trace => "trace",
+        LogLevel::Debug => "debug",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new(filter)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+
     let _store = args.store.unwrap_or_else(default_store_path);
     let _adapter = args.default_adapter.as_str();
-    let _level = args.log_level.as_str();
-    // Task 2 wires the rmcp server loop. For now the binary just parses
-    // args and exits successfully so --help works and the workspace builds.
-    std::process::ExitCode::SUCCESS
+
+    // Task 3 will build a Config from the args + pass it to serve().
+    // For now Task 2 just exercises the rmcp handshake with no tools.
+    match singularmem_mcp::serve().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            tracing::error!(error = %e, "MCP server exited with error");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
