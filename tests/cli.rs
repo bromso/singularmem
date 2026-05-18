@@ -1041,7 +1041,7 @@ fn retrieve_unknown_adapter_errors() {
         .code(1)
         .stderr(predicate::str::contains("unknown adapter 'nonexistent'"))
         .stderr(predicate::str::contains(
-            "known adapters: plain, claude, openai",
+            "known adapters: plain, claude, openai, gemini",
         ));
 }
 
@@ -1277,5 +1277,40 @@ fn retrieve_with_openai_adapter_emits_bracket_citations() {
             "Use the following retrieved memories. Cite by [N] index.",
         ))
         .stdout(predicate::str::contains("[1]"))
+        .stdout(predicate::str::contains("the quick brown fox"));
+}
+
+#[test]
+fn retrieve_with_gemini_adapter_emits_source_headers() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "the quick brown fox jumps",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--adapter",
+            "gemini",
+            "fox",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Use the following sources to ground your answer.",
+        ))
+        .stdout(predicate::str::contains("Source 1"))
         .stdout(predicate::str::contains("the quick brown fox"));
 }

@@ -395,7 +395,7 @@ fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
         Box::new(singularmem_retrieve::PlainAdapter),
         Box::new(singularmem_adapter_claude::ClaudeAdapter),
         Box::new(singularmem_adapter_openai::OpenAiAdapter),
-        // 3d will add: Box::new(singularmem_adapter_gemini::GeminiAdapter),
+        Box::new(singularmem_adapter_gemini::GeminiAdapter),
     ]
 }
 
