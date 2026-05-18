@@ -79,7 +79,6 @@ impl From<NodeError> for NapiError<&'static str> {
 
 /// Build a napi error for invalid store paths surfaced by the binding layer
 /// itself (not by the core).
-#[allow(dead_code)] // used by binding functions added in later tasks
 pub fn invalid_store_path(path: &str) -> NapiError<&'static str> {
     NapiError::new(
         "InvalidStorePath",

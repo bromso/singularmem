@@ -9,8 +9,11 @@
 extern crate napi_derive;
 
 mod error;
+mod store;
 mod types;
 
+pub use store::Store;
+pub use store::StoreOptions;
 pub use types::Item;
 
 /// Returns the crate version. Used as a smoke-test export.

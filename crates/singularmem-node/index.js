@@ -310,6 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { version } = nativeBinding
+const { Store, version } = nativeBinding
 
+module.exports.Store = Store
 module.exports.version = version
