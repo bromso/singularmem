@@ -8,6 +8,8 @@
 #[macro_use]
 extern crate napi_derive;
 
+mod error;
+
 /// Returns the crate version. Used as a smoke-test export.
 #[napi]
 #[allow(clippy::must_use_candidate)]
