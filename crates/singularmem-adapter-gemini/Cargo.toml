@@ -1,0 +1,20 @@
+[package]
+name = "singularmem-adapter-gemini"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Singularmem retrieval adapter for Google Gemini (pure formatter, no HTTP)."
+
+[lints]
+workspace = true
+
+[dependencies]
+singularmem-retrieve = { path = "../singularmem-retrieve" }
+
+[dev-dependencies]
+singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search" }
+jiff = { workspace = true }
