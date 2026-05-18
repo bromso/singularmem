@@ -86,4 +86,13 @@ export declare class Store {
    * @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
    */
   revisions(id: string): Promise<Array<Item>>
+  /** Return the on-disk format version of this store, as a semver string. */
+  formatVersion(): Promise<string>
+  /**
+   * Export every item in the store as JSONL (one JSON object per line).
+   * The first line is a meta header describing the format version.
+   *
+   * @returns The full JSONL payload as a UTF-8 string.
+   */
+  export(): Promise<string>
 }

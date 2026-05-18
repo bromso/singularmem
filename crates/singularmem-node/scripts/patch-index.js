@@ -9,6 +9,8 @@
  *    returned by `Store.get, Store.list, Store.revisions (and future methods)`.
  * 2. Wraps `Store.open` to return instances of the JS `Store` class rather
  *    than the raw native object, so the JS wrapper methods are available.
+ * 3. Forwards `Store.formatVersion` and `Store.export` directly to the native
+ *    binding (no item lifting required).
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -51,6 +53,14 @@ class Store {
 
   revisions(id) {
     return this._native.revisions(id).then((items) => items.map(liftItem))
+  }
+
+  formatVersion() {
+    return this._native.formatVersion()
+  }
+
+  export() {
+    return this._native.export()
   }
 }
 

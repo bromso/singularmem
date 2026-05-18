@@ -342,6 +342,14 @@ class Store {
   revisions(id) {
     return this._native.revisions(id).then((items) => items.map(liftItem))
   }
+
+  formatVersion() {
+    return this._native.formatVersion()
+  }
+
+  export() {
+    return this._native.export()
+  }
 }
 
 module.exports.Store = Store

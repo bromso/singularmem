@@ -251,6 +251,84 @@ impl Task for RevisionsTask {
     }
 }
 
+// ── FormatVersionTask ────────────────────────────────────────────────────────
+
+pub struct FormatVersionTask {
+    store: Arc<CoreStore>,
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for FormatVersionTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        match self.store.format_version() {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(napi::Status::GenericFailure, "format_version failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown format_version error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
+// ── ExportTask ───────────────────────────────────────────────────────────────
+
+pub struct ExportTask {
+    store: Arc<CoreStore>,
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for ExportTask {
+    type Output = Vec<u8>;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let mut buf: Vec<u8> = Vec::new();
+        match self.store.export(&mut buf) {
+            Ok(()) => Ok(buf),
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(napi::Status::GenericFailure, "export failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        String::from_utf8(output).map_err(|e| {
+            NapiError::new(
+                napi::Status::GenericFailure,
+                format!("export produced non-UTF-8 bytes: {e}"),
+            )
+        })
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown export error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options for `Store.open`.
@@ -384,6 +462,29 @@ impl Store {
             store: self.inner.clone(),
             id: item_id,
             pre_error,
+            failed: None,
+        }))
+    }
+
+    /// Return the on-disk format version of this store, as a semver string.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn format_version(&self) -> napi::Result<AsyncTask<FormatVersionTask>> {
+        Ok(AsyncTask::new(FormatVersionTask {
+            store: self.inner.clone(),
+            failed: None,
+        }))
+    }
+
+    /// Export every item in the store as JSONL (one JSON object per line).
+    /// The first line is a meta header describing the format version.
+    ///
+    /// @returns The full JSONL payload as a UTF-8 string.
+    #[napi(js_name = "export")]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn export_jsonl(&self) -> napi::Result<AsyncTask<ExportTask>> {
+        Ok(AsyncTask::new(ExportTask {
+            store: self.inner.clone(),
             failed: None,
         }))
     }
