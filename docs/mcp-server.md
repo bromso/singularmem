@@ -15,9 +15,13 @@ singularmem-mcp binary
       │
       ├── Configuration (CLI flags + env vars)
       ├── rmcp server loop (initialize + tools/list + tools/call)
-      └── memory_retrieve handler
-              │
-              ▼
+      └── Tool handlers:
+              ├── memory_retrieve (read; uses Retriever + adapter)
+              ├── memory_get      (read; Store::get)
+              ├── memory_list     (read; Store::list / list_by_tags)
+              ├── memory_revisions (read; Store::revision_history)
+              └── memory_ingest   (write; Store::ingest + auto-wired hooks)
+
         Retriever (singularmem-retrieve)
               │
               ├── HybridSearcher (singularmem-search)
@@ -48,23 +52,47 @@ of the existing `singularmem` CLI). Three reasons:
 3. **Optional install.** Users who want only the CLI can
    `cargo install singularmem` and skip the MCP server entirely.
 
-## Available tools (4a)
+## Available tools (4b)
 
-- **`memory_retrieve`** — read-only retrieval against the local
-  Singularmem store. Returns adapter-formatted memory blocks ready
-  to embed in a prompt.
+- **`memory_retrieve`** — semantic + lexical hybrid retrieval against
+  the local store, returning adapter-formatted prompt-ready blocks.
+- **`memory_get`** — fetch a single memory by ULID with full metadata.
+- **`memory_list`** — enumerate memories, optionally filtered by
+  tag (AND-semantics).
+- **`memory_revisions`** — walk the supersedes chain newest-first.
+- **`memory_ingest`** — add a new memory. Auto-wires Tantivy +
+  USearch hooks so the new memory is immediately retrievable.
+  Disabled when the server is launched with `--read-only`.
 
-See `crates/singularmem-mcp/README.md` for the full input schema
+See `crates/singularmem-mcp/README.md` for the full input schemas
 and example calls.
+
+## Read-only mode
+
+Launch with `--read-only` (or `SINGULARMEM_READ_ONLY=true`) to
+exclude `memory_ingest` from the tool surface. Use cases:
+
+- Shared knowledge-base deployments where only specific authors
+  ingest via the CLI; the MCP server is read-only for everyone
+  else.
+- Demos / sandboxes where you want the LLM to read sample memories
+  without modifying them.
+- Defense-in-depth: even if an LLM ignores instructions and tries
+  to write, the server rejects the call.
+
+The `Store` is also opened with SQLite's read-only flag in this
+mode, so accidental writes from any code path fail with a SQLite
+error rather than silently mutating data.
 
 ## Roadmap
 
-- **4b** (next): `memory_ingest` write tool + utility tools
-  (`memory_get`, `memory_list`, `memory_revisions`).
-- **Later**: HTTP/SSE transport (in addition to stdio).
-- **Later**: MCP resources (read-only URIs for individual memories).
-- **Later**: MCP prompts (pre-baked prompts that incorporate retrieved
-  memory).
+The v0 tool surface is complete with 4b. Future MCP work:
+
+- **HTTP / SSE transport** (in addition to stdio).
+- **MCP resources** — read-only URIs for individual memories
+  (`singularmem://memory/<id>`).
+- **MCP prompts** — pre-baked prompts that incorporate retrieved
+  memory.
 
 ## Related docs
 
