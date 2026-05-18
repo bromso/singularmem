@@ -2747,6 +2747,7 @@ dependencies = [
  "dirs",
  "predicates",
  "serde_json",
+ "singularmem-adapter-claude",
  "singularmem-core",
  "singularmem-retrieve",
  "singularmem-search",
@@ -2755,6 +2756,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+]
+
+[[package]]
+name = "singularmem-adapter-claude"
+version = "0.5.0"
+dependencies = [
+ "jiff",
+ "singularmem-core",
+ "singularmem-retrieve",
+ "singularmem-search",
 ]
 
 [[package]]

@@ -1024,20 +1024,23 @@ fn retrieve_unknown_adapter_errors() {
     let db = dir.path().join("store.db");
 
     // No need to ingest — the unknown-adapter check fails before any I/O.
+    // Use a deliberately-fake adapter name; each new cloud adapter
+    // (sub-projects 3b/3c/3d) makes its own name a valid choice, so the
+    // unknown-adapter test must use something that will never become valid.
     singularmem()
         .args([
             "--store",
             db.to_str().unwrap(),
             "retrieve",
             "--adapter",
-            "claude",
+            "nonexistent",
             "anything",
         ])
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("unknown adapter 'claude'"))
-        .stderr(predicate::str::contains("known adapters: plain"));
+        .stderr(predicate::str::contains("unknown adapter 'nonexistent'"))
+        .stderr(predicate::str::contains("known adapters: plain, claude"));
 }
 
 #[test]
@@ -1201,4 +1204,41 @@ fn retrieve_limit_caps_block_count() {
         heading_count, 2,
         "expected exactly 2 memory headings, got {heading_count} in:\n{stdout}"
     );
+}
+
+#[test]
+fn retrieve_with_claude_adapter_emits_xml_documents() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "the quick brown fox jumps",
+        ])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "retrieve",
+            "--adapter",
+            "claude",
+            "fox",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<documents>"))
+        .stdout(predicate::str::contains("<document index=\"1\">"))
+        .stdout(predicate::str::contains("<document_content>"))
+        .stdout(predicate::str::contains("the quick brown fox"))
+        .stdout(predicate::str::contains("</document_content>"))
+        .stdout(predicate::str::contains("</document>"))
+        .stdout(predicate::str::contains("</documents>"));
 }
