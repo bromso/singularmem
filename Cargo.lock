@@ -2748,6 +2748,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "singularmem-adapter-claude",
+ "singularmem-adapter-openai",
  "singularmem-core",
  "singularmem-retrieve",
  "singularmem-search",
