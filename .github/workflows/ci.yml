@@ -114,3 +114,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features
       - run: cargo test --all-targets
+
+  node-bindings:
+    name: node bindings (build + test + typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install npm dependencies
+        working-directory: crates/singularmem-node
+        run: npm install
+      - name: Build native binding
+        working-directory: crates/singularmem-node
+        run: npm run build
+      - name: Run Node tests
+        working-directory: crates/singularmem-node
+        run: node --test test/*.test.mjs
+      - name: TypeScript type check
+        working-directory: crates/singularmem-node
+        run: npm run typecheck
+      - name: Verify package.json version matches workspace
+        run: |
+          WS_VER=$(grep -A1 '^\[workspace.package\]' Cargo.toml | grep '^version' | head -1 | sed -E 's/.*"(.*)".*/\1/')
+          PKG_VER=$(node -p "require('./crates/singularmem-node/package.json').version")
+          echo "workspace=$WS_VER pkg=$PKG_VER"
+          test "$WS_VER" = "$PKG_VER" || { echo "::error::version drift between Cargo workspace and crates/singularmem-node/package.json"; exit 1; }
