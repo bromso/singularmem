@@ -18,6 +18,9 @@ napi-derive = "2"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+jiff = { workspace = true }
+
 [build-dependencies]
 napi-build = "2"
 

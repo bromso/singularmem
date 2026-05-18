@@ -1,0 +1,100 @@
+//! TypeScript-facing object types and their conversions from core types.
+//!
+//! Only `Item` is exposed in 5a; `NewItem` is deferred to 5c.
+
+/// An item retrieved from the store.
+///
+/// `createdAt` is provided as milliseconds since the Unix epoch (f64).
+/// The core stores nanosecond precision; sub-millisecond precision is
+/// lost when crossing the boundary. JS callers can wrap with `new Date(ms)`
+/// if a `Date` object is preferred.
+#[napi(object)]
+pub struct Item {
+    /// 26-character Crockford base32 ULID string.
+    pub id: String,
+    /// UTF-8 text content.
+    pub content: String,
+    /// Wall-clock time the store assigned at ingest, as ms since epoch.
+    /// Lossy: ms precision vs core's ns precision.
+    pub created_at: f64,
+    /// ID of the item this supersedes, if any.
+    pub supersedes: Option<String>,
+    /// Tags attached to the item. Sorted, deduplicated.
+    pub tags: Vec<String>,
+    /// Free-form provenance label.
+    pub source: Option<String>,
+    /// Arbitrary user-defined JSON object.
+    pub metadata: serde_json::Value,
+}
+
+impl From<singularmem_core::Item> for Item {
+    fn from(core: singularmem_core::Item) -> Self {
+        Self {
+            id: core.id.to_string(),
+            content: core.content,
+            #[allow(clippy::cast_precision_loss)]
+            created_at: core.created_at.as_millisecond() as f64,
+            supersedes: core.supersedes.map(|id| id.to_string()),
+            tags: core.tags,
+            source: core.source,
+            metadata: core.metadata,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use singularmem_core::item::ItemId;
+
+    fn sample_core_item() -> singularmem_core::Item {
+        singularmem_core::Item {
+            id: ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap(),
+            content: "hello".to_string(),
+            created_at: jiff::Timestamp::from_millisecond(1_700_000_000_000).unwrap(),
+            supersedes: None,
+            tags: vec!["a".to_string(), "b".to_string()],
+            source: Some("test".to_string()),
+            metadata: serde_json::json!({"k": "v"}),
+        }
+    }
+
+    #[test]
+    fn item_id_serializes_as_string() {
+        let item: Item = sample_core_item().into();
+        assert_eq!(item.id, "01HXAAAAAAAAAAAAAAAAAAAAA0");
+    }
+
+    #[test]
+    fn item_content_round_trips() {
+        let item: Item = sample_core_item().into();
+        assert_eq!(item.content, "hello");
+    }
+
+    #[test]
+    fn item_created_at_is_ms_since_epoch() {
+        let item: Item = sample_core_item().into();
+        #[allow(clippy::cast_possible_truncation)]
+        let ms = item.created_at as i64;
+        assert_eq!(ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn item_supersedes_none_becomes_none() {
+        let item: Item = sample_core_item().into();
+        assert!(item.supersedes.is_none());
+    }
+
+    #[test]
+    fn item_tags_preserved() {
+        let item: Item = sample_core_item().into();
+        assert_eq!(item.tags, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn item_metadata_preserved() {
+        let item: Item = sample_core_item().into();
+        assert_eq!(item.metadata, serde_json::json!({"k": "v"}));
+    }
+}
