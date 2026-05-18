@@ -12,6 +12,7 @@ mod error;
 mod store;
 mod types;
 
+pub use store::ListOptions;
 pub use store::Store;
 pub use store::StoreOptions;
 pub use types::Item;

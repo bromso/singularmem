@@ -146,6 +146,62 @@ impl Task for GetTask {
     }
 }
 
+// ── ListTask ─────────────────────────────────────────────────────────────────
+
+pub struct ListTask {
+    store: Arc<CoreStore>,
+    tags: Vec<String>,
+    limit: Option<usize>,
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for ListTask {
+    type Output = Vec<singularmem_core::Item>;
+    type JsValue = Vec<crate::types::Item>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let result: singularmem_core::Result<Vec<singularmem_core::Item>> = (|| {
+            let iter = if self.tags.is_empty() {
+                self.store.list()?
+            } else {
+                let refs: Vec<&str> = self.tags.iter().map(String::as_str).collect();
+                self.store.list_by_tags(&refs)?
+            };
+            let mut out = Vec::new();
+            for item in iter {
+                out.push(item?);
+                if let Some(n) = self.limit {
+                    if out.len() >= n {
+                        break;
+                    }
+                }
+            }
+            Ok(out)
+        })();
+        match result {
+            Ok(items) => Ok(items),
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(napi::Status::GenericFailure, "list failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into_iter().map(Into::into).collect())
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown list error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options for `Store.open`.
@@ -154,6 +210,15 @@ pub struct StoreOptions {
     /// If true, opens `SQLite` in read-only mode. Writes will error with
     /// `code: "ReadOnly"`.
     pub read_only: Option<bool>,
+}
+
+/// Options for `Store.list`.
+#[napi(object)]
+pub struct ListOptions {
+    /// Only return items tagged with ALL of these tags (AND-semantics).
+    pub tags: Option<Vec<String>>,
+    /// Maximum number of items to return. Applied after tag filtering.
+    pub limit: Option<u32>,
 }
 
 // ── Store class ───────────────────────────────────────────────────────────────
@@ -224,6 +289,29 @@ impl Store {
             store: self.inner.clone(),
             id: item_id,
             pre_error,
+            failed: None,
+        }))
+    }
+
+    /// List items in the store, ordered oldest → newest by ingest time.
+    ///
+    /// @param options Optional `{ tags?: string[]; limit?: number }`.
+    ///   When `tags` is given, items must contain ALL listed tags.
+    ///   When `limit` is given, the returned array is capped at that length.
+    /// @returns Array of items.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn list(&self, options: Option<ListOptions>) -> napi::Result<AsyncTask<ListTask>> {
+        let tags = options
+            .as_ref()
+            .and_then(|o| o.tags.clone())
+            .unwrap_or_default();
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = options.and_then(|o| o.limit).map(|n| n as usize);
+        Ok(AsyncTask::new(ListTask {
+            store: self.inner.clone(),
+            tags,
+            limit,
             failed: None,
         }))
     }

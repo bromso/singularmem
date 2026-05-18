@@ -8,21 +8,9 @@ test('Store.get returns the item for a known ID', async () => {
   seedStore(path, [{ content: 'hello world', tags: ['greet'] }]);
   const store = await Store.open(path);
 
-  // TODO(Task 7): replace this cargo-export shell-out with `await store.list()`
-  // once Store.list exists.
-  const { spawnSync } = await import('node:child_process');
-  const dumpResult = spawnSync(
-    'cargo',
-    ['run', '-q', '-p', 'singularmem', '--', 'export', '--store', path],
-    { stdio: 'pipe', encoding: 'utf8' },
-  );
-  if (dumpResult.status !== 0) {
-    throw new Error(`export failed: ${dumpResult.stderr}`);
-  }
-  const lines = dumpResult.stdout.trim().split('\n');
-  // First line is meta header; second is the item.
-  const item = JSON.parse(lines[1]);
-  const id = item.id;
+  const items = await store.list();
+  assert.equal(items.length, 1);
+  const id = items[0].id;
 
   const fetched = await store.get(id);
   assert.equal(fetched.content, 'hello world');

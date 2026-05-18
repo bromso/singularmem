@@ -334,6 +334,10 @@ class Store {
   get(id) {
     return this._native.get(id).then(liftItem)
   }
+
+  list(options) {
+    return this._native.list(options).then((items) => items.map(liftItem))
+  }
 }
 
 module.exports.Store = Store

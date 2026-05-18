@@ -11,6 +11,13 @@ export interface StoreOptions {
    */
   readOnly?: boolean
 }
+/** Options for `Store.list`. */
+export interface ListOptions {
+  /** Only return items tagged with ALL of these tags (AND-semantics). */
+  tags?: Array<string>
+  /** Maximum number of items to return. Applied after tag filtering. */
+  limit?: number
+}
 /**
  * An item retrieved from the store.
  *
@@ -61,4 +68,13 @@ export declare class Store {
    * @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
    */
   get(id: string): Promise<Item>
+  /**
+   * List items in the store, ordered oldest → newest by ingest time.
+   *
+   * @param options Optional `{ tags?: string[]; limit?: number }`.
+   *   When `tags` is given, items must contain ALL listed tags.
+   *   When `limit` is given, the returned array is capped at that length.
+   * @returns Array of items.
+   */
+  list(options?: ListOptions | undefined | null): Promise<Array<Item>>
 }
