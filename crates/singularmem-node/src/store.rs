@@ -302,12 +302,10 @@ impl Store {
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn list(&self, options: Option<ListOptions>) -> napi::Result<AsyncTask<ListTask>> {
-        let tags = options
-            .as_ref()
-            .and_then(|o| o.tags.clone())
-            .unwrap_or_default();
         #[allow(clippy::cast_possible_truncation)]
-        let limit = options.and_then(|o| o.limit).map(|n| n as usize);
+        let (tags, limit) = options
+            .map(|o| (o.tags.unwrap_or_default(), o.limit.map(|n| n as usize)))
+            .unwrap_or_default();
         Ok(AsyncTask::new(ListTask {
             store: self.inner.clone(),
             tags,
