@@ -27,7 +27,7 @@
     "postbuild": "node scripts/patch-index.js",
     "build:debug": "napi build --platform",
     "postbuild:debug": "node scripts/patch-index.js",
-    "test": "node --test 'test/**/*.test.mjs' && npm run typecheck",
+    "test": "node --test test/*.test.mjs && npm run typecheck",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "napi prepublish"
   },

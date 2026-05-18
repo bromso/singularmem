@@ -67,8 +67,8 @@ impl From<singularmem_core::Item> for Item {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use singularmem_core::item::ItemId;
+    use std::str::FromStr;
 
     fn sample_core_item() -> singularmem_core::Item {
         singularmem_core::Item {
@@ -127,7 +127,10 @@ mod tests {
             ..sample_core_item()
         };
         let item: Item = core.into();
-        assert_eq!(item.supersedes, Some("01HXCCCCCCCCCCCCCCCCCCCCC0".to_string()));
+        assert_eq!(
+            item.supersedes,
+            Some("01HXCCCCCCCCCCCCCCCCCCCCC0".to_string())
+        );
     }
 
     #[test]

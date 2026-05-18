@@ -133,7 +133,7 @@ jobs:
         run: npm run build
       - name: Run Node tests
         working-directory: crates/singularmem-node
-        run: node --test 'test/**/*.test.mjs'
+        run: node --test test/*.test.mjs
       - name: TypeScript type check
         working-directory: crates/singularmem-node
         run: npm run typecheck

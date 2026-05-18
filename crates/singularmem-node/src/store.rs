@@ -27,7 +27,9 @@ use napi::{Env, Error as NapiError, Task};
 use singularmem_core::item::ItemId;
 use singularmem_core::{Store as CoreStore, StoreOptions as CoreStoreOptions};
 
-use crate::error::{coded_error_to_napi_raw, invalid_store_path, node_error_to_napi_with_raw, NodeError};
+use crate::error::{
+    coded_error_to_napi_raw, invalid_store_path, node_error_to_napi_with_raw, NodeError,
+};
 
 // (raw-backed error helpers live in crate::error)
 
@@ -58,11 +60,16 @@ impl Task for OpenStoreTask {
     fn compute(&mut self) -> napi::Result<Self::Output> {
         // Surface any pre-validation error as a task failure.
         if self.pre_error.is_some() {
-            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
         }
         match CoreStore::open_with_options(
             &self.path,
-            CoreStoreOptions { read_only: self.read_only },
+            CoreStoreOptions {
+                read_only: self.read_only,
+            },
         ) {
             Ok(store) => Ok(Arc::new(store)),
             Err(e) => {
@@ -116,7 +123,10 @@ impl Task for GetTask {
         // Surface any pre-validation error (e.g. ULID parse failure) as a
         // task failure so the Promise rejects rather than the method throwing.
         if self.pre_error.is_some() {
-            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
         }
         let id = self.id.expect("id must be Some when pre_error is None");
         match self.store.get(id) {
@@ -218,7 +228,10 @@ impl Task for RevisionsTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         if self.pre_error.is_some() {
-            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
         }
         let id = self.id.expect("id must be Some when pre_error is None");
         match self.store.revision_history(id) {
@@ -229,7 +242,10 @@ impl Task for RevisionsTask {
             }
             Err(e) => {
                 self.failed = Some(NodeError::from(e));
-                Err(NapiError::new(napi::Status::GenericFailure, "revisions failed"))
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "revisions failed",
+                ))
             }
         }
     }
@@ -268,7 +284,10 @@ impl Task for FormatVersionTask {
             Ok(v) => Ok(v),
             Err(e) => {
                 self.failed = Some(NodeError::from(e));
-                Err(NapiError::new(napi::Status::GenericFailure, "format_version failed"))
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "format_version failed",
+                ))
             }
         }
     }
@@ -305,7 +324,10 @@ impl Task for ExportTask {
             Ok(()) => Ok(buf),
             Err(e) => {
                 self.failed = Some(NodeError::from(e));
-                Err(NapiError::new(napi::Status::GenericFailure, "export failed"))
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "export failed",
+                ))
             }
         }
     }

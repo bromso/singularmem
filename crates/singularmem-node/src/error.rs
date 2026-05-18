@@ -46,10 +46,7 @@ impl From<NodeError> for NapiError<&'static str> {
             CoreError::NotFound { id } => ("NotFound", format!("item {id} not found")),
             CoreError::AmbiguousLatest { candidates } => (
                 "AmbiguousLatest",
-                format!(
-                    "ambiguous latest revision: {} candidates",
-                    candidates.len()
-                ),
+                format!("ambiguous latest revision: {} candidates", candidates.len()),
             ),
             CoreError::UnsupportedFormatVersion {
                 found,
@@ -65,15 +62,13 @@ impl From<NodeError> for NapiError<&'static str> {
                 format!("store is read-only; {operation} requires write access"),
             ),
             CoreError::InvalidId(e) => ("InvalidId", format!("invalid ULID: {e}")),
-            CoreError::Sqlite { context, source } => (
-                "Sqlite",
-                format!("SQLite error during {context}: {source}"),
-            ),
+            CoreError::Sqlite { context, source } => {
+                ("Sqlite", format!("SQLite error during {context}: {source}"))
+            }
             CoreError::Io(e) => ("Io", format!("I/O error: {e}")),
-            CoreError::Json { context, source } => (
-                "Json",
-                format!("JSON error during {context}: {source}"),
-            ),
+            CoreError::Json { context, source } => {
+                ("Json", format!("JSON error during {context}: {source}"))
+            }
         };
         NapiError::new(code, message)
     }
@@ -108,12 +103,7 @@ pub unsafe fn create_js_error(
     // N-API failures here leave the pointer as null_mut(); napi-rs handles
     // a null Error value gracefully in JsError::into_value.
     let _ = unsafe {
-        napi::sys::napi_create_string_utf8(
-            raw_env,
-            code.as_ptr().cast(),
-            code.len(),
-            &mut code_val,
-        )
+        napi::sys::napi_create_string_utf8(raw_env, code.as_ptr().cast(), code.len(), &mut code_val)
     };
     let mut msg_val = ptr::null_mut();
     let _ = unsafe {
@@ -137,8 +127,7 @@ pub unsafe fn create_js_error(
 /// napi-rs checks `maybe_raw` first in `JsError::into_value` and returns the
 /// pre-built object directly, bypassing its own status-to-code mapping.
 pub fn coded_error_to_napi_raw(env: Env, coded: NapiError<&'static str>) -> NapiError {
-    let raw_js_err =
-        unsafe { create_js_error(env.raw(), coded.status, &coded.reason) };
+    let raw_js_err = unsafe { create_js_error(env.raw(), coded.status, &coded.reason) };
     // Wrap in JsUnknown so we can use the From<JsUnknown> impl which stores
     // the value in `maybe_raw`.
     let js_unknown = unsafe { JsUnknown::from_raw_unchecked(env.raw(), raw_js_err) };
@@ -191,7 +180,9 @@ mod tests {
 
     #[test]
     fn read_only_maps_to_code_read_only() {
-        let core_err = CoreError::ReadOnly { operation: "ingest" };
+        let core_err = CoreError::ReadOnly {
+            operation: "ingest",
+        };
         let napi_err: NapiError<&'static str> = NodeError::from(core_err).into();
         assert_eq!(napi_err.status, "ReadOnly");
     }
