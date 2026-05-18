@@ -6,7 +6,7 @@
  * This script replaces the final export block with a thin JS wrapper that:
  *
  * 1. Promotes `createdAt` from a millisecond number to a JS `Date` on items
- *    returned by `Store.get` (and future methods).
+ *    returned by `Store.get, Store.list, Store.revisions (and future methods)`.
  * 2. Wraps `Store.open` to return instances of the JS `Store` class rather
  *    than the raw native object, so the JS wrapper methods are available.
  *
@@ -47,6 +47,10 @@ class Store {
 
   list(options) {
     return this._native.list(options).then((items) => items.map(liftItem))
+  }
+
+  revisions(id) {
+    return this._native.revisions(id).then((items) => items.map(liftItem))
   }
 }
 

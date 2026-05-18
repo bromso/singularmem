@@ -202,6 +202,55 @@ impl Task for ListTask {
     }
 }
 
+// ── RevisionsTask ────────────────────────────────────────────────────────────
+
+pub struct RevisionsTask {
+    store: Arc<CoreStore>,
+    id: Option<ItemId>,
+    pre_error: Option<NapiError<&'static str>>,
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for RevisionsTask {
+    type Output = Vec<singularmem_core::Item>;
+    type JsValue = Vec<crate::types::Item>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.pre_error.is_some() {
+            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+        }
+        let id = self.id.expect("id must be Some when pre_error is None");
+        match self.store.revision_history(id) {
+            Ok(mut items) => {
+                // Core walks backward (newest → oldest); reverse to oldest → newest.
+                items.reverse();
+                Ok(items)
+            }
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(napi::Status::GenericFailure, "revisions failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into_iter().map(Into::into).collect())
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        if let Some(coded) = self.pre_error.take() {
+            return Err(coded_error_to_napi_raw(env, coded));
+        }
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown revisions error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options for `Store.open`.
@@ -310,6 +359,31 @@ impl Store {
             store: self.inner.clone(),
             tags,
             limit,
+            failed: None,
+        }))
+    }
+
+    /// Return the full revision history for an item, ordered oldest to newest.
+    ///
+    /// @param id The ULID of any item in the chain.
+    /// @returns Array of items in chronological order.
+    /// @throws `Error` with `.code === "NotFound"` if the ID does not exist.
+    /// @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn revisions(&self, id: String) -> napi::Result<AsyncTask<RevisionsTask>> {
+        let (item_id, pre_error) = match ItemId::from_str(&id) {
+            Ok(id) => (Some(id), None),
+            Err(e) => {
+                let core_err = singularmem_core::Error::from(e);
+                let coded: NapiError<&'static str> = NodeError::from(core_err).into();
+                (None, Some(coded))
+            }
+        };
+        Ok(AsyncTask::new(RevisionsTask {
+            store: self.inner.clone(),
+            id: item_id,
+            pre_error,
             failed: None,
         }))
     }

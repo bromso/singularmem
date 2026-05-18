@@ -77,4 +77,13 @@ export declare class Store {
    * @returns Array of items.
    */
   list(options?: ListOptions | undefined | null): Promise<Array<Item>>
+  /**
+   * Return the full revision history for an item, ordered oldest to newest.
+   *
+   * @param id The ULID of any item in the chain.
+   * @returns Array of items in chronological order.
+   * @throws `Error` with `.code === "NotFound"` if the ID does not exist.
+   * @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+   */
+  revisions(id: string): Promise<Array<Item>>
 }
