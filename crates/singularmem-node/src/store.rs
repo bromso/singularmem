@@ -19,68 +19,15 @@
 //! calling `into_value` and uses our pre-built error untouched.
 
 use std::path::PathBuf;
-use std::ptr;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Error as NapiError, JsUnknown, NapiValue, Task};
+use napi::{Env, Error as NapiError, Task};
 use singularmem_core::{Store as CoreStore, StoreOptions as CoreStoreOptions};
 
-use crate::error::{invalid_store_path, NodeError};
+use crate::error::{coded_error_to_napi_raw, invalid_store_path, node_error_to_napi_with_raw, NodeError};
 
-// ── low-level helper: build a JS Error with a custom string code ──────────────
-
-/// Calls `napi_create_error(env, code, message)` via the N-API layer and
-/// returns the resulting `napi_value`.  Safe to call from the JS thread only.
-unsafe fn create_js_error(
-    raw_env: napi::sys::napi_env,
-    code: &str,
-    message: &str,
-) -> napi::sys::napi_value {
-    let mut code_val = ptr::null_mut();
-    let _ = unsafe {
-        napi::sys::napi_create_string_utf8(
-            raw_env,
-            code.as_ptr().cast(),
-            code.len(),
-            &mut code_val,
-        )
-    };
-    let mut msg_val = ptr::null_mut();
-    let _ = unsafe {
-        napi::sys::napi_create_string_utf8(
-            raw_env,
-            message.as_ptr().cast(),
-            message.len(),
-            &mut msg_val,
-        )
-    };
-    let mut js_err = ptr::null_mut();
-    let _ = unsafe { napi::sys::napi_create_error(raw_env, code_val, msg_val, &mut js_err) };
-    js_err
-}
-
-/// Convert a `napi::Error<&'static str>` (our custom-coded error) into an
-/// opaque `napi::Error<Status>` whose `maybe_raw` field points at a
-/// pre-built JS error object with the correct string `.code`.
-/// Must be called on the JS thread.
-///
-/// napi-rs checks `maybe_raw` first in `JsError::into_value` and returns the
-/// pre-built object directly, bypassing its own status-to-code mapping.
-fn coded_error_to_napi_raw(env: Env, coded: NapiError<&'static str>) -> NapiError {
-    let raw_js_err =
-        unsafe { create_js_error(env.raw(), coded.status, &coded.reason) };
-    // Wrap in JsUnknown so we can use the From<JsUnknown> impl which stores
-    // the value in `maybe_raw`.
-    let js_unknown = unsafe { JsUnknown::from_raw_unchecked(env.raw(), raw_js_err) };
-    NapiError::from(js_unknown)
-}
-
-/// Convert a `NodeError` to a raw-backed `napi::Error<Status>`.
-fn node_error_to_napi_with_raw(env: Env, err: NodeError) -> NapiError {
-    let coded: NapiError<&'static str> = err.into();
-    coded_error_to_napi_raw(env, coded)
-}
+// (raw-backed error helpers live in crate::error)
 
 // ── async task ────────────────────────────────────────────────────────────────
 
@@ -171,12 +118,9 @@ impl Store {
     /// @returns A `Store` instance.
     /// @throws `Error` with `.code` from the standard set
     ///   (`InvalidStorePath`, `Io`, `Sqlite`, `UnsupportedFormatVersion`, …).
-    ///
-    /// # Errors
-    ///
-    /// Returns a JS `Error` with `.code = "InvalidStorePath"` if `path` is
-    /// empty, `"Sqlite"` on database errors, `"Io"` on filesystem errors, or
-    /// `"UnsupportedFormatVersion"` if the file was written by a newer store.
+    // Error conditions are documented in the @throws JSDoc above; the
+    // `missing_errors_doc` lint does not recognise @throws as a substitute.
+    #[allow(clippy::missing_errors_doc)]
     #[napi]
     pub fn open(
         path: String,

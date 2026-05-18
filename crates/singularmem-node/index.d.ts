@@ -50,12 +50,6 @@ export declare class Store {
    * @returns A `Store` instance.
    * @throws `Error` with `.code` from the standard set
    *   (`InvalidStorePath`, `Io`, `Sqlite`, `UnsupportedFormatVersion`, …).
-   *
-   * # Errors
-   *
-   * Returns a JS `Error` with `.code = "InvalidStorePath"` if `path` is
-   * empty, `"Sqlite"` on database errors, `"Io"` on filesystem errors, or
-   * `"UnsupportedFormatVersion"` if the file was written by a newer store.
    */
   static open(path: string, options?: StoreOptions | undefined | null): Promise<Store>
 }

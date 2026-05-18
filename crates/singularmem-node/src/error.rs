@@ -14,7 +14,9 @@
 //! `.code` we use `Error<&'static str>` so `status.as_ref()` returns the
 //! variant name directly.
 
-use napi::Error as NapiError;
+use std::ptr;
+
+use napi::{Env, Error as NapiError, JsUnknown, NapiValue};
 use singularmem_core::Error as CoreError;
 
 /// Wrapper around the core error so we can implement `From` on a foreign type.
@@ -84,6 +86,69 @@ pub fn invalid_store_path(path: &str) -> NapiError<&'static str> {
         "InvalidStorePath",
         format!("store path is not valid: {path}"),
     )
+}
+
+// ── raw-backed N-API error helpers ────────────────────────────────────────────
+
+/// Calls `napi_create_error(env, code, message)` via the N-API layer and
+/// returns the resulting `napi_value`.
+///
+/// # Safety
+///
+/// `raw_env` must be a valid `napi_env` obtained from the current JS
+/// thread's `Env` handle. Must not be called from a libuv worker thread.
+/// On failure of any inner N-API call the returned pointer may be null;
+/// callers must handle that case downstream (napi-rs's `into_value` does).
+pub unsafe fn create_js_error(
+    raw_env: napi::sys::napi_env,
+    code: &str,
+    message: &str,
+) -> napi::sys::napi_value {
+    let mut code_val = ptr::null_mut();
+    // N-API failures here leave the pointer as null_mut(); napi-rs handles
+    // a null Error value gracefully in JsError::into_value.
+    let _ = unsafe {
+        napi::sys::napi_create_string_utf8(
+            raw_env,
+            code.as_ptr().cast(),
+            code.len(),
+            &mut code_val,
+        )
+    };
+    let mut msg_val = ptr::null_mut();
+    let _ = unsafe {
+        napi::sys::napi_create_string_utf8(
+            raw_env,
+            message.as_ptr().cast(),
+            message.len(),
+            &mut msg_val,
+        )
+    };
+    let mut js_err = ptr::null_mut();
+    let _ = unsafe { napi::sys::napi_create_error(raw_env, code_val, msg_val, &mut js_err) };
+    js_err
+}
+
+/// Convert a `napi::Error<&'static str>` (our custom-coded error) into an
+/// opaque `napi::Error<Status>` whose `maybe_raw` field points at a
+/// pre-built JS error object with the correct string `.code`.
+/// Must be called on the JS thread.
+///
+/// napi-rs checks `maybe_raw` first in `JsError::into_value` and returns the
+/// pre-built object directly, bypassing its own status-to-code mapping.
+pub fn coded_error_to_napi_raw(env: Env, coded: NapiError<&'static str>) -> NapiError {
+    let raw_js_err =
+        unsafe { create_js_error(env.raw(), coded.status, &coded.reason) };
+    // Wrap in JsUnknown so we can use the From<JsUnknown> impl which stores
+    // the value in `maybe_raw`.
+    let js_unknown = unsafe { JsUnknown::from_raw_unchecked(env.raw(), raw_js_err) };
+    NapiError::from(js_unknown)
+}
+
+/// Convert a `NodeError` to a raw-backed `napi::Error<Status>`.
+pub fn node_error_to_napi_with_raw(env: Env, err: NodeError) -> NapiError {
+    let coded: NapiError<&'static str> = err.into();
+    coded_error_to_napi_raw(env, coded)
 }
 
 #[cfg(test)]

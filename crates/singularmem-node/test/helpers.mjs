@@ -38,8 +38,13 @@ export function seedStore(path, items) {
     }
     if (item.source) args.push('--source', item.source);
     const result = spawnSync('cargo', args, { stdio: 'pipe', encoding: 'utf8' });
+    if (result.error) {
+      throw new Error(`failed to spawn cargo: ${result.error.message}`);
+    }
     if (result.status !== 0) {
-      throw new Error(`cargo ingest failed: ${result.stderr}`);
+      throw new Error(
+        `cargo ingest failed (exit ${result.status}):\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      );
     }
   }
 }
