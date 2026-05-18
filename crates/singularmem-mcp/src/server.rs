@@ -18,8 +18,9 @@ use rmcp::{
 use serde_json::json;
 
 use crate::tools::{
-    handle_memory_get, handle_memory_list, handle_memory_retrieve, handle_memory_revisions,
-    MemoryGetArgs, MemoryListArgs, MemoryRetrieveArgs, MemoryRevisionsArgs,
+    handle_memory_get, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
+    handle_memory_revisions, MemoryGetArgs, MemoryIngestArgs, MemoryListArgs, MemoryRetrieveArgs,
+    MemoryRevisionsArgs,
 };
 use crate::{Config, Error, Result};
 
@@ -86,12 +87,16 @@ impl ServerHandler for SingularmemServer {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>>
            + rmcp::service::MaybeSendFuture
            + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(vec![
+        let mut tools = vec![
             Self::memory_retrieve_tool(),
             crate::tools::get::tool_descriptor(),
             crate::tools::list::tool_descriptor(),
             crate::tools::revisions::tool_descriptor(),
-        ])))
+        ];
+        if !self.config.read_only {
+            tools.push(crate::tools::ingest::tool_descriptor());
+        }
+        std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -135,6 +140,42 @@ impl ServerHandler for SingularmemServer {
                     Err(other) => {
                         Err(McpError::internal_error(other.to_string(), None))
                     }
+                }
+            }
+            "memory_ingest" => {
+                if config.read_only {
+                    return std::future::ready(Err(McpError::invalid_params(
+                        "server is read-only; memory_ingest is disabled",
+                        None,
+                    )));
+                }
+                let args_value = serde_json::Value::Object(request.arguments.unwrap_or_default());
+                let args: MemoryIngestArgs = match serde_json::from_value(args_value) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        return std::future::ready(Err(McpError::invalid_params(
+                            format!("failed to parse memory_ingest arguments: {e}"),
+                            None,
+                        )));
+                    }
+                };
+                match handle_memory_ingest(args, &config) {
+                    Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                    Err(Error::ReadOnly) => Err(McpError::invalid_params(
+                        "server is read-only; memory_ingest is disabled",
+                        None,
+                    )),
+                    Err(Error::InvalidId(msg)) => Err(McpError::invalid_params(
+                        format!("invalid item ID: {msg}"),
+                        None,
+                    )),
+                    Err(Error::Core(singularmem_core::Error::Validation { field, reason })) => {
+                        Err(McpError::invalid_params(format!("{field}: {reason}"), None))
+                    }
+                    Err(Error::Core(singularmem_core::Error::SupersedesNotFound { id })) => Err(
+                        McpError::invalid_params(format!("supersedes target {id} not found"), None),
+                    ),
+                    Err(other) => Err(McpError::internal_error(other.to_string(), None)),
                 }
             }
             "memory_get" => {
