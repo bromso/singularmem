@@ -4,26 +4,48 @@
 
 /// An item retrieved from the store.
 ///
-/// `createdAt` is a JS `Date` constructed from the wall-clock time the store
-/// assigned at ingest. The core stores nanosecond precision; sub-millisecond
-/// precision is lost when crossing the boundary.
+/// All string values are UTF-8. `createdAt` is a JS `Date` constructed from
+/// the millisecond-precision wall-clock time the store assigned at ingest.
+///
+/// **Precision caveat:** the core layer stores timestamps at nanosecond
+/// precision, but the JS `Date` type only supports millisecond precision.
+/// Any sub-millisecond component of `createdAt` is silently truncated when
+/// crossing the native boundary.
 #[napi(object)]
 pub struct Item {
-    /// 26-character Crockford base32 ULID string.
+    /// Unique item identifier: a 26-character Crockford base32 ULID string.
+    ///
+    /// ULIDs are lexicographically sortable by creation time. The string is
+    /// always uppercase and exactly 26 characters long.
     pub id: String,
-    /// UTF-8 text content.
+    /// The item's main text payload, encoded as UTF-8.
     pub content: String,
-    /// Wall-clock time the store assigned at ingest.
-    /// Lossy: ms precision vs core's ns precision.
+    /// Wall-clock time the store assigned at ingest, as a JS `Date`.
+    ///
+    /// **Precision caveat:** the underlying store records nanosecond precision;
+    /// sub-millisecond digits are lost when the value crosses the native
+    /// boundary and is represented as a JS `Date` (millisecond precision only).
     #[napi(ts_type = "Date")]
     pub created_at: f64,
-    /// ID of the item this supersedes, if any.
+    /// ULID of the item this item supersedes, or `undefined` if this item does
+    /// not replace a prior one.
+    ///
+    /// Following the chain of `supersedes` links from newest to oldest
+    /// reconstructs the full revision history of a logical memory entry.
     pub supersedes: Option<String>,
-    /// Tags attached to the item. Sorted, deduplicated.
+    /// Tags attached to the item.
+    ///
+    /// The array is always sorted lexicographically and deduplicated; no tag
+    /// appears more than once.
     pub tags: Vec<String>,
-    /// Free-form provenance label.
+    /// Optional free-form provenance label identifying the source of the item
+    /// (e.g. `"user"`, `"llm"`, `"import"`). `undefined` if not set.
     pub source: Option<String>,
-    /// Arbitrary user-defined JSON object.
+    /// Arbitrary user-defined JSON object attached to the item.
+    ///
+    /// The value is always an object (never `null`, an array, or a scalar).
+    /// Defaults to an empty object `{}` when no metadata was provided at
+    /// ingest time.
     pub metadata: serde_json::Value,
 }
 

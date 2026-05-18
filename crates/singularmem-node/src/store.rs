@@ -331,26 +331,43 @@ impl Task for ExportTask {
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
-/// Options for `Store.open`.
+/// Options passed to `Store.open`.
 #[napi(object)]
 pub struct StoreOptions {
-    /// If true, opens `SQLite` in read-only mode. Writes will error with
+    /// When `true`, the underlying `SQLite` database is opened in read-only
+    /// mode. Any attempt to write (insert, update, delete) will reject with
     /// `code: "ReadOnly"`.
+    ///
+    /// Defaults to `false` (read-write) when omitted.
     pub read_only: Option<bool>,
 }
 
-/// Options for `Store.list`.
+/// Options passed to `Store.list`.
 #[napi(object)]
 pub struct ListOptions {
-    /// Only return items tagged with ALL of these tags (AND-semantics).
+    /// Restrict results to items that have ALL of these tags (AND-semantics).
+    ///
+    /// An item is included only if every tag in this array appears in the
+    /// item's `tags` field. An empty array (or omitting `tags` entirely)
+    /// returns all items without tag filtering.
     pub tags: Option<Vec<String>>,
-    /// Maximum number of items to return. Applied after tag filtering.
+    /// Cap the number of items returned at this value.
+    ///
+    /// The limit is applied after tag filtering, on the oldest-first ordered
+    /// result set. Omit or pass `undefined` to return all matching items.
     pub limit: Option<u32>,
 }
 
 // ── Store class ───────────────────────────────────────────────────────────────
 
 /// A handle to a Singularmem store on disk.
+///
+/// Obtain an instance via the async static factory `Store.open`. All methods
+/// are async and resolve on the libuv thread pool so the JS event loop is
+/// never blocked.
+///
+/// Errors are always thrown as `Error` objects with a structured `.code`
+/// string property. See the README for the full list of possible codes.
 #[napi]
 pub struct Store {
     pub(crate) inner: Arc<CoreStore>,
@@ -358,14 +375,20 @@ pub struct Store {
 
 #[napi]
 impl Store {
-    /// Open a store at the given filesystem path.
+    /// Open (or create) a Singularmem store at the given filesystem path.
     ///
-    /// @param path Absolute or relative path to a `SQLite` file (will be
-    ///   created if it does not exist).
-    /// @param options Optional `{ readOnly?: boolean }`.
-    /// @returns A `Store` instance.
-    /// @throws `Error` with `.code` from the standard set
-    ///   (`InvalidStorePath`, `Io`, `Sqlite`, `UnsupportedFormatVersion`, …).
+    /// The `SQLite` database file is created automatically if it does not exist.
+    /// Schema migrations run at open time; if the on-disk format is newer than
+    /// this binding supports the promise rejects with `UnsupportedFormatVersion`.
+    ///
+    /// @param path Absolute or relative path to the `SQLite` database file.
+    ///   Must be a non-empty string; rejects with `InvalidStorePath` otherwise.
+    /// @param options Optional open options (see `StoreOptions`).
+    /// @returns A ready-to-use `Store` instance.
+    /// @throws `{ code: "InvalidStorePath" }` — path is empty or otherwise invalid.
+    /// @throws `{ code: "UnsupportedFormatVersion" }` — store file is newer than this binding supports.
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error (e.g. permissions, corrupt file).
+    /// @throws `{ code: "Io" }` — filesystem or I/O error.
     // Error conditions are documented in the @throws JSDoc above; the
     // `missing_errors_doc` lint does not recognise @throws as a substitute.
     #[napi]
@@ -392,12 +415,13 @@ impl Store {
         }))
     }
 
-    /// Look up a single item by its ULID.
+    /// Retrieve a single item by its ULID string.
     ///
-    /// @param id A 26-character Crockford base32 ULID string.
-    /// @returns The matching item.
-    /// @throws `Error` with `.code === "NotFound"` if the ID does not exist.
-    /// @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+    /// @param id A 26-character Crockford base32 ULID string identifying the item.
+    /// @returns The matching `Item`.
+    /// @throws `{ code: "NotFound" }` — no item with that ID exists in the store.
+    /// @throws `{ code: "InvalidId" }` — `id` is not a valid 26-character ULID string.
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn get(&self, id: String) -> napi::Result<AsyncTask<GetTask>> {
@@ -420,12 +444,18 @@ impl Store {
         }))
     }
 
-    /// List items in the store, ordered oldest → newest by ingest time.
+    /// List items in the store, ordered oldest to newest by ingest time.
     ///
-    /// @param options Optional `{ tags?: string[]; limit?: number }`.
-    ///   When `tags` is given, items must contain ALL listed tags.
-    ///   When `limit` is given, the returned array is capped at that length.
-    /// @returns Array of items.
+    /// **Tag filtering (AND-semantics):** when `options.tags` is provided,
+    /// only items that carry *every* listed tag are returned. An empty `tags`
+    /// array is equivalent to omitting the field (no filtering).
+    ///
+    /// **Limit:** when `options.limit` is provided, the result array is
+    /// truncated to at most that many items after tag filtering is applied.
+    ///
+    /// @param options Optional filtering and pagination options (see `ListOptions`).
+    /// @returns Array of matching `Item` objects, oldest first.
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn list(&self, options: Option<ListOptions>) -> napi::Result<AsyncTask<ListTask>> {
@@ -441,12 +471,19 @@ impl Store {
         }))
     }
 
-    /// Return the full revision history for an item, ordered oldest to newest.
+    /// Return the full revision history for a logical memory entry.
     ///
-    /// @param id The ULID of any item in the chain.
-    /// @returns Array of items in chronological order.
-    /// @throws `Error` with `.code === "NotFound"` if the ID does not exist.
-    /// @throws `Error` with `.code === "InvalidId"` if the string is not a valid ULID.
+    /// Pass the ULID of *any* item in a supersession chain (not necessarily
+    /// the oldest or newest). The method walks the chain and returns every
+    /// revision ordered oldest to newest (i.e. the first element was ingested
+    /// first and each subsequent element supersedes the previous one).
+    ///
+    /// @param id A 26-character Crockford base32 ULID of any item in the chain.
+    /// @returns Array of `Item` objects in chronological order (oldest first).
+    /// @throws `{ code: "NotFound" }` — no item with that ID exists in the store.
+    /// @throws `{ code: "InvalidId" }` — `id` is not a valid 26-character ULID string.
+    /// @throws `{ code: "AmbiguousLatest" }` — the revision chain forks (data integrity error).
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn revisions(&self, id: String) -> napi::Result<AsyncTask<RevisionsTask>> {
@@ -466,7 +503,16 @@ impl Store {
         }))
     }
 
-    /// Return the on-disk format version of this store, as a semver string.
+    /// Return the on-disk format version recorded in this store file.
+    ///
+    /// The version is a semver string (e.g. `"1.0.0"`) that identifies the
+    /// schema and serialisation format used by the store. This value is written
+    /// once when the store is first created and is validated at open time; if
+    /// the version is newer than what this binding understands, `Store.open`
+    /// rejects with `UnsupportedFormatVersion`.
+    ///
+    /// @returns A semver version string such as `"1.0.0"`.
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn format_version(&self) -> napi::Result<AsyncTask<FormatVersionTask>> {
@@ -476,10 +522,21 @@ impl Store {
         }))
     }
 
-    /// Export every item in the store as JSONL (one JSON object per line).
-    /// The first line is a meta header describing the format version.
+    /// Export the entire store as a JSONL (newline-delimited JSON) string.
+    ///
+    /// The output format is one JSON object per line:
+    /// - **Line 1** — a metadata header object, e.g.
+    ///   `{"type":"meta","formatVersion":"1.0.0"}`.
+    /// - **Remaining lines** — one `Item`-shaped JSON object per stored item,
+    ///   in oldest-first order.
+    ///
+    /// The returned string is UTF-8 encoded. It can be written directly to a
+    /// `.jsonl` file for backup or migration purposes.
     ///
     /// @returns The full JSONL payload as a UTF-8 string.
+    /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+    /// @throws `{ code: "Json" }` — JSON serialisation error (should not occur in normal use).
+    /// @throws `{ code: "Io" }` — I/O error writing to the internal buffer.
     #[napi(js_name = "export")]
     #[allow(clippy::missing_errors_doc)]
     pub fn export_jsonl(&self) -> napi::Result<AsyncTask<ExportTask>> {
