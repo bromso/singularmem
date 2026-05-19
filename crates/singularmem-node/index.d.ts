@@ -90,6 +90,58 @@ export interface Item {
    */
   metadata: any
 }
+/** One result from `Store.search`. The full `Item` is always populated. */
+export interface SearchHit {
+  /** The matched item. */
+  item: Item
+  /** Final score after fusion (RRF) or single-ranker (BM25 / cosine). */
+  score: number
+  /** Which ranker produced the score: "rrf" | "bm25" | "cosine". */
+  kind: string
+  /**
+   * 1-based rank in the lexical (Tantivy) ranker, present only when
+   * the lexical ranker ran (hybrid + lexical modes).
+   */
+  lexicalRank?: number
+  /**
+   * 1-based rank in the semantic (`USearch`) ranker, present only when
+   * the semantic ranker ran (hybrid + semantic modes).
+   */
+  semanticRank?: number
+}
+/** Results returned by `Store.search`. */
+export interface SearchResults {
+  query: string
+  hits: Array<SearchHit>
+}
+/**
+ * One block in a `RetrievedContext`. Flat shape matching
+ * `singularmem_retrieve::MemoryBlock` (no nested Item).
+ */
+export interface MemoryBlock {
+  /** 26-character Crockford base32 ULID. */
+  id: string
+  /** Full UTF-8 content from the store (not a snippet). */
+  content: string
+  /** Score whose meaning depends on `kind`. */
+  score: number
+  /** "rrf" | "bm25" | "cosine". */
+  kind: string
+  /** Free-form provenance label from the matched item. */
+  source?: string
+  /** Tags from the matched item. Sorted, deduplicated. */
+  tags: Array<string>
+  /**
+   * Wall-clock time the matched item was ingested, as ms since epoch.
+   * Lossy: ms precision vs core's ns precision (same as Item.createdAt).
+   */
+  createdAt: Date
+}
+/** Structured retrieval context returned by `Store.retrieve`. */
+export interface RetrievedContext {
+  query: string
+  blocks: Array<MemoryBlock>
+}
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
 /**
