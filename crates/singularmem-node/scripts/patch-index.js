@@ -25,8 +25,8 @@ const path = require('path')
 const indexPath = path.join(__dirname, '..', 'index.js')
 let src = fs.readFileSync(indexPath, 'utf8')
 
-const MARKER = 'const { Store, version } = nativeBinding\n\nmodule.exports.Store = Store\nmodule.exports.version = version'
-const REPLACEMENT = `const { Store: _NativeStore, version } = nativeBinding
+const MARKER = 'const { PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter, Store, version } = nativeBinding\n\nmodule.exports.PlainAdapter = PlainAdapter\nmodule.exports.ClaudeAdapter = ClaudeAdapter\nmodule.exports.OpenAiAdapter = OpenAiAdapter\nmodule.exports.GeminiAdapter = GeminiAdapter\nmodule.exports.Store = Store\nmodule.exports.version = version'
+const REPLACEMENT = `const { Store: _NativeStore, version, PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter } = nativeBinding
 
 /**
  * Convert an Item from the native binding into a JS-friendly shape:
@@ -82,6 +82,14 @@ class Store {
   }
 }
 
+// Construct the frozen \`adapters\` namespace from the four native classes.
+const adapters = Object.freeze({
+  plain:  Object.freeze(new PlainAdapter()),
+  claude: Object.freeze(new ClaudeAdapter()),
+  openai: Object.freeze(new OpenAiAdapter()),
+  gemini: Object.freeze(new GeminiAdapter()),
+})
+module.exports.adapters = adapters
 module.exports.Store = Store
 module.exports.version = version`
 

@@ -171,6 +171,32 @@ export interface RetrievedContext {
 }
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
+/** Plain Markdown adapter. */
+export declare class PlainAdapter {
+  constructor()
+  /** The adapter's stable name; matches `adapter.name` on the JS side. */
+  get name(): string
+  /** Format the given context as Markdown blocks. */
+  format(ctx: RetrievedContext): string
+}
+/** Anthropic Claude `<documents>` XML adapter. */
+export declare class ClaudeAdapter {
+  constructor()
+  get name(): string
+  format(ctx: RetrievedContext): string
+}
+/** `OpenAI` bracketed-citation adapter. */
+export declare class OpenAiAdapter {
+  constructor()
+  get name(): string
+  format(ctx: RetrievedContext): string
+}
+/** Google Gemini em-dash "Source N" adapter. */
+export declare class GeminiAdapter {
+  constructor()
+  get name(): string
+  format(ctx: RetrievedContext): string
+}
 /**
  * A handle to a Singularmem store on disk.
  *

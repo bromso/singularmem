@@ -8,10 +8,12 @@
 #[macro_use]
 extern crate napi_derive;
 
+mod adapters;
 mod error;
 mod store;
 mod types;
 
+pub use adapters::{ClaudeAdapter, GeminiAdapter, OpenAiAdapter, PlainAdapter};
 pub use store::ListOptions;
 pub use store::Store;
 pub use store::StoreOptions;
