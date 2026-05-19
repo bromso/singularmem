@@ -81,7 +81,10 @@ impl Task for OpenStoreTask {
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(Store { inner: output })
+        Ok(Store {
+            inner: output,
+            path: self.path.clone(),
+        })
     }
 
     fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
@@ -393,6 +396,9 @@ pub struct ListOptions {
 #[napi]
 pub struct Store {
     pub(crate) inner: Arc<CoreStore>,
+    /// Retained so search/retrieve methods in Task 3/4 can compute sidecar paths.
+    #[allow(dead_code)] // used by search/retrieve in upcoming Task 3/4
+    pub(crate) path: PathBuf,
 }
 
 #[napi]

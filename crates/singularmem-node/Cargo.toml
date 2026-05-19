@@ -13,6 +13,11 @@ crate-type = ["cdylib"]
 
 [dependencies]
 singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search" }
+singularmem-retrieve = { path = "../singularmem-retrieve" }
+singularmem-adapter-claude = { path = "../singularmem-adapter-claude" }
+singularmem-adapter-openai = { path = "../singularmem-adapter-openai" }
+singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini" }
 napi = { version = "2", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
 napi-derive = "2"
 tokio = { workspace = true, features = ["rt-multi-thread"] }

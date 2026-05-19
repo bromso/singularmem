@@ -74,6 +74,105 @@ impl From<NodeError> for NapiError<&'static str> {
     }
 }
 
+/// Map a `singularmem_search::Error` to `(code, message)`. Used by both
+/// standalone search error paths and the `retrieve::Error::Search` unwrapping.
+#[allow(dead_code)] // called by search/retrieve tasks added in Task 3/4
+pub fn map_search_error(e: singularmem_search::Error) -> (&'static str, String) {
+    use singularmem_search::Error as SE;
+    match e {
+        SE::Tantivy { context, source } => (
+            "Tantivy",
+            format!("Tantivy error during {context}: {source}"),
+        ),
+        SE::QueryParse(msg) => ("QueryParse", format!("could not parse search query: {msg}")),
+        SE::IndexMissing { path } => (
+            "IndexMissing",
+            format!(
+                "Tantivy index at {} is missing or unreadable; run `singularmem reindex` to rebuild",
+                path.display()
+            ),
+        ),
+        SE::IndexCorrupted { path, reason } => (
+            "IndexCorrupted",
+            format!(
+                "Tantivy index at {} appears corrupted: {reason}; run `singularmem reindex`",
+                path.display()
+            ),
+        ),
+        SE::Io(e) => ("Io", format!("I/O error: {e}")),
+        SE::Embedding { context, reason } => (
+            "Embedding",
+            format!("embedding inference failed during {context}: {reason}"),
+        ),
+        SE::ModelDownload { model, reason } => (
+            "ModelDownload",
+            format!("could not download embedding model {model}: {reason}"),
+        ),
+        SE::InvalidModelFiles { path, reason } => (
+            "InvalidModelFiles",
+            format!(
+                "invalid model files at {}: {reason}; expected ONNX weights + tokenizer",
+                path.display()
+            ),
+        ),
+        SE::DimMismatch { expected, got } => (
+            "DimMismatch",
+            format!("vector dimension mismatch: expected {expected}, got {got}"),
+        ),
+        SE::ModelMismatch {
+            path,
+            found_model,
+            expected_model,
+        } => (
+            "ModelMismatch",
+            format!(
+                "vector index at {} was built with model {found_model}; \
+                 current Embedder uses {expected_model}; \
+                 run `singularmem reindex --with-embeddings --reset-vectors --force` to rebuild",
+                path.display()
+            ),
+        ),
+        SE::Usearch { context, reason } => (
+            "Usearch",
+            format!("USearch error during {context}: {reason}"),
+        ),
+        SE::NoIndexes => (
+            "NoIndexes",
+            "no search index exists for this store; \
+             run `singularmem reindex` (and optionally `--with-embeddings`) first"
+                .to_string(),
+        ),
+        SE::HybridMissingIndex { missing, path } => (
+            "HybridMissingIndex",
+            format!(
+                "hybrid search requires both indexes; {missing} index missing at {}; \
+                 run `singularmem reindex --with-embeddings` to build both",
+                path.display()
+            ),
+        ),
+    }
+}
+
+/// Build a napi-rs error from a `singularmem_search::Error`.
+#[allow(dead_code)] // called by search/retrieve tasks added in Task 3/4
+pub fn from_search_error(e: singularmem_search::Error) -> NapiError<&'static str> {
+    let (code, message) = map_search_error(e);
+    NapiError::new(code, message)
+}
+
+/// Build a napi-rs error from a `singularmem_retrieve::Error`. The `Search(_)`
+/// and `Core(_)` wrapper variants unwrap to the innermost meaningful `.code`
+/// so JS callers don't have to peel layers.
+#[allow(dead_code)] // called by retrieve task added in Task 4
+pub fn from_retrieve_error(e: singularmem_retrieve::Error) -> NapiError<&'static str> {
+    use singularmem_retrieve::Error as RE;
+    match e {
+        RE::EmptyQuery => NapiError::new("EmptyQuery", "query is empty".to_string()),
+        RE::Search(inner) => from_search_error(inner),
+        RE::Core(inner) => NodeError::from(inner).into(),
+    }
+}
+
 /// Build a napi error for invalid store paths surfaced by the binding layer
 /// itself (not by the core).
 pub fn invalid_store_path(path: &str) -> NapiError<&'static str> {
@@ -209,5 +308,69 @@ mod tests {
         let core_err = CoreError::AmbiguousLatest { candidates: vec![] };
         let napi_err: NapiError<&'static str> = NodeError::from(core_err).into();
         assert_eq!(napi_err.status, "AmbiguousLatest");
+    }
+
+    // ── search / retrieve error mapping tests ─────────────────────────────────
+
+    #[test]
+    fn no_indexes_maps_to_code() {
+        let napi_err = super::from_search_error(singularmem_search::Error::NoIndexes);
+        assert_eq!(napi_err.status, "NoIndexes");
+    }
+
+    #[test]
+    fn hybrid_missing_index_maps_to_code() {
+        let napi_err = super::from_search_error(singularmem_search::Error::HybridMissingIndex {
+            missing: "tantivy",
+            path: std::path::PathBuf::from("/tmp/x"),
+        });
+        assert_eq!(napi_err.status, "HybridMissingIndex");
+        assert!(napi_err.reason.contains("tantivy"));
+    }
+
+    #[test]
+    fn empty_query_maps_to_code() {
+        let napi_err = super::from_retrieve_error(singularmem_retrieve::Error::EmptyQuery);
+        assert_eq!(napi_err.status, "EmptyQuery");
+    }
+
+    #[test]
+    fn wrapped_search_error_unwraps_to_inner_code() {
+        let inner = singularmem_search::Error::NoIndexes;
+        let wrapper = singularmem_retrieve::Error::Search(inner);
+        let napi_err = super::from_retrieve_error(wrapper);
+        assert_eq!(napi_err.status, "NoIndexes");
+    }
+
+    #[test]
+    fn wrapped_core_error_unwraps_to_inner_code() {
+        let id = ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
+        let inner = CoreError::NotFound { id };
+        let wrapper = singularmem_retrieve::Error::Core(inner);
+        let napi_err = super::from_retrieve_error(wrapper);
+        assert_eq!(napi_err.status, "NotFound");
+    }
+
+    #[test]
+    fn query_parse_maps_to_code() {
+        let napi_err =
+            super::from_search_error(singularmem_search::Error::QueryParse("bad".to_string()));
+        assert_eq!(napi_err.status, "QueryParse");
+    }
+
+    #[test]
+    fn index_missing_maps_to_code() {
+        let napi_err = super::from_search_error(singularmem_search::Error::IndexMissing {
+            path: std::path::PathBuf::from("/tmp/x.tantivy"),
+        });
+        assert_eq!(napi_err.status, "IndexMissing");
+    }
+
+    #[test]
+    fn io_in_search_maps_to_io_code() {
+        let napi_err = super::from_search_error(singularmem_search::Error::Io(
+            std::io::Error::other("disk"),
+        ));
+        assert_eq!(napi_err.status, "Io");
     }
 }
