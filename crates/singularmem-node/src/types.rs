@@ -279,8 +279,7 @@ mod tests {
 
     #[test]
     fn search_hit_passes_ranks_when_hybrid() {
-        let id =
-            singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
+        let id = singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
         let hit = singularmem_search::HybridHit {
             id,
             score: 0.5_f32,
@@ -297,8 +296,7 @@ mod tests {
 
     #[test]
     fn search_hit_omits_ranks_for_single_ranker_lexical() {
-        let id =
-            singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
+        let id = singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
         let hit = singularmem_search::HybridHit {
             id,
             score: 0.5_f32,

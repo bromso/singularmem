@@ -164,18 +164,15 @@ impl GeminiAdapter {
 /// core type), this is a near-1:1 copy plus a few type conversions
 /// (ULID string → `ItemId`, ms-since-epoch f64 → `jiff::Timestamp`, score kind
 /// string → `ScoreKind` enum).
-fn napi_ctx_to_core(
-    ctx: crate::types::RetrievedContext,
-) -> singularmem_retrieve::RetrievedContext {
+fn napi_ctx_to_core(ctx: crate::types::RetrievedContext) -> singularmem_retrieve::RetrievedContext {
     let blocks = ctx
         .blocks
         .into_iter()
         .map(|b| singularmem_retrieve::MemoryBlock {
-            id: singularmem_core::item::ItemId::from_str(&b.id)
-                .unwrap_or_else(|_| {
-                    singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0")
-                        .expect("fallback ULID is valid")
-                }),
+            id: singularmem_core::item::ItemId::from_str(&b.id).unwrap_or_else(|_| {
+                singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0")
+                    .expect("fallback ULID is valid")
+            }),
             content: b.content,
             #[allow(clippy::cast_possible_truncation)]
             score: b.score as f32,
@@ -227,14 +224,23 @@ mod tests {
     #[test]
     fn plain_adapter_format_populated() {
         let out = PlainAdapter::new().format(sample_ctx());
-        assert!(out.contains("memory content"), "plain adapter should include content");
+        assert!(
+            out.contains("memory content"),
+            "plain adapter should include content"
+        );
     }
 
     #[test]
     fn plain_adapter_format_empty() {
-        let empty = RetrievedContext { query: "q".to_string(), blocks: vec![] };
+        let empty = RetrievedContext {
+            query: "q".to_string(),
+            blocks: vec![],
+        };
         let out = PlainAdapter::new().format(empty);
-        assert!(!out.is_empty(), "empty case should still produce some output");
+        assert!(
+            !out.is_empty(),
+            "empty case should still produce some output"
+        );
     }
 
     #[test]

@@ -420,9 +420,7 @@ fn open_sidecars(
     let vectors = if vectors_path.exists() {
         let embedder: Box<dyn singularmem_search::Embedder> =
             match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-                Some("mock") => {
-                    Box::new(singularmem_search::testing::MockEmbedder::default())
-                }
+                Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
                 _ => Box::new(
                     singularmem_search::FastembedEmbedder::new()
                         .map_err(crate::error::from_search_error)?,
@@ -542,7 +540,10 @@ impl Task for SearchTask {
             Ok(out) => Ok(out),
             Err(coded) => {
                 self.failed = Some(coded);
-                Err(NapiError::new(napi::Status::GenericFailure, "search failed"))
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "search failed",
+                ))
             }
         }
     }

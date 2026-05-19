@@ -368,9 +368,8 @@ mod tests {
 
     #[test]
     fn io_in_search_maps_to_io_code() {
-        let napi_err = super::from_search_error(singularmem_search::Error::Io(
-            std::io::Error::other("disk"),
-        ));
+        let napi_err =
+            super::from_search_error(singularmem_search::Error::Io(std::io::Error::other("disk")));
         assert_eq!(napi_err.status, "Io");
     }
 }
