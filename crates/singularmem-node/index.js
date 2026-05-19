@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Store: _NativeStore, version } = nativeBinding
+const { Store: _NativeStore, version, PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter } = nativeBinding
 
 /**
  * Convert an Item from the native binding into a JS-friendly shape:
@@ -343,6 +343,20 @@ class Store {
     return this._native.revisions(id).then((items) => items.map(liftItem))
   }
 
+  search(query, options) {
+    return this._native.search(query, options).then((res) => ({
+      query: res.query,
+      hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
+    }))
+  }
+
+  retrieve(query, options) {
+    return this._native.retrieve(query, options).then((ctx) => ({
+      query: ctx.query,
+      blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
+    }))
+  }
+
   formatVersion() {
     return this._native.formatVersion()
   }
@@ -352,5 +366,13 @@ class Store {
   }
 }
 
+// Construct the frozen `adapters` namespace from the four native classes.
+const adapters = Object.freeze({
+  plain:  Object.freeze(new PlainAdapter()),
+  claude: Object.freeze(new ClaudeAdapter()),
+  openai: Object.freeze(new OpenAiAdapter()),
+  gemini: Object.freeze(new GeminiAdapter()),
+})
+module.exports.adapters = adapters
 module.exports.Store = Store
 module.exports.version = version

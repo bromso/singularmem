@@ -2,6 +2,16 @@
 //!
 //! Only `Item` is exposed in 5a; `NewItem` is deferred to 5c.
 
+/// Lowercase string name for a search/retrieve score kind. Stable across
+/// the JS API; matches the spec's TS `ScoreKind` type union.
+pub fn score_kind_to_str(k: singularmem_search::ScoreKind) -> String {
+    match k {
+        singularmem_search::ScoreKind::Rrf => "rrf".to_string(),
+        singularmem_search::ScoreKind::Bm25 => "bm25".to_string(),
+        singularmem_search::ScoreKind::Cosine => "cosine".to_string(),
+    }
+}
+
 /// An item retrieved from the store.
 ///
 /// All string values are UTF-8. `createdAt` is a JS `Date` constructed from
@@ -60,6 +70,109 @@ impl From<singularmem_core::Item> for Item {
             tags: core.tags,
             source: core.source,
             metadata: core.metadata,
+        }
+    }
+}
+
+/// One result from `Store.search`. The full `Item` is always populated.
+#[napi(object)]
+pub struct SearchHit {
+    /// The matched item.
+    pub item: Item,
+    /// Final score after fusion (RRF) or single-ranker (BM25 / cosine).
+    pub score: f64,
+    /// Which ranker produced the score: "rrf" | "bm25" | "cosine".
+    pub kind: String,
+    /// 1-based rank in the lexical (Tantivy) ranker, present only when
+    /// the lexical ranker ran (hybrid + lexical modes).
+    pub lexical_rank: Option<u32>,
+    /// 1-based rank in the semantic (`USearch`) ranker, present only when
+    /// the semantic ranker ran (hybrid + semantic modes).
+    pub semantic_rank: Option<u32>,
+}
+
+impl SearchHit {
+    /// Construct from a `HybridHit` + the item it points at (caller fetched).
+    /// `f32 → f64` widening is lossless. `usize → u32` truncates with the
+    /// allow attribute; rank values realistically fit in u32 (typically <100).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn from_parts(hit: singularmem_search::HybridHit, item: singularmem_core::Item) -> Self {
+        Self {
+            item: item.into(),
+            score: f64::from(hit.score),
+            kind: score_kind_to_str(hit.score_kind),
+            lexical_rank: hit.lexical_rank.map(|n| n as u32),
+            semantic_rank: hit.semantic_rank.map(|n| n as u32),
+        }
+    }
+}
+
+/// Results returned by `Store.search`.
+#[napi(object)]
+pub struct SearchResults {
+    /// The query string echoed back from the search call.
+    pub query: String,
+    /// Ranked list of search hits, sorted by descending score. May be empty
+    /// if no items matched the query.
+    pub hits: Vec<SearchHit>,
+}
+
+/// One block in a `RetrievedContext`. Flat shape matching
+/// `singularmem_retrieve::MemoryBlock` (no nested Item).
+#[napi(object)]
+pub struct MemoryBlock {
+    /// 26-character Crockford base32 ULID.
+    pub id: String,
+    /// Full UTF-8 content from the store (not a snippet).
+    pub content: String,
+    /// Score whose meaning depends on `kind`.
+    pub score: f64,
+    /// "rrf" | "bm25" | "cosine".
+    pub kind: String,
+    /// Free-form provenance label from the matched item.
+    pub source: Option<String>,
+    /// Tags from the matched item. Sorted, deduplicated.
+    pub tags: Vec<String>,
+    /// Wall-clock time the matched item was ingested, as a JS `Date`.
+    ///
+    /// **Precision caveat:** the core layer stores timestamps at nanosecond
+    /// precision. Any sub-millisecond component is silently truncated when
+    /// crossing the native boundary (same behaviour as `Item.createdAt`).
+    #[napi(ts_type = "Date")]
+    pub created_at: f64,
+}
+
+impl From<singularmem_retrieve::MemoryBlock> for MemoryBlock {
+    #[allow(clippy::cast_precision_loss)]
+    fn from(b: singularmem_retrieve::MemoryBlock) -> Self {
+        Self {
+            id: b.id.to_string(),
+            content: b.content,
+            score: f64::from(b.score),
+            kind: score_kind_to_str(b.score_kind),
+            source: b.source,
+            tags: b.tags,
+            created_at: b.created_at.as_millisecond() as f64,
+        }
+    }
+}
+
+/// Structured retrieval context returned by `Store.retrieve`.
+#[napi(object)]
+pub struct RetrievedContext {
+    /// The query string echoed back from the retrieve call.
+    pub query: String,
+    /// Ordered list of memory blocks, sorted by descending score and filtered
+    /// by `minScore`. Pass this directly to an adapter's `format()` method.
+    pub blocks: Vec<MemoryBlock>,
+}
+
+impl From<singularmem_retrieve::RetrievedContext> for RetrievedContext {
+    fn from(ctx: singularmem_retrieve::RetrievedContext) -> Self {
+        Self {
+            query: ctx.query,
+            blocks: ctx.blocks.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -141,5 +254,73 @@ mod tests {
         };
         let item: Item = core.into();
         assert!(item.source.is_none());
+    }
+
+    #[test]
+    fn score_kind_rrf_lowercase() {
+        assert_eq!(score_kind_to_str(singularmem_search::ScoreKind::Rrf), "rrf");
+    }
+
+    #[test]
+    fn score_kind_bm25_lowercase() {
+        assert_eq!(
+            score_kind_to_str(singularmem_search::ScoreKind::Bm25),
+            "bm25"
+        );
+    }
+
+    #[test]
+    fn score_kind_cosine_lowercase() {
+        assert_eq!(
+            score_kind_to_str(singularmem_search::ScoreKind::Cosine),
+            "cosine"
+        );
+    }
+
+    #[test]
+    fn search_hit_passes_ranks_when_hybrid() {
+        let id = singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
+        let hit = singularmem_search::HybridHit {
+            id,
+            score: 0.5_f32,
+            score_kind: singularmem_search::ScoreKind::Rrf,
+            lexical_rank: Some(1),
+            semantic_rank: Some(2),
+            snippet: None,
+        };
+        let sh = SearchHit::from_parts(hit, sample_core_item());
+        assert_eq!(sh.lexical_rank, Some(1));
+        assert_eq!(sh.semantic_rank, Some(2));
+        assert_eq!(sh.kind, "rrf");
+    }
+
+    #[test]
+    fn search_hit_omits_ranks_for_single_ranker_lexical() {
+        let id = singularmem_core::item::ItemId::from_str("01HXAAAAAAAAAAAAAAAAAAAAA0").unwrap();
+        let hit = singularmem_search::HybridHit {
+            id,
+            score: 0.5_f32,
+            score_kind: singularmem_search::ScoreKind::Bm25,
+            lexical_rank: Some(1),
+            semantic_rank: None,
+            snippet: None,
+        };
+        let sh = SearchHit::from_parts(hit, sample_core_item());
+        assert_eq!(sh.lexical_rank, Some(1));
+        assert!(sh.semantic_rank.is_none());
+        assert_eq!(sh.kind, "bm25");
+    }
+
+    #[test]
+    fn retrieved_context_round_trips_empty() {
+        let core_ctx = singularmem_retrieve::RetrievedContext {
+            query: "hello".to_string(),
+            blocks: vec![],
+            elapsed: std::time::Duration::ZERO,
+            total_considered: 0,
+        };
+        let napi_ctx: RetrievedContext = core_ctx.into();
+        assert_eq!(napi_ctx.query, "hello");
+        assert!(napi_ctx.blocks.is_empty());
     }
 }

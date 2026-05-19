@@ -8,14 +8,17 @@
 #[macro_use]
 extern crate napi_derive;
 
+mod adapters;
 mod error;
 mod store;
 mod types;
 
+pub use adapters::{ClaudeAdapter, GeminiAdapter, OpenAiAdapter, PlainAdapter};
 pub use store::ListOptions;
 pub use store::Store;
 pub use store::StoreOptions;
 pub use types::Item;
+pub use types::{MemoryBlock, RetrievedContext, SearchHit, SearchResults};
 
 /// Returns the crate version. Used as a smoke-test export.
 #[napi]

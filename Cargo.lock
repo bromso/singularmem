@@ -3207,7 +3207,12 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "serde_json",
+ "singularmem-adapter-claude",
+ "singularmem-adapter-gemini",
+ "singularmem-adapter-openai",
  "singularmem-core",
+ "singularmem-retrieve",
+ "singularmem-search",
  "tokio",
 ]
 
