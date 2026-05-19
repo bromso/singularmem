@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 singularmem-core = { path = "../singularmem-core" }
-singularmem-search = { path = "../singularmem-search" }
+singularmem-search = { path = "../singularmem-search", features = ["testing"] }
 singularmem-retrieve = { path = "../singularmem-retrieve" }
 singularmem-adapter-claude = { path = "../singularmem-adapter-claude" }
 singularmem-adapter-openai = { path = "../singularmem-adapter-openai" }

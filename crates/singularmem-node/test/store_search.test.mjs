@@ -1,3 +1,7 @@
+// Route the napi binding through MockEmbedder so tests don't depend on a
+// fastembed model download. Must be set BEFORE `Store` runs the search.
+process.env.SINGULARMEM_TEST_EMBEDDER = 'mock';
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -38,7 +42,10 @@ test('Store.search with mode "semantic" works', async () => {
   const { path } = freshStorePath();
   seedStoreWithIndexes(path, [{ content: 'semantic match' }]);
   const store = await Store.open(path);
-  const results = await store.search('semantic', { mode: 'semantic' });
+  // MockEmbedder produces hash-based vectors, so an exact-match query gives a
+  // cosine 1.0 hit (the only reliable way to get a deterministic semantic
+  // hit without the real fastembed model).
+  const results = await store.search('semantic match', { mode: 'semantic' });
   assert.ok(results.hits.length >= 1, 'expected at least one hit');
   assert.equal(results.hits[0].kind, 'cosine');
   assert.equal(results.hits[0].lexicalRank, undefined);
@@ -48,7 +55,9 @@ test('Store.search with mode "hybrid" returns RRF-fused results with both ranks'
   const { path } = freshStorePath();
   seedStoreWithIndexes(path, [{ content: 'hybrid match' }]);
   const store = await Store.open(path);
-  const results = await store.search('hybrid', { mode: 'hybrid' });
+  // Same exact-match trick so MockEmbedder produces a cosine hit alongside
+  // BM25's lexical hit, exercising both ranker arms of the RRF fusion.
+  const results = await store.search('hybrid match', { mode: 'hybrid' });
   assert.ok(results.hits.length >= 1, 'expected at least one hit');
   assert.equal(results.hits[0].kind, 'rrf');
   assert.ok(
@@ -72,7 +81,11 @@ test('Store.search mode "auto" throws NoIndexes when no sidecars exist', async (
       'run', '-q', '-p', 'singularmem', '--',
       'ingest', '--no-index', '--store', path, '--content', 'no indexes here',
     ],
-    { stdio: 'pipe', encoding: 'utf8' },
+    {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      env: { ...process.env, SINGULARMEM_TEST_EMBEDDER: 'mock' },
+    },
   );
   if (r.error) throw new Error(`failed to spawn cargo: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`ingest failed (exit ${r.status}): ${r.stderr}`);
@@ -93,7 +106,11 @@ test('Store.search mode "hybrid" throws HybridMissingIndex when one sidecar is a
   const r = spawnSync(
     'cargo',
     ['run', '-q', '-p', 'singularmem', '--', 'reindex', '--store', path],
-    { stdio: 'pipe', encoding: 'utf8' },
+    {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      env: { ...process.env, SINGULARMEM_TEST_EMBEDDER: 'mock' },
+    },
   );
   if (r.status !== 0) throw new Error(`reindex failed: ${r.stderr}`);
   seedStore(path, [{ content: 'tantivy only' }]);

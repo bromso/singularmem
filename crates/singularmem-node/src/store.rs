@@ -461,6 +461,9 @@ type SearchOutput = (
 ///
 /// Returns a `NapiError<&'static str>` with the appropriate code when index
 /// probing, construction, or the search itself fails.
+// Task 4 (`Store.retrieve`) will extract `open_sidecars` + `build_searcher`
+// helpers, which will shrink this function below the 100-line clippy limit.
+#[allow(clippy::too_many_lines)]
 fn run_search(
     store: &Arc<CoreStore>,
     store_path: &std::path::Path,
@@ -496,11 +499,22 @@ fn run_search(
 
     // Build the EmbedderIndex only when a vectors sidecar exists.
     // `FastembedEmbedder::new()` downloads weights on first use (~80 MB).
+    // Tests opt into MockEmbedder via SINGULARMEM_TEST_EMBEDDER=mock so CI
+    // doesn't depend on a network round-trip; mirrors the MCP server's
+    // open_store_with_hooks helper.
     let vectors: Option<singularmem_search::EmbedderIndex> = if vectors_path.exists() {
-        let embedder = singularmem_search::FastembedEmbedder::new()
-            .map_err(crate::error::from_search_error)?;
+        let embedder: Box<dyn singularmem_search::Embedder> =
+            match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                Some("mock") => {
+                    Box::new(singularmem_search::testing::MockEmbedder::default())
+                }
+                _ => Box::new(
+                    singularmem_search::FastembedEmbedder::new()
+                        .map_err(crate::error::from_search_error)?,
+                ),
+            };
         Some(
-            singularmem_search::EmbedderIndex::open(&vectors_path, Box::new(embedder))
+            singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
                 .map_err(crate::error::from_search_error)?,
         )
     } else {

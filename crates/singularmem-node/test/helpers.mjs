@@ -38,7 +38,11 @@ export function seedStoreWithIndexes(path, items) {
       'run', '-q', '-p', 'singularmem', '--',
       'reindex', '--with-embeddings', '--store', path,
     ],
-    { stdio: 'pipe', encoding: 'utf8' },
+    {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      env: { ...process.env, SINGULARMEM_TEST_EMBEDDER: 'mock' },
+    },
   );
   if (reindex.error) {
     throw new Error(`failed to spawn cargo: ${reindex.error.message}`);
@@ -63,7 +67,11 @@ export function seedStore(path, items) {
       args.push('--tag', tag);
     }
     if (item.source) args.push('--source', item.source);
-    const result = spawnSync('cargo', args, { stdio: 'pipe', encoding: 'utf8' });
+    const result = spawnSync('cargo', args, {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      env: { ...process.env, SINGULARMEM_TEST_EMBEDDER: 'mock' },
+    });
     if (result.error) {
       throw new Error(`failed to spawn cargo: ${result.error.message}`);
     }
