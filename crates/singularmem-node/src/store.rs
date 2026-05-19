@@ -388,6 +388,7 @@ impl SearchMode {
 /// `(tantivy, vectors)` where either may be `None` if the corresponding
 /// sidecar directory doesn't exist. Honors `SINGULARMEM_TEST_EMBEDDER=mock`
 /// to mirror the MCP server pattern.
+#[allow(clippy::unnecessary_wraps)] // Result kept for call-site ? compatibility (Task 3 may re-add early-exit paths)
 fn open_sidecars(
     store_path: &std::path::Path,
 ) -> Result<
@@ -409,10 +410,17 @@ fn open_sidecars(
     };
 
     let tantivy = if tantivy_path.exists() {
-        Some(
-            singularmem_search::Index::open(&tantivy_path)
-                .map_err(crate::error::from_search_error)?,
-        )
+        match singularmem_search::Index::open(&tantivy_path) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!(
+                    path = %tantivy_path.display(),
+                    error = %e,
+                    "Tantivy sidecar present but failed to open; skipping"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -421,15 +429,28 @@ fn open_sidecars(
         let embedder: Box<dyn singularmem_search::Embedder> =
             match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
                 Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
-                _ => Box::new(
-                    singularmem_search::FastembedEmbedder::new()
-                        .map_err(crate::error::from_search_error)?,
-                ),
+                _ => match singularmem_search::FastembedEmbedder::new() {
+                    Ok(e) => Box::new(e),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "FastembedEmbedder::new() failed; vectors sidecar will be skipped"
+                        );
+                        return Ok((tantivy, None));
+                    }
+                },
             };
-        Some(
-            singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
-                .map_err(crate::error::from_search_error)?,
-        )
+        match singularmem_search::EmbedderIndex::open(&vectors_path, embedder) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!(
+                    path = %vectors_path.display(),
+                    error = %e,
+                    "Vectors sidecar present but failed to open; skipping"
+                );
+                None
+            }
+        }
     } else {
         None
     };
