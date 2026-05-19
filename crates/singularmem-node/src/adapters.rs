@@ -42,6 +42,11 @@ impl PlainAdapter {
 }
 
 /// Anthropic Claude `<documents>` XML adapter.
+///
+/// Formats a `RetrievedContext` as Anthropic's canonical document-list XML,
+/// using `<documents><document index="N"><source>…</source><document_content>…
+/// </document_content></document>…</documents>` structure. Suitable for use
+/// in Claude system prompts or user turns.
 #[napi]
 pub struct ClaudeAdapter;
 
@@ -59,12 +64,14 @@ impl ClaudeAdapter {
         Self
     }
 
+    /// The adapter's stable name — always `"claude"`.
     #[napi(getter)]
     #[must_use]
     pub fn name(&self) -> String {
         singularmem_adapter_claude::ClaudeAdapter.name().to_string()
     }
 
+    /// Format the given context as Anthropic Claude `<documents>` XML.
     #[napi]
     #[must_use]
     pub fn format(&self, ctx: crate::types::RetrievedContext) -> String {
@@ -74,6 +81,10 @@ impl ClaudeAdapter {
 }
 
 /// `OpenAI` bracketed-citation adapter.
+///
+/// Formats a `RetrievedContext` as numbered `[1]`, `[2]`, … citation blocks
+/// preceded by an instruction line that asks the model to cite sources by
+/// their bracketed number. Suitable for `OpenAI` API `system` or `user` turns.
 #[napi]
 pub struct OpenAiAdapter;
 
@@ -91,12 +102,14 @@ impl OpenAiAdapter {
         Self
     }
 
+    /// The adapter's stable name — always `"openai"`.
     #[napi(getter)]
     #[must_use]
     pub fn name(&self) -> String {
         singularmem_adapter_openai::OpenAiAdapter.name().to_string()
     }
 
+    /// Format the given context as bracketed `[N]` citation blocks.
     #[napi]
     #[must_use]
     pub fn format(&self, ctx: crate::types::RetrievedContext) -> String {
@@ -106,6 +119,10 @@ impl OpenAiAdapter {
 }
 
 /// Google Gemini em-dash "Source N" adapter.
+///
+/// Formats a `RetrievedContext` using em-dash `— Source N —` section headers
+/// followed by a grounding directive, suitable for Gemini API `system` or
+/// `user` message parts.
 #[napi]
 pub struct GeminiAdapter;
 
@@ -123,12 +140,14 @@ impl GeminiAdapter {
         Self
     }
 
+    /// The adapter's stable name — always `"gemini"`.
     #[napi(getter)]
     #[must_use]
     pub fn name(&self) -> String {
         singularmem_adapter_gemini::GeminiAdapter.name().to_string()
     }
 
+    /// Format the given context as em-dash `Source N` blocks.
     #[napi]
     #[must_use]
     pub fn format(&self, ctx: crate::types::RetrievedContext) -> String {

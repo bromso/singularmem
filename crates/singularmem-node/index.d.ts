@@ -18,27 +18,52 @@ export interface StoreOptions {
 export interface SearchOptions {
   /**
    * Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
-   * Default: `"auto"` (uses whichever sidecars are present).
+   *
+   * - `"auto"` (default) — probe which sidecars exist; run hybrid if both are
+   *   present, fall back to whichever single ranker is available.
+   * - `"lexical"` — Tantivy BM25 only; rejects with `IndexMissing` if absent.
+   * - `"semantic"` — USearch cosine only; rejects with `IndexMissing` if absent.
+   * - `"hybrid"` — both rankers, RRF-fused; rejects with `HybridMissingIndex`
+   *   if either sidecar is missing.
    */
   mode?: string
   /** Maximum number of hits to return. Default: `10`. */
   limit?: number
-  /** Per-ranker overfetch factor. Default: `3`. */
+  /**
+   * Per-ranker overfetch factor used to build candidates before fusion or
+   * trimming. Effective candidates = `limit × fetchMultiplier`. Default: `3`.
+   */
   fetchMultiplier?: number
-  /** RRF damping constant. Default: `60`. */
+  /**
+   * Reciprocal Rank Fusion damping constant. Higher values reduce the impact
+   * of high-ranked documents. Default: `60`.
+   */
   rrfK?: number
 }
 /** Options for `Store.retrieve`. */
 export interface RetrieveOptions {
-  /** Default: `"auto"`. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`. */
+  /**
+   * Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+   * Default: `"auto"`. Semantics are identical to `SearchOptions.mode`.
+   */
   mode?: string
-  /** Default: `10`. */
+  /** Maximum number of blocks to return (after score filtering). Default: `10`. */
   limit?: number
-  /** Per-ranker overfetch factor. Default: `3`. */
+  /**
+   * Per-ranker overfetch factor. Default: `3`. Same meaning as in
+   * `SearchOptions.fetchMultiplier`.
+   */
   fetchMultiplier?: number
-  /** RRF damping constant. Default: `60`. */
+  /**
+   * Reciprocal Rank Fusion damping constant. Default: `60`. Same meaning as
+   * in `SearchOptions.rrfK`.
+   */
   rrfK?: number
-  /** Default: `0.0`. Drop blocks whose score is below this threshold. */
+  /**
+   * Drop blocks whose score is strictly below this threshold. Default: `0.0`
+   * (keep all blocks). Useful for filtering out low-relevance results before
+   * passing to an adapter.
+   */
   minScore?: number
 }
 /** Options passed to `Store.list`. */
@@ -138,7 +163,12 @@ export interface SearchHit {
 }
 /** Results returned by `Store.search`. */
 export interface SearchResults {
+  /** The query string echoed back from the search call. */
   query: string
+  /**
+   * Ranked list of search hits, sorted by descending score. May be empty
+   * if no items matched the query.
+   */
   hits: Array<SearchHit>
 }
 /**
@@ -159,14 +189,22 @@ export interface MemoryBlock {
   /** Tags from the matched item. Sorted, deduplicated. */
   tags: Array<string>
   /**
-   * Wall-clock time the matched item was ingested, as ms since epoch.
-   * Lossy: ms precision vs core's ns precision (same as Item.createdAt).
+   * Wall-clock time the matched item was ingested, as a JS `Date`.
+   *
+   * **Precision caveat:** the core layer stores timestamps at nanosecond
+   * precision. Any sub-millisecond component is silently truncated when
+   * crossing the native boundary (same behaviour as `Item.createdAt`).
    */
   createdAt: Date
 }
 /** Structured retrieval context returned by `Store.retrieve`. */
 export interface RetrievedContext {
+  /** The query string echoed back from the retrieve call. */
   query: string
+  /**
+   * Ordered list of memory blocks, sorted by descending score and filtered
+   * by `minScore`. Pass this directly to an adapter's `format()` method.
+   */
   blocks: Array<MemoryBlock>
 }
 /** Returns the crate version. Used as a smoke-test export. */
@@ -200,22 +238,47 @@ export declare class PlainAdapter {
   /** Format the given context as Markdown blocks. */
   format(ctx: RetrievedContext): string
 }
-/** Anthropic Claude `<documents>` XML adapter. */
+/**
+ * Anthropic Claude `<documents>` XML adapter.
+ *
+ * Formats a `RetrievedContext` as Anthropic's canonical document-list XML,
+ * using `<documents><document index="N"><source>…</source><document_content>…
+ * </document_content></document>…</documents>` structure. Suitable for use
+ * in Claude system prompts or user turns.
+ */
 export declare class ClaudeAdapter {
   constructor()
+  /** The adapter's stable name — always `"claude"`. */
   get name(): string
+  /** Format the given context as Anthropic Claude `<documents>` XML. */
   format(ctx: RetrievedContext): string
 }
-/** `OpenAI` bracketed-citation adapter. */
+/**
+ * OpenAI bracketed-citation adapter.
+ *
+ * Formats a `RetrievedContext` as numbered `[1]`, `[2]`, … citation blocks
+ * preceded by an instruction line that asks the model to cite sources by
+ * their bracketed number. Suitable for OpenAI API `system` or `user` turns.
+ */
 export declare class OpenAiAdapter {
   constructor()
+  /** The adapter's stable name — always `"openai"`. */
   get name(): string
+  /** Format the given context as bracketed `[N]` citation blocks. */
   format(ctx: RetrievedContext): string
 }
-/** Google Gemini em-dash "Source N" adapter. */
+/**
+ * Google Gemini em-dash "Source N" adapter.
+ *
+ * Formats a `RetrievedContext` using em-dash `— Source N —` section headers
+ * followed by a grounding directive, suitable for Gemini API `system` or
+ * `user` message parts.
+ */
 export declare class GeminiAdapter {
   constructor()
+  /** The adapter's stable name — always `"gemini"`. */
   get name(): string
+  /** Format the given context as em-dash `Source N` blocks. */
   format(ctx: RetrievedContext): string
 }
 /**
@@ -294,13 +357,25 @@ export declare class Store {
    * the store file on each call (no caching). The `mode` option controls
    * which rankers run; defaults to `"auto"` (use whatever's available).
    *
-   * @param query The natural-language search query.
+   * Build indexes first via the CLI:
+   * `singularmem reindex --with-embeddings --store ./memory.db`
+   *
+   * @param query The natural-language search query string.
    * @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK? }`.
    * @returns `SearchResults` with the query echoed and per-hit `Item` content.
-   * @throws `Error` with `.code === "NoIndexes"` if mode is `"auto"` and no sidecars exist.
-   * @throws `Error` with `.code === "HybridMissingIndex"` if mode is `"hybrid"` and one sidecar is missing.
-   * @throws `Error` with `.code === "IndexMissing"` if an explicit mode requires a missing sidecar.
-   * @throws `Error` with `.code === "Validation"` if the mode string is unrecognised.
+   * @throws `{ code: "NoIndexes" }` — `mode: "auto"` but no sidecar directories exist.
+   * @throws `{ code: "HybridMissingIndex" }` — `mode: "hybrid"` and one of the two sidecars is absent.
+   * @throws `{ code: "IndexMissing" }` — explicit `mode: "lexical"` or `"semantic"` requires a sidecar that is absent.
+   * @throws `{ code: "IndexCorrupted" }` — a sidecar directory exists but cannot be opened.
+   * @throws `{ code: "Validation" }` — the `mode` string is not one of the four recognised values.
+   * @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
+   * @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
+   * @throws `{ code: "Usearch" }` — USearch runtime error during search.
+   * @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
+   * @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
+   * @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
+   * @throws `{ code: "DimMismatch" }` — the vector index was built with a different embedding dimension.
+   * @throws `{ code: "ModelMismatch" }` — the vector index was built with a different embedder model.
    */
   search(query: string, options?: SearchOptions | undefined | null): Promise<SearchResults>
   /**
@@ -311,13 +386,24 @@ export declare class Store {
    * the result to one of `adapters.{plain,claude,openai,gemini}.format()`
    * for prompt-ready output.
    *
-   * @param query The natural-language query. Must be non-empty.
+   * @param query The natural-language query string. Must be non-empty and
+   *   not purely whitespace; rejects immediately with `EmptyQuery` otherwise.
    * @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK?, minScore? }`.
    * @returns `RetrievedContext` with `query` echoed and `blocks` populated.
-   * @throws `Error` with `.code === "EmptyQuery"` if the query is empty or
-   *   whitespace-only.
-   * @throws Same `.code` set as `Store.search` for index-related issues
-   *   (`NoIndexes`, `HybridMissingIndex`, `IndexMissing`, etc.).
+   * @throws `{ code: "EmptyQuery" }` — the query is empty or whitespace-only.
+   * @throws `{ code: "NoIndexes" }` — `mode: "auto"` but no sidecar directories exist.
+   * @throws `{ code: "HybridMissingIndex" }` — `mode: "hybrid"` and one sidecar is absent.
+   * @throws `{ code: "IndexMissing" }` — explicit mode requires a sidecar that is absent.
+   * @throws `{ code: "IndexCorrupted" }` — a sidecar directory exists but cannot be opened.
+   * @throws `{ code: "Validation" }` — the `mode` string is unrecognised.
+   * @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
+   * @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
+   * @throws `{ code: "Usearch" }` — USearch runtime error during search.
+   * @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
+   * @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
+   * @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
+   * @throws `{ code: "DimMismatch" }` — vector index built with a different embedding dimension.
+   * @throws `{ code: "ModelMismatch" }` — vector index built with a different embedder model.
    */
   retrieve(query: string, options?: RetrieveOptions | undefined | null): Promise<RetrievedContext>
   /**

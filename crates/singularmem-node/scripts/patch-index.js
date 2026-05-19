@@ -101,3 +101,42 @@ if (!src.includes(MARKER)) {
 src = src.replace(MARKER, REPLACEMENT)
 fs.writeFileSync(indexPath, src, 'utf8')
 console.log('patch-index.js: index.js patched successfully')
+
+// ── Patch index.d.ts ─────────────────────────────────────────────────────────
+//
+// napi-rs does not generate a declaration for the `adapters` namespace that
+// patch-index.js wires up in index.js. Append it once if it's missing.
+
+const dtsPath = path.join(__dirname, '..', 'index.d.ts')
+let dts = fs.readFileSync(dtsPath, 'utf8')
+
+const ADAPTERS_DECL = `
+/**
+ * The four pre-built prompt adapters, keyed by provider name.
+ *
+ * Each adapter exposes:
+ * - \`name\` — stable lowercase identifier (e.g. \`"claude"\`)
+ * - \`format(ctx)\` — synchronous; converts a \`RetrievedContext\` into a
+ *   provider-specific prompt string.
+ *
+ * Supported adapters:
+ * - \`adapters.plain\`  — Markdown \`## memory N\` headings
+ * - \`adapters.claude\` — Anthropic \`<documents><document index="N">\` XML
+ * - \`adapters.openai\` — Bracketed \`[N]\` citations with a leading instruction
+ * - \`adapters.gemini\` — Em-dash \`Source N\` headers with grounding directive
+ */
+export declare const adapters: {
+  readonly plain: PlainAdapter
+  readonly claude: ClaudeAdapter
+  readonly openai: OpenAiAdapter
+  readonly gemini: GeminiAdapter
+}
+`
+
+if (!dts.includes('export declare const adapters')) {
+  dts = dts.trimEnd() + '\n' + ADAPTERS_DECL
+  fs.writeFileSync(dtsPath, dts, 'utf8')
+  console.log('patch-index.js: index.d.ts patched with adapters declaration')
+} else {
+  console.log('patch-index.js: index.d.ts already has adapters declaration — skipped')
+}

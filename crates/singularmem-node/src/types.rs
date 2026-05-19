@@ -111,7 +111,10 @@ impl SearchHit {
 /// Results returned by `Store.search`.
 #[napi(object)]
 pub struct SearchResults {
+    /// The query string echoed back from the search call.
     pub query: String,
+    /// Ranked list of search hits, sorted by descending score. May be empty
+    /// if no items matched the query.
     pub hits: Vec<SearchHit>,
 }
 
@@ -131,8 +134,11 @@ pub struct MemoryBlock {
     pub source: Option<String>,
     /// Tags from the matched item. Sorted, deduplicated.
     pub tags: Vec<String>,
-    /// Wall-clock time the matched item was ingested, as ms since epoch.
-    /// Lossy: ms precision vs core's ns precision (same as Item.createdAt).
+    /// Wall-clock time the matched item was ingested, as a JS `Date`.
+    ///
+    /// **Precision caveat:** the core layer stores timestamps at nanosecond
+    /// precision. Any sub-millisecond component is silently truncated when
+    /// crossing the native boundary (same behaviour as `Item.createdAt`).
     #[napi(ts_type = "Date")]
     pub created_at: f64,
 }
@@ -155,7 +161,10 @@ impl From<singularmem_retrieve::MemoryBlock> for MemoryBlock {
 /// Structured retrieval context returned by `Store.retrieve`.
 #[napi(object)]
 pub struct RetrievedContext {
+    /// The query string echoed back from the retrieve call.
     pub query: String,
+    /// Ordered list of memory blocks, sorted by descending score and filtered
+    /// by `minScore`. Pass this directly to an adapter's `format()` method.
     pub blocks: Vec<MemoryBlock>,
 }
 

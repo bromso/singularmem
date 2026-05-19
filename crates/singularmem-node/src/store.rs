@@ -729,28 +729,41 @@ pub struct StoreOptions {
 #[napi(object)]
 pub struct SearchOptions {
     /// Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
-    /// Default: `"auto"` (uses whichever sidecars are present).
+    ///
+    /// - `"auto"` (default) — probe which sidecars exist; run hybrid if both are
+    ///   present, fall back to whichever single ranker is available.
+    /// - `"lexical"` — Tantivy BM25 only; rejects with `IndexMissing` if absent.
+    /// - `"semantic"` — `USearch` cosine only; rejects with `IndexMissing` if absent.
+    /// - `"hybrid"` — both rankers, RRF-fused; rejects with `HybridMissingIndex`
+    ///   if either sidecar is missing.
     pub mode: Option<String>,
     /// Maximum number of hits to return. Default: `10`.
     pub limit: Option<u32>,
-    /// Per-ranker overfetch factor. Default: `3`.
+    /// Per-ranker overfetch factor used to build candidates before fusion or
+    /// trimming. Effective candidates = `limit × fetchMultiplier`. Default: `3`.
     pub fetch_multiplier: Option<u32>,
-    /// RRF damping constant. Default: `60`.
+    /// Reciprocal Rank Fusion damping constant. Higher values reduce the impact
+    /// of high-ranked documents. Default: `60`.
     pub rrf_k: Option<u32>,
 }
 
 /// Options for `Store.retrieve`.
 #[napi(object)]
 pub struct RetrieveOptions {
-    /// Default: `"auto"`. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+    /// Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+    /// Default: `"auto"`. Semantics are identical to `SearchOptions.mode`.
     pub mode: Option<String>,
-    /// Default: `10`.
+    /// Maximum number of blocks to return (after score filtering). Default: `10`.
     pub limit: Option<u32>,
-    /// Per-ranker overfetch factor. Default: `3`.
+    /// Per-ranker overfetch factor. Default: `3`. Same meaning as in
+    /// `SearchOptions.fetchMultiplier`.
     pub fetch_multiplier: Option<u32>,
-    /// RRF damping constant. Default: `60`.
+    /// Reciprocal Rank Fusion damping constant. Default: `60`. Same meaning as
+    /// in `SearchOptions.rrfK`.
     pub rrf_k: Option<u32>,
-    /// Default: `0.0`. Drop blocks whose score is below this threshold.
+    /// Drop blocks whose score is strictly below this threshold. Default: `0.0`
+    /// (keep all blocks). Useful for filtering out low-relevance results before
+    /// passing to an adapter.
     pub min_score: Option<f64>,
 }
 
@@ -923,13 +936,25 @@ impl Store {
     /// the store file on each call (no caching). The `mode` option controls
     /// which rankers run; defaults to `"auto"` (use whatever's available).
     ///
-    /// @param query The natural-language search query.
+    /// Build indexes first via the CLI:
+    /// `singularmem reindex --with-embeddings --store ./memory.db`
+    ///
+    /// @param query The natural-language search query string.
     /// @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK? }`.
     /// @returns `SearchResults` with the query echoed and per-hit `Item` content.
-    /// @throws `Error` with `.code === "NoIndexes"` if mode is `"auto"` and no sidecars exist.
-    /// @throws `Error` with `.code === "HybridMissingIndex"` if mode is `"hybrid"` and one sidecar is missing.
-    /// @throws `Error` with `.code === "IndexMissing"` if an explicit mode requires a missing sidecar.
-    /// @throws `Error` with `.code === "Validation"` if the mode string is unrecognised.
+    /// @throws `{ code: "NoIndexes" }` — `mode: "auto"` but no sidecar directories exist.
+    /// @throws `{ code: "HybridMissingIndex" }` — `mode: "hybrid"` and one of the two sidecars is absent.
+    /// @throws `{ code: "IndexMissing" }` — explicit `mode: "lexical"` or `"semantic"` requires a sidecar that is absent.
+    /// @throws `{ code: "IndexCorrupted" }` — a sidecar directory exists but cannot be opened.
+    /// @throws `{ code: "Validation" }` — the `mode` string is not one of the four recognised values.
+    /// @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
+    /// @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
+    /// @throws `{ code: "Usearch" }` — `USearch` runtime error during search.
+    /// @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
+    /// @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
+    /// @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
+    /// @throws `{ code: "DimMismatch" }` — the vector index was built with a different embedding dimension.
+    /// @throws `{ code: "ModelMismatch" }` — the vector index was built with a different embedder model.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn search(
@@ -973,13 +998,24 @@ impl Store {
     /// the result to one of `adapters.{plain,claude,openai,gemini}.format()`
     /// for prompt-ready output.
     ///
-    /// @param query The natural-language query. Must be non-empty.
+    /// @param query The natural-language query string. Must be non-empty and
+    ///   not purely whitespace; rejects immediately with `EmptyQuery` otherwise.
     /// @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK?, minScore? }`.
     /// @returns `RetrievedContext` with `query` echoed and `blocks` populated.
-    /// @throws `Error` with `.code === "EmptyQuery"` if the query is empty or
-    ///   whitespace-only.
-    /// @throws Same `.code` set as `Store.search` for index-related issues
-    ///   (`NoIndexes`, `HybridMissingIndex`, `IndexMissing`, etc.).
+    /// @throws `{ code: "EmptyQuery" }` — the query is empty or whitespace-only.
+    /// @throws `{ code: "NoIndexes" }` — `mode: "auto"` but no sidecar directories exist.
+    /// @throws `{ code: "HybridMissingIndex" }` — `mode: "hybrid"` and one sidecar is absent.
+    /// @throws `{ code: "IndexMissing" }` — explicit mode requires a sidecar that is absent.
+    /// @throws `{ code: "IndexCorrupted" }` — a sidecar directory exists but cannot be opened.
+    /// @throws `{ code: "Validation" }` — the `mode` string is unrecognised.
+    /// @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
+    /// @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
+    /// @throws `{ code: "Usearch" }` — `USearch` runtime error during search.
+    /// @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
+    /// @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
+    /// @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
+    /// @throws `{ code: "DimMismatch" }` — vector index built with a different embedding dimension.
+    /// @throws `{ code: "ModelMismatch" }` — vector index built with a different embedder model.
     #[napi]
     #[allow(clippy::missing_errors_doc)]
     pub fn retrieve(
