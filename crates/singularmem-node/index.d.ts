@@ -220,7 +220,10 @@ export interface NewItem {
   tags?: Array<string>
   /** Optional: free-form provenance label, ≤ 256 bytes. */
   source?: string
-  /** Optional: arbitrary JSON object. Default: `{}`. */
+  /**
+   * Optional: arbitrary JSON object (must be an object, not an array or
+   * scalar). Default: `{}` when omitted.
+   */
   metadata?: any
 }
 /** Returns the crate version. Used as a smoke-test export. */

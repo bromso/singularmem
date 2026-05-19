@@ -189,7 +189,8 @@ pub struct NewItem {
     pub tags: Option<Vec<String>>,
     /// Optional: free-form provenance label, ≤ 256 bytes.
     pub source: Option<String>,
-    /// Optional: arbitrary JSON object. Default: `{}`.
+    /// Optional: arbitrary JSON object (must be an object, not an array or
+    /// scalar). Default: `{}` when omitted.
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -210,13 +211,13 @@ pub fn js_new_item_to_core(
     use std::str::FromStr;
 
     let supersedes = match item.supersedes.as_deref() {
-        Some(s) if !s.is_empty() => Some(
-            singularmem_core::item::ItemId::from_str(s).map_err(|e| {
+        Some(s) if !s.is_empty() => {
+            Some(singularmem_core::item::ItemId::from_str(s).map_err(|e| {
                 let core_err = singularmem_core::Error::from(e);
                 let node_err = crate::error::NodeError::from(core_err);
                 napi::Error::<&'static str>::from(node_err)
-            })?,
-        ),
+            })?)
+        }
         _ => None,
     };
 
@@ -419,7 +420,10 @@ mod tests {
             metadata: None,
         };
         let core = js_new_item_to_core(js).unwrap();
-        assert_eq!(core.supersedes.unwrap().to_string(), "01HXAAAAAAAAAAAAAAAAAAAAA0");
+        assert_eq!(
+            core.supersedes.unwrap().to_string(),
+            "01HXAAAAAAAAAAAAAAAAAAAAA0"
+        );
     }
 
     #[test]

@@ -753,7 +753,10 @@ impl Task for IngestTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         if self.pre_error.is_some() {
-            return Err(NapiError::new(napi::Status::GenericFailure, "pre-validation failed"));
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
         }
         let new_item = self
             .new_item
@@ -768,7 +771,10 @@ impl Task for IngestTask {
             Ok(item) => Ok(item),
             Err(e) => {
                 self.failed = Some(NodeError::from(e));
-                Err(NapiError::new(napi::Status::GenericFailure, "ingest failed"))
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "ingest failed",
+                ))
             }
         }
     }

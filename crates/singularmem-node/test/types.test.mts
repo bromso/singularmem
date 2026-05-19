@@ -5,6 +5,7 @@ import {
   Store,
   adapters,
   type Item,
+  type NewItem,
   type StoreOptions,
   type ListOptions,
   type SearchOptions,
@@ -96,10 +97,26 @@ async function _openCheck(): Promise<Store> {
   return Store.open('/tmp/foo.db', { readOnly: false });
 }
 
+// 5c — NewItem
+const minimal: NewItem = { content: 'hello' };
+const full: NewItem = {
+  content: 'all fields',
+  supersedes: '01H...',
+  tags: ['x', 'y'],
+  source: 'test',
+  metadata: { k: 'v' },
+};
+
+async function _ingestCheck(s: Store): Promise<void> {
+  const _x: Item = await s.ingest({ content: 'hi' });
+  const _y: Item = await s.ingest(full);
+}
+
 void [
-  _check, _openCheck,
+  _check, _openCheck, _ingestCheck,
   opts, opts2, listOpts, listOpts2,
   searchOpts, searchOptsEmpty, retrieveOpts, retrieveOptsEmpty,
   _formattedPlain, _formattedClaude, _formattedOpenAi, _formattedGemini,
   _adapterPlainName, _adapterClaudeName, _adapterOpenAiName, _adapterGeminiName,
+  minimal, full,
 ];
