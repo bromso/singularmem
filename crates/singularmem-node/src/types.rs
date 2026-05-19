@@ -177,6 +177,58 @@ impl From<singularmem_retrieve::RetrievedContext> for RetrievedContext {
     }
 }
 
+/// Input to `Store.ingest`. Only `content` is required; other fields apply
+/// sensible defaults when omitted.
+#[napi(object)]
+pub struct NewItem {
+    /// Required: UTF-8 text content. Must be non-empty, ≤ 1 MiB.
+    pub content: String,
+    /// Optional: ULID of the item this supersedes (revision chain).
+    pub supersedes: Option<String>,
+    /// Optional: tags to attach. Default: `[]`. Duplicates are silently deduped.
+    pub tags: Option<Vec<String>>,
+    /// Optional: free-form provenance label, ≤ 256 bytes.
+    pub source: Option<String>,
+    /// Optional: arbitrary JSON object. Default: `{}`.
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Convert a JS-sent `NewItem` into the core's `NewItem`. Performs early
+/// validation of the `supersedes` ULID format; returns a coded `NapiError`
+/// (with `.code === "InvalidId"`) if the string isn't a valid ULID.
+/// Empty-string `supersedes: ""` is normalized to `None` (defensive: TS
+/// callers might pass empty strings from form fields).
+///
+/// # Errors
+///
+/// Returns a `NapiError<&'static str>` with `.code === "InvalidId"` if
+/// `supersedes` is set to a malformed ULID string.
+#[allow(dead_code)] // used by Store::ingest, added in Task 4
+pub fn js_new_item_to_core(
+    item: NewItem,
+) -> Result<singularmem_core::NewItem, napi::Error<&'static str>> {
+    use std::str::FromStr;
+
+    let supersedes = match item.supersedes.as_deref() {
+        Some(s) if !s.is_empty() => Some(
+            singularmem_core::item::ItemId::from_str(s).map_err(|e| {
+                let core_err = singularmem_core::Error::from(e);
+                let node_err = crate::error::NodeError::from(core_err);
+                napi::Error::<&'static str>::from(node_err)
+            })?,
+        ),
+        _ => None,
+    };
+
+    Ok(singularmem_core::NewItem {
+        content: item.content,
+        supersedes,
+        tags: item.tags.unwrap_or_default(),
+        source: item.source,
+        metadata: item.metadata.unwrap_or_else(|| serde_json::json!({})),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +374,90 @@ mod tests {
         let napi_ctx: RetrievedContext = core_ctx.into();
         assert_eq!(napi_ctx.query, "hello");
         assert!(napi_ctx.blocks.is_empty());
+    }
+
+    #[test]
+    fn new_item_minimal_only_content() {
+        let js = NewItem {
+            content: "hello".to_string(),
+            supersedes: None,
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert_eq!(core.content, "hello");
+        assert_eq!(core.tags, Vec::<String>::new());
+        assert_eq!(core.metadata, serde_json::json!({}));
+        assert!(core.supersedes.is_none());
+        assert!(core.source.is_none());
+    }
+
+    #[test]
+    fn new_item_full_fields() {
+        let js = NewItem {
+            content: "full".to_string(),
+            supersedes: Some("01HXAAAAAAAAAAAAAAAAAAAAA0".to_string()),
+            tags: Some(vec!["a".to_string(), "b".to_string()]),
+            source: Some("test".to_string()),
+            metadata: Some(serde_json::json!({"k": "v"})),
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert_eq!(core.tags, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(core.source, Some("test".to_string()));
+        assert_eq!(core.metadata, serde_json::json!({"k": "v"}));
+        assert!(core.supersedes.is_some());
+    }
+
+    #[test]
+    fn new_item_supersedes_valid_ulid_round_trips() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: Some("01HXAAAAAAAAAAAAAAAAAAAAA0".to_string()),
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert_eq!(core.supersedes.unwrap().to_string(), "01HXAAAAAAAAAAAAAAAAAAAAA0");
+    }
+
+    #[test]
+    fn new_item_supersedes_invalid_ulid_returns_error() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: Some("not-a-ulid".to_string()),
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let napi_err = js_new_item_to_core(js).unwrap_err();
+        assert_eq!(napi_err.status, "InvalidId");
+    }
+
+    #[test]
+    fn new_item_supersedes_empty_string_treated_as_none() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: Some(String::new()),
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert!(core.supersedes.is_none());
+    }
+
+    #[test]
+    fn new_item_metadata_default_empty_object() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: None,
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert_eq!(core.metadata, serde_json::json!({}));
     }
 }
