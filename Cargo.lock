@@ -3214,6 +3214,7 @@ dependencies = [
  "singularmem-retrieve",
  "singularmem-search",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

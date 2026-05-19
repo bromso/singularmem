@@ -18,7 +18,7 @@ pub use store::ListOptions;
 pub use store::Store;
 pub use store::StoreOptions;
 pub use types::Item;
-pub use types::{MemoryBlock, RetrievedContext, SearchHit, SearchResults};
+pub use types::{MemoryBlock, NewItem, RetrievedContext, SearchHit, SearchResults};
 
 /// Returns the crate version. Used as a smoke-test export.
 #[napi]

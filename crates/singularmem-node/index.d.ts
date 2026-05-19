@@ -22,7 +22,7 @@ export interface SearchOptions {
    * - `"auto"` (default) — probe which sidecars exist; run hybrid if both are
    *   present, fall back to whichever single ranker is available.
    * - `"lexical"` — Tantivy BM25 only; rejects with `IndexMissing` if absent.
-   * - `"semantic"` — USearch cosine only; rejects with `IndexMissing` if absent.
+   * - `"semantic"` — `USearch` cosine only; rejects with `IndexMissing` if absent.
    * - `"hybrid"` — both rankers, RRF-fused; rejects with `HybridMissingIndex`
    *   if either sidecar is missing.
    */
@@ -207,29 +207,27 @@ export interface RetrievedContext {
    */
   blocks: Array<MemoryBlock>
 }
+/**
+ * Input to `Store.ingest`. Only `content` is required; other fields apply
+ * sensible defaults when omitted.
+ */
+export interface NewItem {
+  /** Required: UTF-8 text content. Must be non-empty, ≤ 1 MiB. */
+  content: string
+  /** Optional: ULID of the item this supersedes (revision chain). */
+  supersedes?: string
+  /** Optional: tags to attach. Default: `[]`. Duplicates are silently deduped. */
+  tags?: Array<string>
+  /** Optional: free-form provenance label, ≤ 256 bytes. */
+  source?: string
+  /**
+   * Optional: arbitrary JSON object (must be an object, not an array or
+   * scalar). Default: `{}` when omitted.
+   */
+  metadata?: any
+}
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
-
-/**
- * The four pre-built prompt adapters, keyed by provider name.
- *
- * Each adapter exposes:
- * - `name` — stable lowercase identifier (e.g. `"claude"`)
- * - `format(ctx)` — synchronous; converts a `RetrievedContext` into a
- *   provider-specific prompt string.
- *
- * Supported adapters:
- * - `adapters.plain`  — Markdown `## memory N` headings
- * - `adapters.claude` — Anthropic `<documents><document index="N">` XML
- * - `adapters.openai` — Bracketed `[N]` citations with a leading instruction
- * - `adapters.gemini` — Em-dash `Source N` headers with grounding directive
- */
-export declare const adapters: {
-  readonly plain: PlainAdapter
-  readonly claude: ClaudeAdapter
-  readonly openai: OpenAiAdapter
-  readonly gemini: GeminiAdapter
-}
 /** Plain Markdown adapter. */
 export declare class PlainAdapter {
   constructor()
@@ -254,11 +252,11 @@ export declare class ClaudeAdapter {
   format(ctx: RetrievedContext): string
 }
 /**
- * OpenAI bracketed-citation adapter.
+ * `OpenAI` bracketed-citation adapter.
  *
  * Formats a `RetrievedContext` as numbered `[1]`, `[2]`, … citation blocks
  * preceded by an instruction line that asks the model to cite sources by
- * their bracketed number. Suitable for OpenAI API `system` or `user` turns.
+ * their bracketed number. Suitable for `OpenAI` API `system` or `user` turns.
  */
 export declare class OpenAiAdapter {
   constructor()
@@ -370,7 +368,7 @@ export declare class Store {
    * @throws `{ code: "Validation" }` — the `mode` string is not one of the four recognised values.
    * @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
    * @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
-   * @throws `{ code: "Usearch" }` — USearch runtime error during search.
+   * @throws `{ code: "Usearch" }` — `USearch` runtime error during search.
    * @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
    * @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
    * @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
@@ -398,7 +396,7 @@ export declare class Store {
    * @throws `{ code: "Validation" }` — the `mode` string is unrecognised.
    * @throws `{ code: "QueryParse" }` — Tantivy could not parse the query string.
    * @throws `{ code: "Tantivy" }` — Tantivy runtime error during search.
-   * @throws `{ code: "Usearch" }` — USearch runtime error during search.
+   * @throws `{ code: "Usearch" }` — `USearch` runtime error during search.
    * @throws `{ code: "Embedding" }` — embedder runtime error while encoding the query.
    * @throws `{ code: "ModelDownload" }` — fastembed model files could not be downloaded.
    * @throws `{ code: "InvalidModelFiles" }` — embedder model files on disk are malformed.
@@ -406,6 +404,27 @@ export declare class Store {
    * @throws `{ code: "ModelMismatch" }` — vector index built with a different embedder model.
    */
   retrieve(query: string, options?: RetrieveOptions | undefined | null): Promise<RetrievedContext>
+  /**
+   * Persist a new item to the store.
+   *
+   * If Tantivy + `USearch` sidecars exist at the store path, the new item
+   * is written to those indexes too (via per-call hook attachment). Hook
+   * write failures during ingest are logged via `tracing::warn!` but do
+   * NOT roll back the `SQLite` insert — the returned Item is durable
+   * regardless of hook outcomes (Principle VII).
+   *
+   * @param item The item to persist. Only `content` is required; other
+   *   fields apply sensible defaults when omitted.
+   * @returns The newly-persisted Item with assigned `id` and `createdAt`.
+   * @throws Error with `.code === "Validation"` if any field fails validation.
+   * @throws Error with `.code === "InvalidId"` if `supersedes` is malformed.
+   * @throws Error with `.code === "SupersedesNotFound"` if `supersedes`
+   *   references a non-existent ID.
+   * @throws Error with `.code === "ReadOnly"` if the store was opened with
+   *   `{ readOnly: true }`.
+   * @throws Error with `.code === "Sqlite"` on database errors.
+   */
+  ingest(item: NewItem): Promise<Item>
   /**
    * Return the on-disk format version recorded in this store file.
    *
@@ -437,4 +456,25 @@ export declare class Store {
    * @throws `{ code: "Io" }` — I/O error writing to the internal buffer.
    */
   export(): Promise<string>
+}
+
+/**
+ * The four pre-built prompt adapters, keyed by provider name.
+ *
+ * Each adapter exposes:
+ * - `name` — stable lowercase identifier (e.g. `"claude"`)
+ * - `format(ctx)` — synchronous; converts a `RetrievedContext` into a
+ *   provider-specific prompt string.
+ *
+ * Supported adapters:
+ * - `adapters.plain`  — Markdown `## memory N` headings
+ * - `adapters.claude` — Anthropic `<documents><document index="N">` XML
+ * - `adapters.openai` — Bracketed `[N]` citations with a leading instruction
+ * - `adapters.gemini` — Em-dash `Source N` headers with grounding directive
+ */
+export declare const adapters: {
+  readonly plain: PlainAdapter
+  readonly claude: ClaudeAdapter
+  readonly openai: OpenAiAdapter
+  readonly gemini: GeminiAdapter
 }

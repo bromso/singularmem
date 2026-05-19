@@ -126,6 +126,47 @@ const ctx = await store.retrieve('cat care', {
 const prompt = adapters.claude.format(ctx);
 ```
 
+## Ingest
+
+Persist new items to the store:
+
+```javascript
+import { Store } from 'singularmem';
+
+const store = await Store.open('./memory.db');
+
+const item = await store.ingest({
+  content: 'cats are great pets',
+  tags: ['recipes', 'cats'],
+  source: 'morning-notes',
+  metadata: { authorId: 42 },
+});
+
+console.log(item.id, item.createdAt);
+```
+
+If Tantivy + USearch sidecars exist at the store path (created by
+`singularmem reindex --with-embeddings`), the new item is automatically
+written to those indexes too — `store.search()` will find it
+immediately. If no sidecars exist, ingest writes SQLite only; run
+`reindex` later to make older content searchable.
+
+### Supersession
+
+To revise an existing item, pass its ULID as `supersedes`:
+
+```javascript
+const v1 = await store.ingest({ content: 'old version' });
+const v2 = await store.ingest({ content: 'new version', supersedes: v1.id });
+
+// store.revisions(v2.id) returns [v1, v2] in oldest→newest order
+```
+
+### Read-only stores
+
+Opening a store with `{ readOnly: true }` causes `ingest()` to reject
+with `code: 'ReadOnly'`.
+
 ## Adapters
 
 Four pre-built adapters cover the constitutional Principle II providers:

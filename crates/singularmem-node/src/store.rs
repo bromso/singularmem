@@ -84,6 +84,7 @@ impl Task for OpenStoreTask {
         Ok(Store {
             inner: output,
             path: self.path.clone(),
+            read_only: self.read_only,
         })
     }
 
@@ -388,6 +389,7 @@ impl SearchMode {
 /// `(tantivy, vectors)` where either may be `None` if the corresponding
 /// sidecar directory doesn't exist. Honors `SINGULARMEM_TEST_EMBEDDER=mock`
 /// to mirror the MCP server pattern.
+#[allow(clippy::unnecessary_wraps)] // Result kept for call-site ? compatibility (Task 3 may re-add early-exit paths)
 fn open_sidecars(
     store_path: &std::path::Path,
 ) -> Result<
@@ -409,10 +411,17 @@ fn open_sidecars(
     };
 
     let tantivy = if tantivy_path.exists() {
-        Some(
-            singularmem_search::Index::open(&tantivy_path)
-                .map_err(crate::error::from_search_error)?,
-        )
+        match singularmem_search::Index::open(&tantivy_path) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!(
+                    path = %tantivy_path.display(),
+                    error = %e,
+                    "Tantivy sidecar present but failed to open; skipping"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -421,15 +430,28 @@ fn open_sidecars(
         let embedder: Box<dyn singularmem_search::Embedder> =
             match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
                 Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
-                _ => Box::new(
-                    singularmem_search::FastembedEmbedder::new()
-                        .map_err(crate::error::from_search_error)?,
-                ),
+                _ => match singularmem_search::FastembedEmbedder::new() {
+                    Ok(e) => Box::new(e),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "FastembedEmbedder::new() failed; vectors sidecar will be skipped"
+                        );
+                        return Ok((tantivy, None));
+                    }
+                },
             };
-        Some(
-            singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
-                .map_err(crate::error::from_search_error)?,
-        )
+        match singularmem_search::EmbedderIndex::open(&vectors_path, embedder) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                tracing::warn!(
+                    path = %vectors_path.display(),
+                    error = %e,
+                    "Vectors sidecar present but failed to open; skipping"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -713,6 +735,132 @@ fn run_retrieve(
         .map_err(crate::error::from_retrieve_error)
 }
 
+// ── IngestTask ───────────────────────────────────────────────────────────────
+
+pub struct IngestTask {
+    store: Arc<CoreStore>,
+    store_path: PathBuf,
+    read_only: bool,
+    new_item: Option<singularmem_core::NewItem>,
+    pre_error: Option<NapiError<&'static str>>,
+    failed: Option<NodeError>,
+}
+
+#[napi]
+impl Task for IngestTask {
+    type Output = singularmem_core::Item;
+    type JsValue = crate::types::Item;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.pre_error.is_some() {
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
+        }
+        let new_item = self
+            .new_item
+            .take()
+            .expect("new_item must be Some when pre_error is None");
+
+        // Per-call hook wiring: open sidecars, attach to a fresh owned store
+        // for the duration of this single ingest, then detach so subsequent
+        // search/retrieve per-call opens don't conflict with the writer lock.
+        // Matches singularmem-mcp's open_store_with_hooks pattern.
+        match run_ingest_with_hooks(&self.store, &self.store_path, self.read_only, new_item) {
+            Ok(item) => Ok(item),
+            Err(e) => {
+                self.failed = Some(NodeError::from(e));
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "ingest failed",
+                ))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into())
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        if let Some(coded) = self.pre_error.take() {
+            return Err(coded_error_to_napi_raw(env, coded));
+        }
+        let node_err = self.failed.take().unwrap_or_else(|| {
+            NodeError::from(singularmem_core::Error::Io(std::io::Error::other(
+                "unknown ingest error",
+            )))
+        });
+        Err(node_error_to_napi_with_raw(env, node_err))
+    }
+}
+
+/// Open sidecar indexes, attach as hooks on a freshly-opened store, run ingest,
+/// then drop the owned store (so the writer locks are released before any future
+/// search/retrieve probe in the same process). Matches the MCP server's
+/// `open_store_with_hooks` pattern documented in
+/// `singularmem-mcp/src/tools/ingest.rs`.
+///
+/// This per-call wiring is intentional v0 duplication with the MCP code
+/// (~30 lines). A future shared helper (e.g., `singularmem-core::with_hooks`)
+/// can extract once a third consumer appears.
+///
+/// Errors from the core's ingest path propagate; hook write failures are
+/// logged inside the core's ingest implementation (Principle VII).
+fn run_ingest_with_hooks(
+    _store: &Arc<CoreStore>,
+    store_path: &std::path::Path,
+    read_only: bool,
+    new_item: singularmem_core::NewItem,
+) -> singularmem_core::Result<singularmem_core::Item> {
+    // `Arc<CoreStore>` doesn't give us `&mut` for set_hook, so we open a
+    // fresh owned CoreStore here (option B from the Task spec). SQLite
+    // serialises writes, so this is safe. The `_store` param is kept for
+    // API symmetry with the other task helpers; it is otherwise unused.
+    //
+    // Read-only mode: open the store read-only so the core's ingest path
+    // returns `Error::ReadOnly` immediately (no hooks opened; read-only
+    // stores have no write lock to hold).
+
+    if read_only {
+        let ro_store =
+            CoreStore::open_with_options(store_path, CoreStoreOptions { read_only: true })?;
+        return ro_store.ingest(new_item);
+    }
+
+    let (tantivy, vectors) = open_sidecars(store_path).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = ?e,
+            "sidecar probe failed during ingest; this ingest will write SQLite only"
+        );
+        (None, None)
+    });
+
+    let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
+    if let Some(idx) = tantivy {
+        hooks.push(Box::new(idx));
+    }
+    if let Some(idx) = vectors {
+        hooks.push(Box::new(idx));
+    }
+
+    // Open a fresh owned store, wire hooks if any, ingest, then drop.
+    let owned_store = if hooks.is_empty() {
+        CoreStore::open_with_options(store_path, CoreStoreOptions { read_only: false })?
+    } else {
+        CoreStore::open_with_hooks(store_path, hooks)?
+    };
+
+    // Ingest. Hooks fire here (or are skipped if absent). The owned_store
+    // drops at end of scope, releasing the writer locks and SQLite handle.
+    let result = owned_store.ingest(new_item);
+
+    drop(owned_store);
+
+    result
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options passed to `Store.open`.
@@ -799,6 +947,9 @@ pub struct Store {
     pub(crate) inner: Arc<CoreStore>,
     /// Retained so search/retrieve methods can compute sidecar paths.
     pub(crate) path: PathBuf,
+    /// Mirror of the `read_only` flag from `Store.open` options. Used by
+    /// `IngestTask` to open a fresh per-call store with the correct mode.
+    pub(crate) read_only: bool,
 }
 
 #[napi]
@@ -1054,6 +1205,49 @@ impl Store {
             pre_error,
             failed: None,
         }))
+    }
+
+    /// Persist a new item to the store.
+    ///
+    /// If Tantivy + `USearch` sidecars exist at the store path, the new item
+    /// is written to those indexes too (via per-call hook attachment). Hook
+    /// write failures during ingest are logged via `tracing::warn!` but do
+    /// NOT roll back the `SQLite` insert — the returned Item is durable
+    /// regardless of hook outcomes (Principle VII).
+    ///
+    /// @param item The item to persist. Only `content` is required; other
+    ///   fields apply sensible defaults when omitted.
+    /// @returns The newly-persisted Item with assigned `id` and `createdAt`.
+    /// @throws Error with `.code === "Validation"` if any field fails validation.
+    /// @throws Error with `.code === "InvalidId"` if `supersedes` is malformed.
+    /// @throws Error with `.code === "SupersedesNotFound"` if `supersedes`
+    ///   references a non-existent ID.
+    /// @throws Error with `.code === "ReadOnly"` if the store was opened with
+    ///   `{ readOnly: true }`.
+    /// @throws Error with `.code === "Sqlite"` on database errors.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn ingest(&self, item: crate::types::NewItem) -> napi::Result<AsyncTask<IngestTask>> {
+        // Synchronously validate supersedes ULID format. Other validation
+        // happens inside the core's ingest (deferred to the libuv thread).
+        match crate::types::js_new_item_to_core(item) {
+            Ok(new_item) => Ok(AsyncTask::new(IngestTask {
+                store: self.inner.clone(),
+                store_path: self.path.clone(),
+                read_only: self.read_only,
+                new_item: Some(new_item),
+                pre_error: None,
+                failed: None,
+            })),
+            Err(coded) => Ok(AsyncTask::new(IngestTask {
+                store: self.inner.clone(),
+                store_path: self.path.clone(),
+                read_only: self.read_only,
+                new_item: None,
+                pre_error: Some(coded),
+                failed: None,
+            })),
+        }
     }
 
     /// Return the on-disk format version recorded in this store file.
