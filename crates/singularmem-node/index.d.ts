@@ -171,6 +171,27 @@ export interface RetrievedContext {
 }
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
+
+/**
+ * The four pre-built prompt adapters, keyed by provider name.
+ *
+ * Each adapter exposes:
+ * - `name` — stable lowercase identifier (e.g. `"claude"`)
+ * - `format(ctx)` — synchronous; converts a `RetrievedContext` into a
+ *   provider-specific prompt string.
+ *
+ * Supported adapters:
+ * - `adapters.plain`  — Markdown `## memory N` headings
+ * - `adapters.claude` — Anthropic `<documents><document index="N">` XML
+ * - `adapters.openai` — Bracketed `[N]` citations with a leading instruction
+ * - `adapters.gemini` — Em-dash `Source N` headers with grounding directive
+ */
+export declare const adapters: {
+  readonly plain: PlainAdapter
+  readonly claude: ClaudeAdapter
+  readonly openai: OpenAiAdapter
+  readonly gemini: GeminiAdapter
+}
 /** Plain Markdown adapter. */
 export declare class PlainAdapter {
   constructor()
