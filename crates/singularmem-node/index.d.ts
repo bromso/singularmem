@@ -402,6 +402,27 @@ export declare class Store {
    */
   retrieve(query: string, options?: RetrieveOptions | undefined | null): Promise<RetrievedContext>
   /**
+   * Persist a new item to the store.
+   *
+   * If Tantivy + `USearch` sidecars exist at the store path, the new item
+   * is written to those indexes too (via per-call hook attachment). Hook
+   * write failures during ingest are logged via `tracing::warn!` but do
+   * NOT roll back the `SQLite` insert — the returned Item is durable
+   * regardless of hook outcomes (Principle VII).
+   *
+   * @param item The item to persist. Only `content` is required; other
+   *   fields apply sensible defaults when omitted.
+   * @returns The newly-persisted Item with assigned `id` and `createdAt`.
+   * @throws Error with `.code === "Validation"` if any field fails validation.
+   * @throws Error with `.code === "InvalidId"` if `supersedes` is malformed.
+   * @throws Error with `.code === "SupersedesNotFound"` if `supersedes`
+   *   references a non-existent ID.
+   * @throws Error with `.code === "ReadOnly"` if the store was opened with
+   *   `{ readOnly: true }`.
+   * @throws Error with `.code === "Sqlite"` on database errors.
+   */
+  ingest(item: NewItem): Promise<Item>
+  /**
    * Return the on-disk format version recorded in this store file.
    *
    * The version is a semver string (e.g. `"1.0.0"`) that identifies the

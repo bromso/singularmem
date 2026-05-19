@@ -6,8 +6,8 @@
  * This script replaces the final export block with a thin JS wrapper that:
  *
  * 1. Promotes `createdAt` from a millisecond number to a JS `Date` on items
- *    returned by `Store.get`, `Store.list`, `Store.revisions`, and hit items
- *    returned by `Store.search`.
+ *    returned by `Store.get`, `Store.list`, `Store.revisions`, `Store.ingest`,
+ *    and hit items returned by `Store.search`.
  * 2. Wraps `Store.open` to return instances of the JS `Store` class rather
  *    than the raw native object, so the JS wrapper methods are available.
  * 3. Forwards `Store.formatVersion` and `Store.export` directly to the native
@@ -15,6 +15,7 @@
  * 4. Implements `Store.search` which lifts `createdAt` on each hit's item.
  * 5. Implements `Store.retrieve` which lifts `createdAt` on each block
  *    (flat shape — `b.createdAt`, not `b.item.createdAt`).
+ * 6. Implements `Store.ingest` which lifts `createdAt` on the returned Item.
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -71,6 +72,10 @@ class Store {
       query: ctx.query,
       blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
     }))
+  }
+
+  ingest(item) {
+    return this._native.ingest(item).then(liftItem)
   }
 
   formatVersion() {

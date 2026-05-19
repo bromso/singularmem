@@ -357,6 +357,10 @@ class Store {
     }))
   }
 
+  ingest(item) {
+    return this._native.ingest(item).then(liftItem)
+  }
+
   formatVersion() {
     return this._native.formatVersion()
   }
