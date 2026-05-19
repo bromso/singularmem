@@ -13,6 +13,8 @@
  * 3. Forwards `Store.formatVersion` and `Store.export` directly to the native
  *    binding (no item lifting required).
  * 4. Implements `Store.search` which lifts `createdAt` on each hit's item.
+ * 5. Implements `Store.retrieve` which lifts `createdAt` on each block
+ *    (flat shape — `b.createdAt`, not `b.item.createdAt`).
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -61,6 +63,13 @@ class Store {
     return this._native.search(query, options).then((res) => ({
       query: res.query,
       hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
+    }))
+  }
+
+  retrieve(query, options) {
+    return this._native.retrieve(query, options).then((ctx) => ({
+      query: ctx.query,
+      blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
     }))
   }
 

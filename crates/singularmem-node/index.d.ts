@@ -28,6 +28,19 @@ export interface SearchOptions {
   /** RRF damping constant. Default: `60`. */
   rrfK?: number
 }
+/** Options for `Store.retrieve`. */
+export interface RetrieveOptions {
+  /** Default: `"auto"`. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`. */
+  mode?: string
+  /** Default: `10`. */
+  limit?: number
+  /** Per-ranker overfetch factor. Default: `3`. */
+  fetchMultiplier?: number
+  /** RRF damping constant. Default: `60`. */
+  rrfK?: number
+  /** Default: `0.0`. Drop blocks whose score is below this threshold. */
+  minScore?: number
+}
 /** Options passed to `Store.list`. */
 export interface ListOptions {
   /**
@@ -243,6 +256,23 @@ export declare class Store {
    * @throws `Error` with `.code === "Validation"` if the mode string is unrecognised.
    */
   search(query: string, options?: SearchOptions | undefined | null): Promise<SearchResults>
+  /**
+   * Retrieve a structured context for the given query.
+   *
+   * Runs hybrid search, fetches the full Item for each hit, drops blocks
+   * below `minScore`, and returns the resulting `RetrievedContext`. Pass
+   * the result to one of `adapters.{plain,claude,openai,gemini}.format()`
+   * for prompt-ready output.
+   *
+   * @param query The natural-language query. Must be non-empty.
+   * @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK?, minScore? }`.
+   * @returns `RetrievedContext` with `query` echoed and `blocks` populated.
+   * @throws `Error` with `.code === "EmptyQuery"` if the query is empty or
+   *   whitespace-only.
+   * @throws Same `.code` set as `Store.search` for index-related issues
+   *   (`NoIndexes`, `HybridMissingIndex`, `IndexMissing`, etc.).
+   */
+  retrieve(query: string, options?: RetrieveOptions | undefined | null): Promise<RetrievedContext>
   /**
    * Return the on-disk format version recorded in this store file.
    *

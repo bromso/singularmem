@@ -350,6 +350,13 @@ class Store {
     }))
   }
 
+  retrieve(query, options) {
+    return this._native.retrieve(query, options).then((ctx) => ({
+      query: ctx.query,
+      blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
+    }))
+  }
+
   formatVersion() {
     return this._native.formatVersion()
   }

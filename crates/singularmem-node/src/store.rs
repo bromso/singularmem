@@ -382,6 +382,128 @@ impl SearchMode {
     }
 }
 
+// ── Sidecar helpers ───────────────────────────────────────────────────────────
+
+/// Open whatever sidecar indexes exist at the given store path. Returns
+/// `(tantivy, vectors)` where either may be `None` if the corresponding
+/// sidecar directory doesn't exist. Honors `SINGULARMEM_TEST_EMBEDDER=mock`
+/// to mirror the MCP server pattern.
+fn open_sidecars(
+    store_path: &std::path::Path,
+) -> Result<
+    (
+        Option<singularmem_search::Index>,
+        Option<singularmem_search::EmbedderIndex>,
+    ),
+    NapiError<&'static str>,
+> {
+    let tantivy_path = {
+        let mut p = store_path.as_os_str().to_owned();
+        p.push(".tantivy");
+        std::path::PathBuf::from(p)
+    };
+    let vectors_path = {
+        let mut p = store_path.as_os_str().to_owned();
+        p.push(".vectors");
+        std::path::PathBuf::from(p)
+    };
+
+    let tantivy = if tantivy_path.exists() {
+        Some(
+            singularmem_search::Index::open(&tantivy_path)
+                .map_err(crate::error::from_search_error)?,
+        )
+    } else {
+        None
+    };
+
+    let vectors = if vectors_path.exists() {
+        let embedder: Box<dyn singularmem_search::Embedder> =
+            match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                Some("mock") => {
+                    Box::new(singularmem_search::testing::MockEmbedder::default())
+                }
+                _ => Box::new(
+                    singularmem_search::FastembedEmbedder::new()
+                        .map_err(crate::error::from_search_error)?,
+                ),
+            };
+        Some(
+            singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
+                .map_err(crate::error::from_search_error)?,
+        )
+    } else {
+        None
+    };
+
+    Ok((tantivy, vectors))
+}
+
+/// Construct a `HybridSearcher` given the requested mode and the sidecars
+/// that were opened. Returns the appropriate coded `NapiError` if the mode
+/// requires a sidecar that isn't present.
+fn build_searcher<'a>(
+    mode: SearchMode,
+    tantivy: Option<&'a singularmem_search::Index>,
+    vectors: Option<&'a singularmem_search::EmbedderIndex>,
+    store_path: &std::path::Path,
+) -> Result<singularmem_search::HybridSearcher<'a>, NapiError<&'static str>> {
+    let tantivy_path = {
+        let mut p = store_path.as_os_str().to_owned();
+        p.push(".tantivy");
+        std::path::PathBuf::from(p)
+    };
+    let vectors_path = {
+        let mut p = store_path.as_os_str().to_owned();
+        p.push(".vectors");
+        std::path::PathBuf::from(p)
+    };
+
+    Ok(match mode {
+        SearchMode::Lexical => {
+            let t = tantivy.ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
+                    path: tantivy_path,
+                })
+            })?;
+            singularmem_search::HybridSearcher::lexical_only(t)
+        }
+        SearchMode::Semantic => {
+            let v = vectors.ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
+                    path: vectors_path,
+                })
+            })?;
+            singularmem_search::HybridSearcher::semantic_only(v)
+        }
+        SearchMode::Hybrid => {
+            let t = tantivy.ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::HybridMissingIndex {
+                    missing: "lexical",
+                    path: tantivy_path,
+                })
+            })?;
+            let v = vectors.ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::HybridMissingIndex {
+                    missing: "semantic",
+                    path: vectors_path,
+                })
+            })?;
+            singularmem_search::HybridSearcher::new(t, v)
+        }
+        SearchMode::Auto => match (tantivy, vectors) {
+            (Some(t), Some(v)) => singularmem_search::HybridSearcher::new(t, v),
+            (Some(t), None) => singularmem_search::HybridSearcher::lexical_only(t),
+            (None, Some(v)) => singularmem_search::HybridSearcher::semantic_only(v),
+            (None, None) => {
+                return Err(crate::error::from_search_error(
+                    singularmem_search::Error::NoIndexes,
+                ));
+            }
+        },
+    })
+}
+
 // ── SearchTask ────────────────────────────────────────────────────────────────
 
 pub struct SearchTask {
@@ -461,9 +583,6 @@ type SearchOutput = (
 ///
 /// Returns a `NapiError<&'static str>` with the appropriate code when index
 /// probing, construction, or the search itself fails.
-// Task 4 (`Store.retrieve`) will extract `open_sidecars` + `build_searcher`
-// helpers, which will shrink this function below the 100-line clippy limit.
-#[allow(clippy::too_many_lines)]
 fn run_search(
     store: &Arc<CoreStore>,
     store_path: &std::path::Path,
@@ -473,102 +592,8 @@ fn run_search(
     fetch_multiplier: usize,
     rrf_k: usize,
 ) -> Result<SearchOutput, NapiError<&'static str>> {
-    // The CLI derives sidecar paths by appending ".tantivy" / ".vectors" as a
-    // string suffix to the full store path (including its own extension, e.g.
-    // "store.db" → "store.db.tantivy"). `Path::with_extension` would replace
-    // the extension, producing the wrong result ("store.tantivy").
-    let tantivy_path = {
-        let mut s = store_path.as_os_str().to_owned();
-        s.push(".tantivy");
-        std::path::PathBuf::from(s)
-    };
-    let vectors_path = {
-        let mut s = store_path.as_os_str().to_owned();
-        s.push(".vectors");
-        std::path::PathBuf::from(s)
-    };
-
-    let tantivy = if tantivy_path.exists() {
-        Some(
-            singularmem_search::Index::open(&tantivy_path)
-                .map_err(crate::error::from_search_error)?,
-        )
-    } else {
-        None
-    };
-
-    // Build the EmbedderIndex only when a vectors sidecar exists.
-    // `FastembedEmbedder::new()` downloads weights on first use (~80 MB).
-    // Tests opt into MockEmbedder via SINGULARMEM_TEST_EMBEDDER=mock so CI
-    // doesn't depend on a network round-trip; mirrors the MCP server's
-    // open_store_with_hooks helper.
-    let vectors: Option<singularmem_search::EmbedderIndex> = if vectors_path.exists() {
-        let embedder: Box<dyn singularmem_search::Embedder> =
-            match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-                Some("mock") => {
-                    Box::new(singularmem_search::testing::MockEmbedder::default())
-                }
-                _ => Box::new(
-                    singularmem_search::FastembedEmbedder::new()
-                        .map_err(crate::error::from_search_error)?,
-                ),
-            };
-        Some(
-            singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
-                .map_err(crate::error::from_search_error)?,
-        )
-    } else {
-        None
-    };
-
-    // Construct searcher based on mode + what's available.
-    let searcher = match mode {
-        SearchMode::Lexical => {
-            let t = tantivy.as_ref().ok_or_else(|| {
-                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
-                    path: tantivy_path.clone(),
-                })
-            })?;
-            singularmem_search::HybridSearcher::lexical_only(t)
-        }
-        SearchMode::Semantic => {
-            let v = vectors.as_ref().ok_or_else(|| {
-                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
-                    path: vectors_path.clone(),
-                })
-            })?;
-            singularmem_search::HybridSearcher::semantic_only(v)
-        }
-        SearchMode::Hybrid => {
-            let t = tantivy.as_ref().ok_or_else(|| {
-                crate::error::from_search_error(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "lexical",
-                        path: tantivy_path.clone(),
-                    },
-                )
-            })?;
-            let v = vectors.as_ref().ok_or_else(|| {
-                crate::error::from_search_error(
-                    singularmem_search::Error::HybridMissingIndex {
-                        missing: "semantic",
-                        path: vectors_path.clone(),
-                    },
-                )
-            })?;
-            singularmem_search::HybridSearcher::new(t, v)
-        }
-        SearchMode::Auto => match (tantivy.as_ref(), vectors.as_ref()) {
-            (Some(t), Some(v)) => singularmem_search::HybridSearcher::new(t, v),
-            (Some(t), None) => singularmem_search::HybridSearcher::lexical_only(t),
-            (None, Some(v)) => singularmem_search::HybridSearcher::semantic_only(v),
-            (None, None) => {
-                return Err(crate::error::from_search_error(
-                    singularmem_search::Error::NoIndexes,
-                ));
-            }
-        },
-    };
+    let (tantivy, vectors) = open_sidecars(store_path)?;
+    let searcher = build_searcher(mode, tantivy.as_ref(), vectors.as_ref(), store_path)?;
 
     let opts = singularmem_search::HybridSearchOptions {
         limit,
@@ -589,6 +614,102 @@ fn run_search(
         pairs.push((hit, item));
     }
     Ok((query.to_string(), pairs))
+}
+
+// ── RetrieveTask ─────────────────────────────────────────────────────────────
+
+pub struct RetrieveTask {
+    store: Arc<CoreStore>,
+    store_path: PathBuf,
+    query: String,
+    mode: SearchMode,
+    limit: usize,
+    fetch_multiplier: usize,
+    rrf_k: usize,
+    min_score: f32,
+    pre_error: Option<NapiError<&'static str>>,
+    failed: Option<NapiError<&'static str>>,
+}
+
+#[napi]
+impl Task for RetrieveTask {
+    type Output = singularmem_retrieve::RetrievedContext;
+    type JsValue = crate::types::RetrievedContext;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.pre_error.is_some() {
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
+        }
+        match run_retrieve(
+            &self.store,
+            &self.store_path,
+            &self.query,
+            self.mode,
+            self.limit,
+            self.fetch_multiplier,
+            self.rrf_k,
+            self.min_score,
+        ) {
+            Ok(ctx) => Ok(ctx),
+            Err(coded) => {
+                self.failed = Some(coded);
+                Err(NapiError::new(
+                    napi::Status::GenericFailure,
+                    "retrieve failed",
+                ))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into())
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        if let Some(coded) = self.pre_error.take() {
+            return Err(coded_error_to_napi_raw(env, coded));
+        }
+        if let Some(coded) = self.failed.take() {
+            return Err(coded_error_to_napi_raw(env, coded));
+        }
+        Err(NapiError::new(
+            napi::Status::GenericFailure,
+            "unknown retrieve error",
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_retrieve(
+    store: &Arc<CoreStore>,
+    store_path: &std::path::Path,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+    fetch_multiplier: usize,
+    rrf_k: usize,
+    min_score: f32,
+) -> Result<singularmem_retrieve::RetrievedContext, NapiError<&'static str>> {
+    let (tantivy, vectors) = open_sidecars(store_path)?;
+    let searcher = build_searcher(mode, tantivy.as_ref(), vectors.as_ref(), store_path)?;
+    let retriever = singularmem_retrieve::Retriever::new(store, &searcher);
+
+    let opts = singularmem_retrieve::RetrieveOptions {
+        max_blocks: limit,
+        min_score,
+        search: singularmem_search::HybridSearchOptions {
+            limit,
+            fetch_multiplier,
+            rrf_k,
+            include_snippets: false,
+        },
+    };
+    retriever
+        .retrieve(query, &opts)
+        .map_err(crate::error::from_retrieve_error)
 }
 
 // ── Options ───────────────────────────────────────────────────────────────────
@@ -616,6 +737,21 @@ pub struct SearchOptions {
     pub fetch_multiplier: Option<u32>,
     /// RRF damping constant. Default: `60`.
     pub rrf_k: Option<u32>,
+}
+
+/// Options for `Store.retrieve`.
+#[napi(object)]
+pub struct RetrieveOptions {
+    /// Default: `"auto"`. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+    pub mode: Option<String>,
+    /// Default: `10`.
+    pub limit: Option<u32>,
+    /// Per-ranker overfetch factor. Default: `3`.
+    pub fetch_multiplier: Option<u32>,
+    /// RRF damping constant. Default: `60`.
+    pub rrf_k: Option<u32>,
+    /// Default: `0.0`. Drop blocks whose score is below this threshold.
+    pub min_score: Option<f64>,
 }
 
 /// Options passed to `Store.list`.
@@ -825,6 +961,59 @@ impl Store {
             limit,
             fetch_multiplier,
             rrf_k,
+            pre_error,
+            failed: None,
+        }))
+    }
+
+    /// Retrieve a structured context for the given query.
+    ///
+    /// Runs hybrid search, fetches the full Item for each hit, drops blocks
+    /// below `minScore`, and returns the resulting `RetrievedContext`. Pass
+    /// the result to one of `adapters.{plain,claude,openai,gemini}.format()`
+    /// for prompt-ready output.
+    ///
+    /// @param query The natural-language query. Must be non-empty.
+    /// @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK?, minScore? }`.
+    /// @returns `RetrievedContext` with `query` echoed and `blocks` populated.
+    /// @throws `Error` with `.code === "EmptyQuery"` if the query is empty or
+    ///   whitespace-only.
+    /// @throws Same `.code` set as `Store.search` for index-related issues
+    ///   (`NoIndexes`, `HybridMissingIndex`, `IndexMissing`, etc.).
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn retrieve(
+        &self,
+        query: String,
+        options: Option<RetrieveOptions>,
+    ) -> napi::Result<AsyncTask<RetrieveTask>> {
+        let mode_str = options.as_ref().and_then(|o| o.mode.as_deref());
+        let (mode, pre_error) = match SearchMode::from_optional_str(mode_str) {
+            Ok(m) => (m, None),
+            Err(coded) => (SearchMode::Auto, Some(coded)),
+        };
+
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = options.as_ref().and_then(|o| o.limit).unwrap_or(10) as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let fetch_multiplier = options
+            .as_ref()
+            .and_then(|o| o.fetch_multiplier)
+            .unwrap_or(3) as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let rrf_k = options.as_ref().and_then(|o| o.rrf_k).unwrap_or(60) as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let min_score = options.and_then(|o| o.min_score).unwrap_or(0.0) as f32;
+
+        Ok(AsyncTask::new(RetrieveTask {
+            store: self.inner.clone(),
+            store_path: self.path.clone(),
+            query,
+            mode,
+            limit,
+            fetch_multiplier,
+            rrf_k,
+            min_score,
             pre_error,
             failed: None,
         }))
