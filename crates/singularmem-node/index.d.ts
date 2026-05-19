@@ -14,6 +14,20 @@ export interface StoreOptions {
    */
   readOnly?: boolean
 }
+/** Options for `Store.search`. */
+export interface SearchOptions {
+  /**
+   * Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+   * Default: `"auto"` (uses whichever sidecars are present).
+   */
+  mode?: string
+  /** Maximum number of hits to return. Default: `10`. */
+  limit?: number
+  /** Per-ranker overfetch factor. Default: `3`. */
+  fetchMultiplier?: number
+  /** RRF damping constant. Default: `60`. */
+  rrfK?: number
+}
 /** Options passed to `Store.list`. */
 export interface ListOptions {
   /**
@@ -213,6 +227,22 @@ export declare class Store {
    * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
    */
   revisions(id: string): Promise<Array<Item>>
+  /**
+   * Run a hybrid search over the store's indexes.
+   *
+   * Probes for Tantivy (`.tantivy`) and vector (`.vectors`) sidecars next to
+   * the store file on each call (no caching). The `mode` option controls
+   * which rankers run; defaults to `"auto"` (use whatever's available).
+   *
+   * @param query The natural-language search query.
+   * @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK? }`.
+   * @returns `SearchResults` with the query echoed and per-hit `Item` content.
+   * @throws `Error` with `.code === "NoIndexes"` if mode is `"auto"` and no sidecars exist.
+   * @throws `Error` with `.code === "HybridMissingIndex"` if mode is `"hybrid"` and one sidecar is missing.
+   * @throws `Error` with `.code === "IndexMissing"` if an explicit mode requires a missing sidecar.
+   * @throws `Error` with `.code === "Validation"` if the mode string is unrecognised.
+   */
+  search(query: string, options?: SearchOptions | undefined | null): Promise<SearchResults>
   /**
    * Return the on-disk format version recorded in this store file.
    *

@@ -354,6 +354,229 @@ impl Task for ExportTask {
     }
 }
 
+// ── SearchMode ────────────────────────────────────────────────────────────────
+
+/// Internal search mode — never exposed to JS.
+#[derive(Debug, Clone, Copy)]
+enum SearchMode {
+    Auto,
+    Lexical,
+    Semantic,
+    Hybrid,
+}
+
+impl SearchMode {
+    fn from_optional_str(s: Option<&str>) -> Result<Self, NapiError<&'static str>> {
+        match s.unwrap_or("auto") {
+            "auto" => Ok(Self::Auto),
+            "lexical" => Ok(Self::Lexical),
+            "semantic" => Ok(Self::Semantic),
+            "hybrid" => Ok(Self::Hybrid),
+            other => Err(NapiError::new(
+                "Validation",
+                format!(
+                    "unknown search mode '{other}'; expected one of: auto, lexical, semantic, hybrid"
+                ),
+            )),
+        }
+    }
+}
+
+// ── SearchTask ────────────────────────────────────────────────────────────────
+
+pub struct SearchTask {
+    store: Arc<CoreStore>,
+    store_path: PathBuf,
+    query: String,
+    mode: SearchMode,
+    limit: usize,
+    fetch_multiplier: usize,
+    rrf_k: usize,
+    pre_error: Option<NapiError<&'static str>>,
+    failed: Option<NapiError<&'static str>>,
+}
+
+#[napi]
+impl Task for SearchTask {
+    type Output = SearchOutput;
+    type JsValue = crate::types::SearchResults;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.pre_error.is_some() {
+            return Err(NapiError::new(
+                napi::Status::GenericFailure,
+                "pre-validation failed",
+            ));
+        }
+        match run_search(
+            &self.store,
+            &self.store_path,
+            &self.query,
+            self.mode,
+            self.limit,
+            self.fetch_multiplier,
+            self.rrf_k,
+        ) {
+            Ok(out) => Ok(out),
+            Err(coded) => {
+                self.failed = Some(coded);
+                Err(NapiError::new(napi::Status::GenericFailure, "search failed"))
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let (query, pairs) = output;
+        let hits = pairs
+            .into_iter()
+            .map(|(hit, item)| crate::types::SearchHit::from_parts(hit, item))
+            .collect();
+        Ok(crate::types::SearchResults { query, hits })
+    }
+
+    fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
+        if let Some(coded) = self.pre_error.take() {
+            return Err(crate::error::coded_error_to_napi_raw(env, coded));
+        }
+        if let Some(coded) = self.failed.take() {
+            return Err(crate::error::coded_error_to_napi_raw(env, coded));
+        }
+        Err(NapiError::new(
+            napi::Status::GenericFailure,
+            "unknown search error",
+        ))
+    }
+}
+
+/// Return type of `run_search`: echoed query + hit/item pairs.
+type SearchOutput = (
+    String,
+    Vec<(singularmem_search::HybridHit, singularmem_core::Item)>,
+);
+
+/// Probe sidecars, resolve mode, run hybrid search, enrich each hit with
+/// its full `Item`. Returns `(echo_of_query, vec_of_(hit, item))`.
+///
+/// # Errors
+///
+/// Returns a `NapiError<&'static str>` with the appropriate code when index
+/// probing, construction, or the search itself fails.
+fn run_search(
+    store: &Arc<CoreStore>,
+    store_path: &std::path::Path,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+    fetch_multiplier: usize,
+    rrf_k: usize,
+) -> Result<SearchOutput, NapiError<&'static str>> {
+    // The CLI derives sidecar paths by appending ".tantivy" / ".vectors" as a
+    // string suffix to the full store path (including its own extension, e.g.
+    // "store.db" → "store.db.tantivy"). `Path::with_extension` would replace
+    // the extension, producing the wrong result ("store.tantivy").
+    let tantivy_path = {
+        let mut s = store_path.as_os_str().to_owned();
+        s.push(".tantivy");
+        std::path::PathBuf::from(s)
+    };
+    let vectors_path = {
+        let mut s = store_path.as_os_str().to_owned();
+        s.push(".vectors");
+        std::path::PathBuf::from(s)
+    };
+
+    let tantivy = if tantivy_path.exists() {
+        Some(
+            singularmem_search::Index::open(&tantivy_path)
+                .map_err(crate::error::from_search_error)?,
+        )
+    } else {
+        None
+    };
+
+    // Build the EmbedderIndex only when a vectors sidecar exists.
+    // `FastembedEmbedder::new()` downloads weights on first use (~80 MB).
+    let vectors: Option<singularmem_search::EmbedderIndex> = if vectors_path.exists() {
+        let embedder = singularmem_search::FastembedEmbedder::new()
+            .map_err(crate::error::from_search_error)?;
+        Some(
+            singularmem_search::EmbedderIndex::open(&vectors_path, Box::new(embedder))
+                .map_err(crate::error::from_search_error)?,
+        )
+    } else {
+        None
+    };
+
+    // Construct searcher based on mode + what's available.
+    let searcher = match mode {
+        SearchMode::Lexical => {
+            let t = tantivy.as_ref().ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
+                    path: tantivy_path.clone(),
+                })
+            })?;
+            singularmem_search::HybridSearcher::lexical_only(t)
+        }
+        SearchMode::Semantic => {
+            let v = vectors.as_ref().ok_or_else(|| {
+                crate::error::from_search_error(singularmem_search::Error::IndexMissing {
+                    path: vectors_path.clone(),
+                })
+            })?;
+            singularmem_search::HybridSearcher::semantic_only(v)
+        }
+        SearchMode::Hybrid => {
+            let t = tantivy.as_ref().ok_or_else(|| {
+                crate::error::from_search_error(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "lexical",
+                        path: tantivy_path.clone(),
+                    },
+                )
+            })?;
+            let v = vectors.as_ref().ok_or_else(|| {
+                crate::error::from_search_error(
+                    singularmem_search::Error::HybridMissingIndex {
+                        missing: "semantic",
+                        path: vectors_path.clone(),
+                    },
+                )
+            })?;
+            singularmem_search::HybridSearcher::new(t, v)
+        }
+        SearchMode::Auto => match (tantivy.as_ref(), vectors.as_ref()) {
+            (Some(t), Some(v)) => singularmem_search::HybridSearcher::new(t, v),
+            (Some(t), None) => singularmem_search::HybridSearcher::lexical_only(t),
+            (None, Some(v)) => singularmem_search::HybridSearcher::semantic_only(v),
+            (None, None) => {
+                return Err(crate::error::from_search_error(
+                    singularmem_search::Error::NoIndexes,
+                ));
+            }
+        },
+    };
+
+    let opts = singularmem_search::HybridSearchOptions {
+        limit,
+        fetch_multiplier,
+        rrf_k,
+        include_snippets: false, // snippets not exposed in 5b
+    };
+    let results = searcher
+        .search(query, &opts)
+        .map_err(crate::error::from_search_error)?;
+
+    let mut pairs = Vec::with_capacity(results.hits.len());
+    for hit in results.hits {
+        let item = store.get(hit.id).map_err(|e| {
+            let node_err: NapiError<&'static str> = NodeError::from(e).into();
+            node_err
+        })?;
+        pairs.push((hit, item));
+    }
+    Ok((query.to_string(), pairs))
+}
+
 // ── Options ───────────────────────────────────────────────────────────────────
 
 /// Options passed to `Store.open`.
@@ -365,6 +588,20 @@ pub struct StoreOptions {
     ///
     /// Defaults to `false` (read-write) when omitted.
     pub read_only: Option<bool>,
+}
+
+/// Options for `Store.search`.
+#[napi(object)]
+pub struct SearchOptions {
+    /// Search mode. One of: `"auto"` | `"lexical"` | `"semantic"` | `"hybrid"`.
+    /// Default: `"auto"` (uses whichever sidecars are present).
+    pub mode: Option<String>,
+    /// Maximum number of hits to return. Default: `10`.
+    pub limit: Option<u32>,
+    /// Per-ranker overfetch factor. Default: `3`.
+    pub fetch_multiplier: Option<u32>,
+    /// RRF damping constant. Default: `60`.
+    pub rrf_k: Option<u32>,
 }
 
 /// Options passed to `Store.list`.
@@ -396,8 +633,7 @@ pub struct ListOptions {
 #[napi]
 pub struct Store {
     pub(crate) inner: Arc<CoreStore>,
-    /// Retained so search/retrieve methods in Task 3/4 can compute sidecar paths.
-    #[allow(dead_code)] // used by search/retrieve in upcoming Task 3/4
+    /// Retained so search/retrieve methods can compute sidecar paths.
     pub(crate) path: PathBuf,
 }
 
@@ -526,6 +762,55 @@ impl Store {
         Ok(AsyncTask::new(RevisionsTask {
             store: self.inner.clone(),
             id: item_id,
+            pre_error,
+            failed: None,
+        }))
+    }
+
+    /// Run a hybrid search over the store's indexes.
+    ///
+    /// Probes for Tantivy (`.tantivy`) and vector (`.vectors`) sidecars next to
+    /// the store file on each call (no caching). The `mode` option controls
+    /// which rankers run; defaults to `"auto"` (use whatever's available).
+    ///
+    /// @param query The natural-language search query.
+    /// @param options Optional `{ mode?, limit?, fetchMultiplier?, rrfK? }`.
+    /// @returns `SearchResults` with the query echoed and per-hit `Item` content.
+    /// @throws `Error` with `.code === "NoIndexes"` if mode is `"auto"` and no sidecars exist.
+    /// @throws `Error` with `.code === "HybridMissingIndex"` if mode is `"hybrid"` and one sidecar is missing.
+    /// @throws `Error` with `.code === "IndexMissing"` if an explicit mode requires a missing sidecar.
+    /// @throws `Error` with `.code === "Validation"` if the mode string is unrecognised.
+    #[napi]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn search(
+        &self,
+        query: String,
+        options: Option<SearchOptions>,
+    ) -> napi::Result<AsyncTask<SearchTask>> {
+        let mode_str = options.as_ref().and_then(|o| o.mode.as_deref());
+        let (mode, pre_error) = match SearchMode::from_optional_str(mode_str) {
+            Ok(m) => (m, None),
+            Err(coded) => (SearchMode::Auto, Some(coded)),
+        };
+
+        #[allow(clippy::cast_possible_truncation)]
+        let limit = options.as_ref().and_then(|o| o.limit).unwrap_or(10) as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let fetch_multiplier = options
+            .as_ref()
+            .and_then(|o| o.fetch_multiplier)
+            .unwrap_or(3) as usize;
+        #[allow(clippy::cast_possible_truncation)]
+        let rrf_k = options.and_then(|o| o.rrf_k).unwrap_or(60) as usize;
+
+        Ok(AsyncTask::new(SearchTask {
+            store: self.inner.clone(),
+            store_path: self.path.clone(),
+            query,
+            mode,
+            limit,
+            fetch_multiplier,
+            rrf_k,
             pre_error,
             failed: None,
         }))

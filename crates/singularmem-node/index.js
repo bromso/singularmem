@@ -343,6 +343,13 @@ class Store {
     return this._native.revisions(id).then((items) => items.map(liftItem))
   }
 
+  search(query, options) {
+    return this._native.search(query, options).then((res) => ({
+      query: res.query,
+      hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
+    }))
+  }
+
   formatVersion() {
     return this._native.formatVersion()
   }

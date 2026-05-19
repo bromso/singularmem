@@ -25,6 +25,32 @@ export function freshStorePath() {
  *   --tag <TAGS>         tag (repeatable)
  *   --source <SOURCE>    free-form provenance label
  */
+/**
+ * Pre-prime Tantivy + USearch sidecars via the root CLI's
+ * `reindex --with-embeddings`, then seed the store with items. Required for
+ * any test that exercises `store.search()` or `store.retrieve()`. The reindex
+ * step creates the empty sidecars; `seedStore` auto-wires them on ingest.
+ */
+export function seedStoreWithIndexes(path, items) {
+  const reindex = spawnSync(
+    'cargo',
+    [
+      'run', '-q', '-p', 'singularmem', '--',
+      'reindex', '--with-embeddings', '--store', path,
+    ],
+    { stdio: 'pipe', encoding: 'utf8' },
+  );
+  if (reindex.error) {
+    throw new Error(`failed to spawn cargo: ${reindex.error.message}`);
+  }
+  if (reindex.status !== 0) {
+    throw new Error(
+      `reindex failed (exit ${reindex.status}):\nstdout: ${reindex.stdout}\nstderr: ${reindex.stderr}`,
+    );
+  }
+  seedStore(path, items);
+}
+
 export function seedStore(path, items) {
   for (const item of items) {
     const args = [

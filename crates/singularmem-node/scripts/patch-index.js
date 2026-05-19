@@ -6,11 +6,13 @@
  * This script replaces the final export block with a thin JS wrapper that:
  *
  * 1. Promotes `createdAt` from a millisecond number to a JS `Date` on items
- *    returned by `Store.get, Store.list, Store.revisions (and future methods)`.
+ *    returned by `Store.get`, `Store.list`, `Store.revisions`, and hit items
+ *    returned by `Store.search`.
  * 2. Wraps `Store.open` to return instances of the JS `Store` class rather
  *    than the raw native object, so the JS wrapper methods are available.
  * 3. Forwards `Store.formatVersion` and `Store.export` directly to the native
  *    binding (no item lifting required).
+ * 4. Implements `Store.search` which lifts `createdAt` on each hit's item.
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -53,6 +55,13 @@ class Store {
 
   revisions(id) {
     return this._native.revisions(id).then((items) => items.map(liftItem))
+  }
+
+  search(query, options) {
+    return this._native.search(query, options).then((res) => ({
+      query: res.query,
+      hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
+    }))
   }
 
   formatVersion() {
