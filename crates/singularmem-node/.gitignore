@@ -3,6 +3,7 @@ node_modules/
 package-lock.json
 
 # Sub-project 6: CI artifact landing zone + generated per-platform binaries
+# (the per-platform package.json files ARE committed as templates;
+# napi prepublish rewrites their version field at publish time)
 artifacts/
 npm/*/singularmem.*.node
-npm/*/package.json

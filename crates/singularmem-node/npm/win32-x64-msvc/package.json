@@ -1,0 +1,12 @@
+{
+  "name": "@bromso/singularmem-win32-x64-msvc",
+  "version": "0.0.0",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "main": "singularmem.win32-x64-msvc.node",
+  "files": ["singularmem.win32-x64-msvc.node"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.12.0"
+  }
+}
