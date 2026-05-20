@@ -1,3 +1,8 @@
 *.node
 node_modules/
 package-lock.json
+
+# Sub-project 6: CI artifact landing zone + generated per-platform binaries
+artifacts/
+npm/*/singularmem.*.node
+npm/*/package.json

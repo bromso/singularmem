@@ -37,7 +37,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.android-arm64.node')
           } else {
-            nativeBinding = require('singularmem-android-arm64')
+            nativeBinding = require('@bromso/singularmem-android-arm64')
           }
         } catch (e) {
           loadError = e
@@ -49,7 +49,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.android-arm-eabi.node')
           } else {
-            nativeBinding = require('singularmem-android-arm-eabi')
+            nativeBinding = require('@bromso/singularmem-android-arm-eabi')
           }
         } catch (e) {
           loadError = e
@@ -69,7 +69,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.win32-x64-msvc.node')
           } else {
-            nativeBinding = require('singularmem-win32-x64-msvc')
+            nativeBinding = require('@bromso/singularmem-win32-x64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -83,7 +83,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.win32-ia32-msvc.node')
           } else {
-            nativeBinding = require('singularmem-win32-ia32-msvc')
+            nativeBinding = require('@bromso/singularmem-win32-ia32-msvc')
           }
         } catch (e) {
           loadError = e
@@ -97,7 +97,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.win32-arm64-msvc.node')
           } else {
-            nativeBinding = require('singularmem-win32-arm64-msvc')
+            nativeBinding = require('@bromso/singularmem-win32-arm64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -113,7 +113,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./singularmem.darwin-universal.node')
       } else {
-        nativeBinding = require('singularmem-darwin-universal')
+        nativeBinding = require('@bromso/singularmem-darwin-universal')
       }
       break
     } catch {}
@@ -124,7 +124,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.darwin-x64.node')
           } else {
-            nativeBinding = require('singularmem-darwin-x64')
+            nativeBinding = require('@bromso/singularmem-darwin-x64')
           }
         } catch (e) {
           loadError = e
@@ -138,7 +138,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.darwin-arm64.node')
           } else {
-            nativeBinding = require('singularmem-darwin-arm64')
+            nativeBinding = require('@bromso/singularmem-darwin-arm64')
           }
         } catch (e) {
           loadError = e
@@ -157,7 +157,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./singularmem.freebsd-x64.node')
       } else {
-        nativeBinding = require('singularmem-freebsd-x64')
+        nativeBinding = require('@bromso/singularmem-freebsd-x64')
       }
     } catch (e) {
       loadError = e
@@ -174,7 +174,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-x64-musl.node')
             } else {
-              nativeBinding = require('singularmem-linux-x64-musl')
+              nativeBinding = require('@bromso/singularmem-linux-x64-musl')
             }
           } catch (e) {
             loadError = e
@@ -187,7 +187,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-x64-gnu.node')
             } else {
-              nativeBinding = require('singularmem-linux-x64-gnu')
+              nativeBinding = require('@bromso/singularmem-linux-x64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -203,7 +203,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-arm64-musl.node')
             } else {
-              nativeBinding = require('singularmem-linux-arm64-musl')
+              nativeBinding = require('@bromso/singularmem-linux-arm64-musl')
             }
           } catch (e) {
             loadError = e
@@ -216,7 +216,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-arm64-gnu.node')
             } else {
-              nativeBinding = require('singularmem-linux-arm64-gnu')
+              nativeBinding = require('@bromso/singularmem-linux-arm64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -232,7 +232,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-arm-musleabihf.node')
             } else {
-              nativeBinding = require('singularmem-linux-arm-musleabihf')
+              nativeBinding = require('@bromso/singularmem-linux-arm-musleabihf')
             }
           } catch (e) {
             loadError = e
@@ -245,7 +245,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-arm-gnueabihf.node')
             } else {
-              nativeBinding = require('singularmem-linux-arm-gnueabihf')
+              nativeBinding = require('@bromso/singularmem-linux-arm-gnueabihf')
             }
           } catch (e) {
             loadError = e
@@ -261,7 +261,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-riscv64-musl.node')
             } else {
-              nativeBinding = require('singularmem-linux-riscv64-musl')
+              nativeBinding = require('@bromso/singularmem-linux-riscv64-musl')
             }
           } catch (e) {
             loadError = e
@@ -274,7 +274,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./singularmem.linux-riscv64-gnu.node')
             } else {
-              nativeBinding = require('singularmem-linux-riscv64-gnu')
+              nativeBinding = require('@bromso/singularmem-linux-riscv64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -289,7 +289,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./singularmem.linux-s390x-gnu.node')
           } else {
-            nativeBinding = require('singularmem-linux-s390x-gnu')
+            nativeBinding = require('@bromso/singularmem-linux-s390x-gnu')
           }
         } catch (e) {
           loadError = e
@@ -310,73 +310,11 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Store: _NativeStore, version, PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter } = nativeBinding
+const { PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter, Store, version } = nativeBinding
 
-/**
- * Convert an Item from the native binding into a JS-friendly shape:
- * `createdAt` is promoted from a number (ms since epoch) to a `Date`.
- */
-function liftItem(raw) {
-  return Object.assign(Object.create(null), raw, { createdAt: new Date(raw.createdAt) })
-}
-
-/** Public Store class — thin wrapper that promotes `createdAt` to `Date`. */
-class Store {
-  /** @private */
-  constructor(native) {
-    this._native = native
-  }
-
-  static open(path, options) {
-    return _NativeStore.open(path, options).then((native) => new Store(native))
-  }
-
-  get(id) {
-    return this._native.get(id).then(liftItem)
-  }
-
-  list(options) {
-    return this._native.list(options).then((items) => items.map(liftItem))
-  }
-
-  revisions(id) {
-    return this._native.revisions(id).then((items) => items.map(liftItem))
-  }
-
-  search(query, options) {
-    return this._native.search(query, options).then((res) => ({
-      query: res.query,
-      hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
-    }))
-  }
-
-  retrieve(query, options) {
-    return this._native.retrieve(query, options).then((ctx) => ({
-      query: ctx.query,
-      blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
-    }))
-  }
-
-  ingest(item) {
-    return this._native.ingest(item).then(liftItem)
-  }
-
-  formatVersion() {
-    return this._native.formatVersion()
-  }
-
-  export() {
-    return this._native.export()
-  }
-}
-
-// Construct the frozen `adapters` namespace from the four native classes.
-const adapters = Object.freeze({
-  plain:  Object.freeze(new PlainAdapter()),
-  claude: Object.freeze(new ClaudeAdapter()),
-  openai: Object.freeze(new OpenAiAdapter()),
-  gemini: Object.freeze(new GeminiAdapter()),
-})
-module.exports.adapters = adapters
+module.exports.PlainAdapter = PlainAdapter
+module.exports.ClaudeAdapter = ClaudeAdapter
+module.exports.OpenAiAdapter = OpenAiAdapter
+module.exports.GeminiAdapter = GeminiAdapter
 module.exports.Store = Store
 module.exports.version = version
