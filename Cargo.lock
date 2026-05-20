@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-adapter-claude"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jiff",
  "singularmem-core",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-adapter-gemini"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jiff",
  "singularmem-core",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-adapter-openai"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jiff",
  "singularmem-core",
@@ -3158,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "criterion",
  "getrandom 0.2.17",
@@ -3175,7 +3175,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-mcp"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-node"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jiff",
  "napi",
@@ -3219,7 +3219,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-retrieve"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jiff",
  "rusqlite",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "singularmem-search"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bincode",
  "criterion",
