@@ -38,6 +38,52 @@ cargo build
 # → singularmem 0.0.0
 ```
 
+## Installing the CLI
+
+The `singularmem` CLI and `singularmem-mcp` server ship as prebuilt binaries for:
+
+| Platform | Architecture |
+|---|---|
+| Linux | x86_64 (glibc) |
+| macOS | x86_64 (Intel) |
+| macOS | ARM64 (Apple Silicon) |
+| Windows | x86_64 (MSVC) |
+
+For Linux ARM64, Alpine Linux/musl, FreeBSD, or other platforms, build from source (see [Building from source on GitHub](https://github.com/bromso/singularmem#building-from-source)).
+
+### Homebrew tap (macOS + Linux)
+
+```bash
+brew install bromso/tap/singularmem
+```
+
+Both `singularmem` and `singularmem-mcp` are placed on `PATH`.
+
+### Curl-bash installer (Linux + macOS)
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bromso/singularmem/releases/latest/download/singularmem-installer.sh | sh
+```
+
+### PowerShell installer (Windows)
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/bromso/singularmem/releases/latest/download/singularmem-installer.ps1 | iex"
+```
+
+### Manual download
+
+Visit https://github.com/bromso/singularmem/releases/latest, download the archive matching your platform, extract, and add the contained `singularmem` + `singularmem-mcp` binaries to your `PATH`.
+
+### Verify the install
+
+```bash
+singularmem --version
+singularmem-mcp --version
+```
+
+Both should report the same version (the latest tagged release).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit must be signed

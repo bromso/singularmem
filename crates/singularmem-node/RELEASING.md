@@ -87,6 +87,82 @@ Local publishes from the maintainer's machine work with a `--otp=<code>` flag, s
     git push origin main
     ```
 
+## CLI binary release (via cargo-dist)
+
+The CLI (`singularmem`) and MCP server (`singularmem-mcp`) binaries ship via the `.github/workflows/release.yml` workflow on every `v*.*.*` tag push. Unlike the npm publish flow (sub-project 6 — currently has a known 404 issue requiring manual fallback), the CLI binary release works end-to-end automatically.
+
+### What happens on a tag push
+
+1. `release.yml` triggers
+2. `build-local-artifacts` matrix runs on 4 platforms in parallel (~5 min wall-clock)
+3. `build-global-artifacts` generates the curl-bash + PowerShell installer scripts + Homebrew formula
+4. `host` creates the GitHub Release at the tag, uploads all artifacts:
+   - 4 platform archives (`.tar.gz` / `.zip`) containing both binaries + README + LICENSE
+   - 2 installer scripts (`singularmem-installer.sh`, `singularmem-installer.ps1`)
+   - SHA256 checksums
+   - Homebrew formula (`.rb`)
+5. `publish-homebrew-formula` pushes the formula to `bromso/homebrew-tap` (via the `HOMEBREW_TAP_TOKEN` PAT)
+
+### Verifying a release
+
+After the workflow completes (~10 min after the tag push):
+
+```bash
+# 1. GH Release page exists
+gh release view v0.X.0 --repo bromso/singularmem
+
+# 2. Curl installer works
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bromso/singularmem/releases/latest/download/singularmem-installer.sh | sh
+singularmem --version    # → 0.X.0
+
+# 3. Homebrew formula exists in the tap
+gh api repos/bromso/homebrew-tap/contents/Formula/singularmem.rb --jq '.content' | base64 -d | grep version
+
+# 4. brew install works end-to-end
+brew install bromso/tap/singularmem
+singularmem --version    # → 0.X.0
+```
+
+### Recovery procedures
+
+`release.yml` has 5+ jobs in a DAG: `plan → build × 4 → build-global → host → publish-homebrew-formula → announce`.
+
+- **`host` fails** → GH Release not created. Re-run the failed job from GH Actions UI.
+- **`publish-homebrew-formula` fails after `host` succeeded** → GH Release IS published, archives downloadable, but Homebrew formula missing. Re-run the job. Consumers using curl-installer or manual download unaffected.
+- **`build-local-artifacts` per-platform fails** → no release published (build-global depends on all 4). Fix the platform's compile issue, re-tag (or use `dist host --steps=upload --tag=v0.X.0` from local to retry just the upload).
+
+### One-time setup (already done as of v0.15.0)
+
+- `bromso/homebrew-tap` repository exists (https://github.com/bromso/homebrew-tap)
+- `HOMEBREW_TAP_TOKEN` GitHub repo secret — a fine-grained PAT with `Contents: write` scoped only to `bromso/homebrew-tap`
+- cargo-dist version pinned in `dist-workspace.toml`
+
+### Annual maintenance reminder
+
+**Fine-grained PATs expire after 1 year.** Set a calendar reminder for `<expiry date — 1 year from when you generated the PAT>` to:
+
+1. Mint a new PAT at https://github.com/settings/personal-access-tokens/new (same scope: `Contents: write` on `bromso/homebrew-tap`)
+2. Update the `HOMEBREW_TAP_TOKEN` secret at https://github.com/bromso/singularmem/settings/secrets/actions
+3. Delete the old PAT
+
+If the PAT expires unnoticed, the next release's `publish-homebrew-formula` job fails; GH Release + installers still work. Annoying but not catastrophic.
+
+### Bumping cargo-dist itself
+
+The `cargo-dist-version` line in `dist-workspace.toml` pins the exact `dist` version used in CI. Bumping to a new version:
+
+```bash
+# Install the new dist locally
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/vX.Y.Z/cargo-dist-installer.sh | sh
+
+# Re-run dist init (it'll detect the version mismatch and rewrite the workflow)
+dist init
+
+# Review changes, commit
+git add dist-workspace.toml .github/workflows/release.yml
+git commit -s -m "chore(ci): bump cargo-dist to vX.Y.Z"
+```
+
 ## Future automated release flow (once CI publish is fixed)
 
 If/when the CI publish issue is resolved (sub-project 6b or similar), the flow becomes:
