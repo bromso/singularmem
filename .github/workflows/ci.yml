@@ -61,11 +61,18 @@ jobs:
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
+    permissions:
+      # rustsec/audit-check@v1 posts a Check via the GitHub API. Without
+      # this, the action exits with "Resource not accessible by integration".
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Advisory ignores live in .cargo/audit.toml with reasons per entry.
 
   # ADVISORY (non-blocking) — explicit non-goal for sub-project 2a
   # (Search v0 Lexical). GitHub Actions disables unprivileged user
