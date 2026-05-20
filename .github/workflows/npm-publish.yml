@@ -1,0 +1,130 @@
+name: npm publish
+
+on:
+  push:
+    tags: ['v*.*.*']
+  pull_request:
+    paths:
+      - 'crates/singularmem-node/**'
+      - '.github/workflows/npm-publish.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run build matrix without publishing'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    name: build ${{ matrix.triple }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # NOTE: aarch64-unknown-linux-gnu is intentionally out of v0.
+          # Cross-compile via zig hits an openssl-sys lookup problem (the
+          # fastembed → ureq → openssl-sys chain wants a target-arch system
+          # OpenSSL and zig only provides the linker). Linux arm64 users
+          # build from source; a follow-up sub-project can add the platform
+          # once the cross-compile recipe is worked out (likely either
+          # switching to a native arm64 runner or forcing rustls instead of
+          # the OpenSSL backend for ureq).
+          - triple: x86_64-apple-darwin
+            runner: macos-13
+            target: x86_64-apple-darwin
+          - triple: aarch64-apple-darwin
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - triple: x86_64-pc-windows-msvc
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: crates/singularmem-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./
+      - name: npm install
+        run: npm install
+      - name: Build native binding
+        shell: bash
+        run: npm run build -- --target ${{ matrix.target }}
+      - name: Upload .node artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binding-${{ matrix.triple }}
+          path: crates/singularmem-node/*.node
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish to npm
+    needs: build
+    if: |
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name != 'workflow_dispatch' || inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: crates/singularmem-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify tag version matches package version
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          test "$TAG_VERSION" = "$PKG_VERSION" || {
+            echo "::error::tag v$TAG_VERSION doesn't match package.json version $PKG_VERSION"
+            exit 1
+          }
+      - name: npm install
+        run: npm install
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: crates/singularmem-node/artifacts
+          pattern: binding-*
+          merge-multiple: true
+      - name: Move artifacts into place
+        run: npm run artifacts
+      - name: Assemble per-platform packages
+        run: npx napi prepublish -t npm --skip-gh-release
+      - name: List what's about to publish
+        run: |
+          ls -la npm/
+          for dir in npm/*/; do
+            echo "=== $dir ==="
+            cat "${dir}package.json"
+          done
+      - name: Publish to npm with provenance
+        shell: bash
+        run: |
+          for dir in npm/*/; do
+            cd "$dir"
+            npm publish --access public --provenance
+            cd ../..
+          done
+          npm publish --access public --provenance
+        env:
+          NPM_CONFIG_PROVENANCE: 'true'
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

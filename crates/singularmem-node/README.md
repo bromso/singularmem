@@ -2,14 +2,24 @@
 
 Native Node.js bindings for [Singularmem](https://github.com/bromso/singularmem), a local-first persistent memory layer for LLM workflows.
 
-## Installation
+## Install
 
 ```bash
 npm install singularmem
 ```
 
-> **Note (sub-project 5a):** This package currently builds from source on install. Prebuilt platform binaries are planned for a future release.
-> Building from source requires a Rust toolchain (rustup, cargo).
+That's it. Prebuilt native bindings are available for these platforms:
+
+| Platform               | Architecture            | Notes                                |
+|------------------------|-------------------------|--------------------------------------|
+| Linux                  | x86_64 (glibc)          |                                      |
+| macOS                  | x86_64 (Intel)          |                                      |
+| macOS                  | ARM64 (Apple Silicon)   |                                      |
+| Windows                | x86_64 (MSVC)           |                                      |
+
+Node.js 20.12 or newer is required. No Rust toolchain needed on the supported platforms.
+
+For other platforms (Linux ARM64, Alpine Linux/musl, FreeBSD, RISC-V, etc.), see [Building from source](#building-from-source) below.
 
 ## Usage
 
@@ -209,6 +219,28 @@ In addition to the 5a error codes, search and retrieve can throw:
 ## Versioning
 
 The npm package version tracks the workspace version of the underlying Rust crates. A CI check verifies they stay in sync.
+
+## Building from source
+
+If your platform isn't in the prebuilt set, or you want to hack on Singularmem:
+
+1. Install [Rust](https://rustup.rs) (1.80 or newer)
+2. Install Node.js 20.12 or newer
+3. Clone the repository:
+   ```bash
+   git clone https://github.com/bromso/singularmem.git
+   cd singularmem/crates/singularmem-node
+   ```
+4. Build:
+   ```bash
+   npm install
+   npm run build
+   ```
+5. The build produces a `singularmem.<triple>.node` in the package directory. To use it from another project, either:
+   - Add the cloned repo as a [local file dependency](https://docs.npmjs.com/cli/v10/configuring-npm/package-json#local-paths): `npm install /path/to/singularmem/crates/singularmem-node`
+   - Or copy the built `.node` and the patched `index.js` + `index.d.ts` into your own `node_modules/singularmem/` directory
+
+If you publish a third-party prebuilt binary for an unsupported platform, please open an issue so we can consider adding it to the official matrix.
 
 ## License
 

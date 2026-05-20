@@ -13,27 +13,40 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "*.node",
     "README.md"
   ],
   "napi": {
     "name": "singularmem",
+    "package": { "name": "@bromso/singularmem" },
     "triples": {
-      "defaults": true
+      "defaults": false,
+      "additional": [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc"
+      ]
     }
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "postbuild": "node scripts/patch-index.js",
     "build:debug": "napi build --platform",
     "postbuild:debug": "node scripts/patch-index.js",
     "test": "node --test test/*.test.mjs && npm run typecheck",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "napi prepublish"
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0",
     "typescript": "^5.4.0"
+  },
+  "optionalDependencies": {
+    "@bromso/singularmem-linux-x64-gnu": "0.13.0",
+    "@bromso/singularmem-darwin-x64": "0.13.0",
+    "@bromso/singularmem-darwin-arm64": "0.13.0",
+    "@bromso/singularmem-win32-x64-msvc": "0.13.0"
   },
   "engines": {
     "node": ">=20.12.0"
