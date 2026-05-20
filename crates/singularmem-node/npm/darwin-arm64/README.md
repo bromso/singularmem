@@ -1,4 +1,4 @@
-# `@bromso/singularmem-darwin-arm64`
+# `singularmem-darwin-arm64`
 
 This is the **aarch64-apple-darwin** binary for [singularmem](https://www.npmjs.com/package/singularmem).
 

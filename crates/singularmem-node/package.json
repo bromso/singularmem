@@ -17,7 +17,6 @@
   ],
   "napi": {
     "name": "singularmem",
-    "package": { "name": "@bromso/singularmem" },
     "triples": {
       "defaults": false,
       "additional": [
@@ -43,10 +42,10 @@
     "typescript": "^5.4.0"
   },
   "optionalDependencies": {
-    "@bromso/singularmem-linux-x64-gnu": "0.14.0",
-    "@bromso/singularmem-darwin-x64": "0.14.0",
-    "@bromso/singularmem-darwin-arm64": "0.14.0",
-    "@bromso/singularmem-win32-x64-msvc": "0.14.0"
+    "singularmem-linux-x64-gnu": "0.14.0",
+    "singularmem-darwin-x64": "0.14.0",
+    "singularmem-darwin-arm64": "0.14.0",
+    "singularmem-win32-x64-msvc": "0.14.0"
   },
   "engines": {
     "node": ">=20.12.0"
