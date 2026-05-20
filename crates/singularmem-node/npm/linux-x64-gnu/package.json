@@ -1,5 +1,5 @@
 {
-  "name": "@bromso/singularmem-linux-x64-gnu",
+  "name": "@jonasbroms/singularmem-linux-x64-gnu",
   "version": "0.0.0",
   "os": ["linux"],
   "cpu": ["x64"],

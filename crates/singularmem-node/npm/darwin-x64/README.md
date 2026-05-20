@@ -1,4 +1,4 @@
-# `@bromso/singularmem-darwin-x64`
+# `@jonasbroms/singularmem-darwin-x64`
 
 This is the **x86_64-apple-darwin** binary for [singularmem](https://www.npmjs.com/package/singularmem).
 
