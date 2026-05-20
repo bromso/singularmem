@@ -310,11 +310,73 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter, Store, version } = nativeBinding
+const { Store: _NativeStore, version, PlainAdapter, ClaudeAdapter, OpenAiAdapter, GeminiAdapter } = nativeBinding
 
-module.exports.PlainAdapter = PlainAdapter
-module.exports.ClaudeAdapter = ClaudeAdapter
-module.exports.OpenAiAdapter = OpenAiAdapter
-module.exports.GeminiAdapter = GeminiAdapter
+/**
+ * Convert an Item from the native binding into a JS-friendly shape:
+ * `createdAt` is promoted from a number (ms since epoch) to a `Date`.
+ */
+function liftItem(raw) {
+  return Object.assign(Object.create(null), raw, { createdAt: new Date(raw.createdAt) })
+}
+
+/** Public Store class — thin wrapper that promotes `createdAt` to `Date`. */
+class Store {
+  /** @private */
+  constructor(native) {
+    this._native = native
+  }
+
+  static open(path, options) {
+    return _NativeStore.open(path, options).then((native) => new Store(native))
+  }
+
+  get(id) {
+    return this._native.get(id).then(liftItem)
+  }
+
+  list(options) {
+    return this._native.list(options).then((items) => items.map(liftItem))
+  }
+
+  revisions(id) {
+    return this._native.revisions(id).then((items) => items.map(liftItem))
+  }
+
+  search(query, options) {
+    return this._native.search(query, options).then((res) => ({
+      query: res.query,
+      hits: res.hits.map((h) => ({ ...h, item: liftItem(h.item) })),
+    }))
+  }
+
+  retrieve(query, options) {
+    return this._native.retrieve(query, options).then((ctx) => ({
+      query: ctx.query,
+      blocks: ctx.blocks.map((b) => ({ ...b, createdAt: new Date(b.createdAt) })),
+    }))
+  }
+
+  ingest(item) {
+    return this._native.ingest(item).then(liftItem)
+  }
+
+  formatVersion() {
+    return this._native.formatVersion()
+  }
+
+  export() {
+    return this._native.export()
+  }
+}
+
+// Construct the frozen `adapters` namespace from the four native classes.
+const adapters = Object.freeze({
+  plain:  Object.freeze(new PlainAdapter()),
+  claude: Object.freeze(new ClaudeAdapter()),
+  openai: Object.freeze(new OpenAiAdapter()),
+  gemini: Object.freeze(new GeminiAdapter()),
+})
+module.exports.adapters = adapters
 module.exports.Store = Store
 module.exports.version = version
