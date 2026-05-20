@@ -32,8 +32,12 @@ jobs:
           # once the cross-compile recipe is worked out (likely either
           # switching to a native arm64 runner or forcing rustls instead of
           # the OpenSSL backend for ureq).
+          # darwin x64 cross-compiled from the arm64 runner. macos-13 runners
+          # are queue-starved on GitHub Actions in 2026; macos-14 (Apple
+          # Silicon) cross-compiles to x86_64-apple-darwin natively via
+          # Apple's SDK, no Rosetta needed for the build.
           - triple: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
             target: x86_64-apple-darwin
           - triple: aarch64-apple-darwin
             runner: macos-14
