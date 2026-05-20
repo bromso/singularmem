@@ -1,6 +1,6 @@
 {
   "name": "singularmem",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Local-first persistent memory for LLM workflows — native Node bindings",
   "main": "index.js",
   "types": "index.d.ts",
@@ -42,10 +42,10 @@
     "typescript": "^5.4.0"
   },
   "optionalDependencies": {
-    "singularmem-darwin-arm64": "0.14.0",
-    "singularmem-darwin-x64": "0.14.0",
-    "singularmem-linux-x64-gnu": "0.14.0",
-    "singularmem-win32-x64-msvc": "0.14.0"
+    "singularmem-darwin-arm64": "0.15.0",
+    "singularmem-darwin-x64": "0.15.0",
+    "singularmem-linux-x64-gnu": "0.15.0",
+    "singularmem-win32-x64-msvc": "0.15.0"
   },
   "engines": {
     "node": ">=20.12.0"
