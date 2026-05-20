@@ -44,6 +44,8 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+description = "Local-first persistent memory layer for LLM workflows."
+homepage = "https://github.com/bromso/singularmem"
 
 [lints]
 workspace = true
@@ -71,3 +73,8 @@ tempfile = { workspace = true }
 [[bin]]
 name = "singularmem"
 path = "src/main.rs"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
