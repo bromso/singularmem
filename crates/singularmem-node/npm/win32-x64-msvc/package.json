@@ -6,6 +6,11 @@
   "main": "singularmem.win32-x64-msvc.node",
   "files": ["singularmem.win32-x64-msvc.node"],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bromso/singularmem.git",
+    "directory": "crates/singularmem-node/npm/win32-x64-msvc"
+  },
   "engines": {
     "node": ">=20.12.0"
   }

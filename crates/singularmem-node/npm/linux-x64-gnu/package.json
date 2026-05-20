@@ -6,6 +6,11 @@
   "main": "singularmem.linux-x64-gnu.node",
   "files": ["singularmem.linux-x64-gnu.node"],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bromso/singularmem.git",
+    "directory": "crates/singularmem-node/npm/linux-x64-gnu"
+  },
   "engines": {
     "node": ">=20.12.0"
   },
