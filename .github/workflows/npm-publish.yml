@@ -126,15 +126,14 @@ jobs:
             echo "=== $dir ==="
             cat "${dir}package.json"
           done
-      - name: Publish to npm with provenance
+      - name: Publish to npm (provenance temporarily disabled to isolate 404)
         shell: bash
         run: |
           for dir in npm/*/; do
             cd "$dir"
-            npm publish --access public --provenance
+            npm publish --access public
             cd ../..
           done
-          npm publish --access public --provenance
+          npm publish --access public
         env:
-          NPM_CONFIG_PROVENANCE: 'true'
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
