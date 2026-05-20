@@ -30,7 +30,7 @@ This document covers the release process for the npm package. Day-to-day develop
 6. **Verify:**
    ```bash
    npm view singularmem version                              # should match the tag
-   npm view @jonasbroms/singularmem-darwin-arm64 version         # should match
+   npm view @bromso/singularmem-darwin-arm64 version         # should match
    # (repeat for the other 4 platforms if you want)
    npm audit signatures singularmem                          # should report verified provenance
    ```
@@ -51,7 +51,7 @@ Inspect the artifacts in the workflow run UI to verify the .node files look righ
 The publish job is NOT atomic. If it fails partway through (e.g., 3 of 5 sub-packages publish but the 4th fails due to a network glitch), the registry ends up in a partial state. Recovery options:
 
 - **Retry**: Re-run the failed publish job from the GitHub Actions UI. `npm publish` is idempotent if you re-publish the same version (it'll error with "cannot republish over the previously published versions"). For the already-published sub-packages, the retry will skip via npm's "already exists" error; the un-published ones complete. Acceptable for transient failures.
-- **Un-publish (within 72 hours)**: `npm unpublish @jonasbroms/singularmem-<triple>@<version>` removes the package. Bump to the next patch version (e.g., 0.14.0 → 0.14.1) and re-tag.
+- **Un-publish (within 72 hours)**: `npm unpublish @bromso/singularmem-<triple>@<version>` removes the package. Bump to the next patch version (e.g., 0.14.0 → 0.14.1) and re-tag.
 - **Deprecate (after 72 hours)**: `npm deprecate singularmem@<version> "Bad release; use <next version>"` marks the version as deprecated. The package stays installable but consumers see a warning.
 
 In all cases, document the recovery in the next PR's description so future maintainers know.
