@@ -22,7 +22,6 @@
       "defaults": false,
       "additional": [
         "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
         "x86_64-pc-windows-msvc"
@@ -45,7 +44,6 @@
   },
   "optionalDependencies": {
     "@bromso/singularmem-linux-x64-gnu": "0.13.0",
-    "@bromso/singularmem-linux-arm64-gnu": "0.13.0",
     "@bromso/singularmem-darwin-x64": "0.13.0",
     "@bromso/singularmem-darwin-arm64": "0.13.0",
     "@bromso/singularmem-win32-x64-msvc": "0.13.0"

@@ -13,14 +13,13 @@ That's it. Prebuilt native bindings are available for these platforms:
 | Platform               | Architecture            | Notes                                |
 |------------------------|-------------------------|--------------------------------------|
 | Linux                  | x86_64 (glibc)          |                                      |
-| Linux                  | ARM64 (glibc)           |                                      |
 | macOS                  | x86_64 (Intel)          |                                      |
 | macOS                  | ARM64 (Apple Silicon)   |                                      |
 | Windows                | x86_64 (MSVC)           |                                      |
 
 Node.js 20.12 or newer is required. No Rust toolchain needed on the supported platforms.
 
-For other platforms (Alpine Linux/musl, FreeBSD, RISC-V, etc.), see [Building from source](#building-from-source) below.
+For other platforms (Linux ARM64, Alpine Linux/musl, FreeBSD, RISC-V, etc.), see [Building from source](#building-from-source) below.
 
 ## Usage
 

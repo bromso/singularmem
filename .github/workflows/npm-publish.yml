@@ -24,10 +24,14 @@ jobs:
           - triple: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - triple: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            cross: true
+          # NOTE: aarch64-unknown-linux-gnu is intentionally out of v0.
+          # Cross-compile via zig hits an openssl-sys lookup problem (the
+          # fastembed → ureq → openssl-sys chain wants a target-arch system
+          # OpenSSL and zig only provides the linker). Linux arm64 users
+          # build from source; a follow-up sub-project can add the platform
+          # once the cross-compile recipe is worked out (likely either
+          # switching to a native arm64 runner or forcing rustls instead of
+          # the OpenSSL backend for ureq).
           - triple: x86_64-apple-darwin
             runner: macos-13
             target: x86_64-apple-darwin
@@ -52,24 +56,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ./
-      - name: Install zig + cargo-zigbuild (linux arm64 cross-compile)
-        if: matrix.cross == true
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
       - name: npm install
         run: npm install
       - name: Build native binding
         shell: bash
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            # @napi-rs/cli 2.18 cross-compiles via --zig (NOT --use-cross,
-            # which only exists in @napi-rs/cli 3.x). Zig acts as the linker
-            # for the foreign target and bundles the glibc ABI.
-            npm run build -- --target ${{ matrix.target }} --zig
-          else
-            npm run build -- --target ${{ matrix.target }}
-          fi
+        run: npm run build -- --target ${{ matrix.target }}
       - name: Upload .node artifact
         uses: actions/upload-artifact@v4
         with:
