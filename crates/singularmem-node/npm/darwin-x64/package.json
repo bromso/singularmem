@@ -1,10 +1,16 @@
 {
   "name": "singularmem-darwin-x64",
   "version": "0.0.0",
-  "os": ["darwin"],
-  "cpu": ["x64"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "main": "singularmem.darwin-x64.node",
-  "files": ["singularmem.darwin-x64.node"],
+  "files": [
+    "singularmem.darwin-x64.node"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

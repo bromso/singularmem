@@ -42,9 +42,9 @@
     "typescript": "^5.4.0"
   },
   "optionalDependencies": {
-    "singularmem-linux-x64-gnu": "0.14.0",
-    "singularmem-darwin-x64": "0.14.0",
     "singularmem-darwin-arm64": "0.14.0",
+    "singularmem-darwin-x64": "0.14.0",
+    "singularmem-linux-x64-gnu": "0.14.0",
     "singularmem-win32-x64-msvc": "0.14.0"
   },
   "engines": {
