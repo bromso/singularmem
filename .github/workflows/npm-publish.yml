@@ -101,6 +101,12 @@ jobs:
             echo "::error::tag v$TAG_VERSION doesn't match package.json version $PKG_VERSION"
             exit 1
           }
+      - name: Verify which npm user the token belongs to
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "npm whoami says: $(npm whoami)"
+          echo "npm config get registry: $(npm config get registry)"
       - name: npm install
         run: npm install
       - name: Download all platform artifacts
