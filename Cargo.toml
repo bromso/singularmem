@@ -77,4 +77,6 @@ path = "src/main.rs"
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+# `lto = "thin"` removed because it triggers a CRT runtime-library
+# mismatch in ort-sys (ONNX Runtime FFI via fastembed) on Windows MSVC.
+# Slightly larger binaries in exchange for a working Windows build.
