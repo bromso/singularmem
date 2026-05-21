@@ -47,9 +47,8 @@ The `singularmem` CLI and `singularmem-mcp` server ship as prebuilt binaries for
 | Linux | x86_64 (glibc) |
 | macOS | x86_64 (Intel) |
 | macOS | ARM64 (Apple Silicon) |
-| Windows | x86_64 (MSVC) |
 
-For Linux ARM64, Alpine Linux/musl, FreeBSD, or other platforms, build from source (see [Building from source on GitHub](https://github.com/bromso/singularmem#building-from-source)).
+For Windows, Linux ARM64, Alpine Linux/musl, FreeBSD, or other platforms, build from source (see [Building from source on GitHub](https://github.com/bromso/singularmem#building-from-source)). Windows MSVC prebuilt binaries are temporarily unavailable due to a CRT runtime-library mismatch in the ort-sys / cxx dependency chain (ONNX Runtime FFI via fastembed); tracked as a follow-up sub-project.
 
 ### Homebrew tap (macOS + Linux)
 
@@ -63,12 +62,6 @@ Both `singularmem` and `singularmem-mcp` are placed on `PATH`.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bromso/singularmem/releases/latest/download/singularmem-installer.sh | sh
-```
-
-### PowerShell installer (Windows)
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://github.com/bromso/singularmem/releases/latest/download/singularmem-installer.ps1 | iex"
 ```
 
 ### Manual download
