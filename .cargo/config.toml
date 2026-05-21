@@ -1,0 +1,14 @@
+# Cargo build configuration.
+#
+# `target-feature=-crt-static` for x86_64-pc-windows-msvc:
+# Forces the cxx crate (and any cc-rs-compiled C++ in our dep graph) to
+# use /MD (dynamic CRT) linkage on Windows MSVC. This matches ort-sys's
+# pre-built onnxruntime binaries, which are shipped by Microsoft with
+# /MD and cannot be rebuilt. Without this flag, the linker fails with:
+#   error LNK2038: mismatch detected for 'RuntimeLibrary':
+#     value 'MT_StaticRelease' doesn't match 'MD_DynamicRelease'
+#
+# See docs/superpowers/specs/2026-05-21-windows-msvc-fix-9-design.md
+# for the full investigation.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=-crt-static"]
