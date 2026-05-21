@@ -19,3 +19,7 @@ install-path = "CARGO_HOME"
 pr-run-mode = "upload"
 # Publish jobs to run
 publish-jobs = ["homebrew"]
+# Allow manual edits to the generated CI workflow (escape-hatch for the
+# ubuntu-22.04 runner-label bump; cargo-dist 0.27.0 emits ubuntu-20.04
+# which was retired by GitHub-hosted runners in April 2025).
+allow-dirty = ["ci"]
