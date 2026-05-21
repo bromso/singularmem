@@ -50,8 +50,8 @@ jobs:
       run:
         working-directory: crates/singularmem-node
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
         shell: bash
         run: npm run build -- --target ${{ matrix.target }}
       - name: Upload .node artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binding-${{ matrix.triple }}
           path: crates/singularmem-node/*.node
@@ -87,8 +87,8 @@ jobs:
       run:
         working-directory: crates/singularmem-node
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
@@ -104,7 +104,7 @@ jobs:
       - name: npm install
         run: npm install
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: crates/singularmem-node/artifacts
           pattern: binding-*
