@@ -1,0 +1,93 @@
+name: Smoke test (Windows binary)
+
+# Manually triggered. Downloads the singularmem + singularmem-mcp Windows
+# archives from a GitHub Release and asserts the binaries run end-to-end
+# on a windows-latest runner. Used to validate Windows releases without
+# requiring the maintainer to have local Windows hardware.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test (e.g., v0.17.0). Empty = latest"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download singularmem Windows archives
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path archives | Out-Null
+          if ("${{ inputs.tag }}" -eq "") {
+            gh release download --repo bromso/singularmem `
+              -p "singularmem-x86_64-pc-windows-msvc.zip" `
+              -p "singularmem-mcp-x86_64-pc-windows-msvc.zip" `
+              --dir archives
+          } else {
+            gh release download "${{ inputs.tag }}" --repo bromso/singularmem `
+              -p "singularmem-x86_64-pc-windows-msvc.zip" `
+              -p "singularmem-mcp-x86_64-pc-windows-msvc.zip" `
+              --dir archives
+          }
+          Get-ChildItem archives
+
+      - name: Extract archives
+        shell: pwsh
+        run: |
+          Expand-Archive -Path archives\singularmem-x86_64-pc-windows-msvc.zip -DestinationPath bin
+          Expand-Archive -Path archives\singularmem-mcp-x86_64-pc-windows-msvc.zip -DestinationPath bin
+          Get-ChildItem bin -Recurse -Filter "*.exe"
+
+      - name: Locate binaries
+        id: locate
+        shell: pwsh
+        run: |
+          $sm = Get-ChildItem bin -Recurse -Filter "singularmem.exe" | Select-Object -First 1
+          $mcp = Get-ChildItem bin -Recurse -Filter "singularmem-mcp.exe" | Select-Object -First 1
+          if (-not $sm) { throw "singularmem.exe not found in archive" }
+          if (-not $mcp) { throw "singularmem-mcp.exe not found in archive" }
+          echo "sm=$($sm.FullName)" >> $env:GITHUB_OUTPUT
+          echo "mcp=$($mcp.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: singularmem --version
+        shell: pwsh
+        run: |
+          $output = & "${{ steps.locate.outputs.sm }}" --version
+          Write-Host "Output: $output"
+          if ($output -notmatch "\d+\.\d+\.\d+") { throw "singularmem --version did not return a version string" }
+
+      - name: singularmem-mcp --version
+        shell: pwsh
+        run: |
+          $output = & "${{ steps.locate.outputs.mcp }}" --version
+          Write-Host "Output: $output"
+          if ($output -notmatch "\d+\.\d+\.\d+") { throw "singularmem-mcp --version did not return a version string" }
+
+      - name: End-to-end smoke (ingest → retrieve)
+        shell: pwsh
+        run: |
+          # The CLI has no 'init' subcommand. The store file and Tantivy index
+          # directory are created automatically on the first 'ingest' invocation
+          # (Store::open_with_options creates the DB; Index::open creates the
+          # .tantivy sidecar via fs::create_dir_all). Subcommands: ingest,
+          # retrieve. Global flag: --store <path>.
+          $storeFile = "$env:RUNNER_TEMP\smoke-store\store.db"
+          New-Item -ItemType Directory -Path (Split-Path $storeFile) -Force | Out-Null
+
+          & "${{ steps.locate.outputs.sm }}" --store $storeFile ingest --content "hello smoke test"
+          if ($LASTEXITCODE -ne 0) { throw "singularmem ingest failed (exit $LASTEXITCODE)" }
+
+          $retrieveOutput = & "${{ steps.locate.outputs.sm }}" --store $storeFile retrieve "hello"
+          if ($LASTEXITCODE -ne 0) { throw "singularmem retrieve failed (exit $LASTEXITCODE)" }
+          Write-Host "Retrieve output: $retrieveOutput"
+          if ([string]::IsNullOrWhiteSpace($retrieveOutput)) { throw "singularmem retrieve returned empty result" }
+          if ($retrieveOutput -notmatch "hello smoke test") { throw "retrieve result does not contain ingested content" }
