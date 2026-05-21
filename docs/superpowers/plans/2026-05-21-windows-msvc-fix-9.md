@@ -16,6 +16,7 @@
 
 **Create:**
 - `.cargo/config.toml` — 3 lines + explanatory comment. Windows-MSVC-only rustflags.
+- `.github/workflows/smoke-test-windows.yml` — manual-trigger CI workflow that runs the released Windows binaries on a `windows-latest` runner to verify they start + work end-to-end. Replaces "user manually verifies on Windows" since the maintainer doesn't have Windows hardware.
 
 **Modify:**
 - `dist-workspace.toml` — add `x86_64-pc-windows-msvc` to `targets`; confirm `powershell` in `installers` (already there from sub-project 8's no-op state).
@@ -356,6 +357,154 @@ Sub-project 9."
 
 ---
 
+## Task 4b: Create `.github/workflows/smoke-test-windows.yml`
+
+**Files:**
+- Create: `.github/workflows/smoke-test-windows.yml`
+
+This is the automated replacement for "user manually smoke-tests the binary on Windows." Triggered manually via `workflow_dispatch` after a release lands; runs on a `windows-latest` GH runner; downloads the release archive; runs `--version` + an end-to-end `init → ingest → retrieve` cycle.
+
+- [ ] **Step 1: Create the workflow file**
+
+```bash
+mkdir -p .github/workflows
+cat > .github/workflows/smoke-test-windows.yml <<'EOF'
+name: Smoke test (Windows binary)
+
+# Manually triggered. Downloads the singularmem + singularmem-mcp Windows
+# archives from a GitHub Release and asserts the binaries run end-to-end
+# on a windows-latest runner. Used to validate Windows releases without
+# requiring the maintainer to have local Windows hardware.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to test (e.g., v0.17.0). Empty = latest"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download singularmem Windows archives
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path archives | Out-Null
+          if ("${{ inputs.tag }}" -eq "") {
+            gh release download --repo bromso/singularmem `
+              -p "singularmem-x86_64-pc-windows-msvc.zip" `
+              -p "singularmem-mcp-x86_64-pc-windows-msvc.zip" `
+              --dir archives
+          } else {
+            gh release download "${{ inputs.tag }}" --repo bromso/singularmem `
+              -p "singularmem-x86_64-pc-windows-msvc.zip" `
+              -p "singularmem-mcp-x86_64-pc-windows-msvc.zip" `
+              --dir archives
+          }
+          Get-ChildItem archives
+
+      - name: Extract archives
+        shell: pwsh
+        run: |
+          Expand-Archive -Path archives\singularmem-x86_64-pc-windows-msvc.zip -DestinationPath bin
+          Expand-Archive -Path archives\singularmem-mcp-x86_64-pc-windows-msvc.zip -DestinationPath bin
+          Get-ChildItem bin -Recurse -Filter "*.exe"
+
+      - name: Locate binaries
+        id: locate
+        shell: pwsh
+        run: |
+          $sm = Get-ChildItem bin -Recurse -Filter "singularmem.exe" | Select-Object -First 1
+          $mcp = Get-ChildItem bin -Recurse -Filter "singularmem-mcp.exe" | Select-Object -First 1
+          if (-not $sm) { throw "singularmem.exe not found in archive" }
+          if (-not $mcp) { throw "singularmem-mcp.exe not found in archive" }
+          echo "sm=$($sm.FullName)" >> $env:GITHUB_OUTPUT
+          echo "mcp=$($mcp.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: singularmem --version
+        shell: pwsh
+        run: |
+          $output = & "${{ steps.locate.outputs.sm }}" --version
+          Write-Host "Output: $output"
+          if ($output -notmatch "\d+\.\d+\.\d+") { throw "singularmem --version did not return a version string" }
+
+      - name: singularmem-mcp --version
+        shell: pwsh
+        run: |
+          $output = & "${{ steps.locate.outputs.mcp }}" --version
+          Write-Host "Output: $output"
+          if ($output -notmatch "\d+\.\d+\.\d+") { throw "singularmem-mcp --version did not return a version string" }
+
+      - name: End-to-end smoke (init → ingest → retrieve)
+        shell: pwsh
+        run: |
+          $storeDir = "$env:RUNNER_TEMP\smoke-store"
+          New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
+          $storeFile = "$storeDir\store.db"
+
+          & "${{ steps.locate.outputs.sm }}" init $storeFile
+          if ($LASTEXITCODE -ne 0) { throw "singularmem init failed (exit $LASTEXITCODE)" }
+
+          & "${{ steps.locate.outputs.sm }}" --store $storeFile ingest --content "hello smoke test"
+          if ($LASTEXITCODE -ne 0) { throw "singularmem ingest failed (exit $LASTEXITCODE)" }
+
+          $retrieveOutput = & "${{ steps.locate.outputs.sm }}" --store $storeFile retrieve "hello"
+          if ($LASTEXITCODE -ne 0) { throw "singularmem retrieve failed (exit $LASTEXITCODE)" }
+          Write-Host "Retrieve output: $retrieveOutput"
+          if ([string]::IsNullOrWhiteSpace($retrieveOutput)) { throw "singularmem retrieve returned empty result" }
+          if ($retrieveOutput -notmatch "hello smoke test") { throw "retrieve result does not contain ingested content" }
+EOF
+```
+
+**Note on CLI flag shape:** the `--store` flag and the `init` / `ingest` / `retrieve` subcommands match the project's existing CLI surface as of v0.16.0. If a future CLI change renames these, the workflow needs updating. The agent implementing this task should verify the flag shape by reading `crates/singularmem/src/cli.rs` (or wherever the CLI is defined) before committing — if the actual flag is `--store-path` or similar, adjust the PowerShell script.
+
+- [ ] **Step 2: Verify the workflow file is valid YAML**
+
+```bash
+python3 -c "import yaml; d=yaml.safe_load(open('.github/workflows/smoke-test-windows.yml')); print('name:', d['name']); print('jobs:', list(d['jobs'].keys()))"
+```
+
+Expected: `name: Smoke test (Windows binary)`, `jobs: ['smoke-test']`.
+
+- [ ] **Step 3: Verify CLI flags match actual implementation**
+
+```bash
+grep -rn 'fn cmd_init\|fn cmd_ingest\|fn cmd_retrieve\|--store' src/ crates/singularmem/src/ 2>/dev/null | head -20
+```
+
+Confirm `--store` is the actual flag name (or note the correct one). If the actual CLI uses different flag names (e.g., `--db-path`, `--store-file`), update the PowerShell script in step 1 to match.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add .github/workflows/smoke-test-windows.yml
+git commit -s -m "ci: add Windows binary smoke-test workflow
+
+Manually-dispatched GH Actions workflow that downloads the singularmem
++ singularmem-mcp Windows archives from a release and runs them on a
+windows-latest runner. Validates:
+- Both binaries start and report a version string
+- End-to-end init → ingest → retrieve cycle produces non-empty output
+  containing the ingested content
+
+Triggered post-release via 'gh workflow run smoke-test-windows.yml'
+(or via the GH Actions UI). Replaces 'user manually verifies on a
+Windows machine' since the maintainer does not have local Windows
+hardware.
+
+Sub-project 9."
+```
+
+---
+
 ## Task 5: Push branch + open PR
 
 **Files:** none in this repo. GitHub PR creation.
@@ -648,36 +797,39 @@ gh api repos/bromso/homebrew-tap/contents/Formula/singularmem-mcp.rb --jq '.cont
 
 Both expected: print exactly one matching line.
 
-- [ ] **Step 8: ACs 8, 9, 10 — Windows smoke test (manual user verification)**
+- [ ] **Step 8: ACs 8, 9, 10, 11 — Windows smoke test via the new workflow**
 
-This MUST be done on a real Windows machine (or Windows VM/Docker). The coding agent cannot run Windows binaries from a macOS host.
+The new `.github/workflows/smoke-test-windows.yml` (added in Task 4b) runs on a `windows-latest` GH Actions runner. Trigger it post-release:
 
-Hand off to user with this checklist:
-
-```
-On a clean Windows machine:
-
-1. Install via PowerShell installer:
-   powershell -ExecutionPolicy ByPass -c "irm https://github.com/bromso/singularmem/releases/download/v0.17.0/singularmem-installer.ps1 | iex"
-
-2. Verify version:
-   singularmem --version
-   # Expected: 0.17.0
-
-   singularmem-mcp --version
-   # Expected: 0.17.0
-
-3. End-to-end smoke test:
-   singularmem init "%TEMP%\sm-smoketest"
-   singularmem --store "%TEMP%\sm-smoketest" ingest --content "hello world"
-   singularmem --store "%TEMP%\sm-smoketest" retrieve "hello"
-   # Expected: non-empty result mentioning "hello world"
-
-If any step fails, report back. v0.17.0 can be yanked (mark as prerelease)
-and a v0.17.1 cut with a fix.
+```bash
+gh workflow run smoke-test-windows.yml --ref main -f tag=v0.17.0
 ```
 
-The agent marks ACs 8-10 as "user-verifiable" in the final task list update; they're not gated on the coding agent.
+Wait ~30 seconds for the run to spawn, then watch:
+
+```bash
+sleep 10
+SMOKE_RUN=$(gh run list --workflow=smoke-test-windows.yml --limit=1 --json databaseId --jq '.[0].databaseId')
+echo "Smoke run: $SMOKE_RUN"
+gh run watch $SMOKE_RUN --exit-status
+```
+
+Expected: the job's 5+ steps (download, extract, locate, --version × 2, end-to-end) all succeed. The workflow asserts:
+- AC 8: `singularmem.exe --version` exits 0 and outputs a version string
+- AC 9: `singularmem-mcp.exe --version` exits 0 and outputs a version string
+- AC 10: `init → ingest → retrieve "hello"` returns output containing `"hello smoke test"`
+- AC 11: This workflow exists and has been dispatched at least once with all jobs green
+
+**If the smoke-test job fails:** read the failed step's logs:
+
+```bash
+gh run view $SMOKE_RUN --log-failed | tail -50
+```
+
+Common failure modes:
+- **CLI flag mismatch.** The workflow expected `--store` but the actual CLI uses a different flag. Update the workflow file and re-dispatch.
+- **Binary fails to start (DLL not found, CRT runtime crash).** This is the real-Windows-runtime regression that the rustflag fix was supposed to prevent. v0.17.0 must be yanked (`gh release edit v0.17.0 --prerelease`) and the spec's open question #1 fallback (Approach B, ort load-dynamic) becomes the next sub-project.
+- **Retrieve returns empty / wrong content.** Likely a logic bug, not a CRT issue. Investigate normally.
 
 - [ ] **Step 9: Update project memory**
 
@@ -711,8 +863,9 @@ Rollback authority: the maintainer. Coding agents should NOT force-push to main,
 - [ ] 5. GH Release `v0.17.0` exists with ~26 assets
 - [ ] 6. GH Release includes Windows archives + PowerShell installer
 - [ ] 7. Homebrew tap updated to 0.17.0
-- [ ] 8. **(user)** `singularmem --version` on Windows returns 0.17.0
-- [ ] 9. **(user)** `singularmem-mcp --version` on Windows returns 0.17.0
-- [ ] 10. **(user)** End-to-end smoke test on Windows produces non-empty retrieve result
+- [ ] 8. `singularmem.exe --version` on `windows-latest` (via smoke-test workflow) returns 0.17.0
+- [ ] 9. `singularmem-mcp.exe --version` on `windows-latest` returns 0.17.0
+- [ ] 10. End-to-end smoke test on `windows-latest` (init → ingest → retrieve) produces non-empty result containing the ingested content
+- [ ] 11. `smoke-test-windows.yml` workflow exists and has been dispatched at least once against v0.17.0 with all steps green
 
-ACs 1-7 are agent-verifiable. ACs 8-10 require a real Windows machine — user verification.
+All ACs are agent-verifiable thanks to the smoke-test workflow added in Task 4b. No Windows machine required for the maintainer.

@@ -46,8 +46,9 @@ Approach is `.cargo/config.toml`-only — minimal surface, easily reversible, no
 
 1. `x86_64-pc-windows-msvc` is back in `dist-workspace.toml` `targets`, AND the PR's build matrix builds Windows successfully (no link errors).
 2. `v0.17.0` release pipeline produces a Windows archive (`singularmem-x86_64-pc-windows-msvc.zip` + sha256) and a Windows-targeted PowerShell installer (`singularmem-installer.ps1`).
-3. `singularmem.exe` and `singularmem-mcp.exe` run end-to-end on a real Windows machine: at minimum, `singularmem --version` returns `0.17.0` without runtime crashes.
+3. `singularmem.exe` and `singularmem-mcp.exe` run end-to-end on a Windows-latest GH Actions runner via a new smoke-test workflow: at minimum, `singularmem --version` returns `0.17.0` without runtime crashes, and an `init → ingest → retrieve` cycle produces a non-empty result.
 4. README's "Installing the CLI" section restores Windows (platform table row + PowerShell installer code block) and removes the temporary "Windows MSVC prebuilt binaries are temporarily unavailable" disclaimer.
+5. A new `.github/workflows/smoke-test-windows.yml` workflow exists, triggers via `workflow_dispatch`, runs on `windows-latest`, downloads the latest (or specified) release archive, and asserts the binaries start + run a basic CLI cycle. This is the *automated* verification path that replaces "user manual verification on a Windows machine" — the maintainer doesn't need Windows hardware to validate releases.
 
 ### Non-goals
 
@@ -188,9 +189,10 @@ Numbered, observable, testable. The sub-project is done when all items are obser
 5. **GH Release `v0.17.0` exists with 26 assets.** `gh release view v0.17.0 --json assets --jq '.assets | length'` returns `26`.
 6. **GH Release assets include Windows archives + PowerShell installer.** `gh release view v0.17.0 --json assets --jq '.assets[].name' | grep -E '(windows-msvc|installer.ps1)'` returns at least 4 entries: `singularmem-x86_64-pc-windows-msvc.zip` + its sha256, `singularmem-mcp-x86_64-pc-windows-msvc.zip` + its sha256, plus at least one `*-installer.ps1`. Exact count depends on whether dist 0.31.0 emits one or two PowerShell installer scripts.
 7. **Homebrew tap updated to 0.17.0.** Both formulas show `version "0.17.0"`.
-8. **`singularmem --version` on Windows returns `0.17.0`.** Manual user verification on a clean Windows test environment via the PowerShell installer.
-9. **`singularmem-mcp --version` on Windows returns `0.17.0`.** Same channel as criterion 8.
-10. **End-to-end smoke test on Windows.** `singularmem init <tempdir>` then `singularmem ingest --content "test"` then `singularmem retrieve "test"` produces a non-empty result. Manual user verification.
+8. **`singularmem --version` on Windows returns `0.17.0`.** Verified by `smoke-test-windows.yml` workflow run on `windows-latest`. Maintainer triggers the workflow via `workflow_dispatch` after v0.17.0 release; job exits 0.
+9. **`singularmem-mcp --version` on Windows returns `0.17.0`.** Same channel as criterion 8 — same workflow asserts both binaries.
+10. **End-to-end smoke test on Windows.** Same workflow: `singularmem init <tempdir>` then `singularmem ingest --content "test"` then `singularmem retrieve "test"` produces a non-empty result. Workflow asserts the retrieve output contains the test content.
+11. **`smoke-test-windows.yml` workflow exists and is dispatched at least once against v0.17.0 with all jobs green.** Verified via `gh run list --workflow=smoke-test-windows.yml`.
 
 ## Constitution Check
 
