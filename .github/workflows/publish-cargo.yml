@@ -1,0 +1,72 @@
+# Reusable workflow: publish all publishable crates to crates.io.
+# Called by release.yml's custom-publish-cargo job (cargo-dist publish-job
+# entry "./publish-cargo" in dist-workspace.toml).
+#
+# Requires the CRATES_IO_TOKEN repo secret to be set.
+#
+# Publishes crates in dependency order (leaves first):
+#   singularmem-core
+#   singularmem-search
+#   singularmem-retrieve
+#   singularmem-adapter-claude
+#   singularmem-adapter-openai
+#   singularmem-adapter-gemini
+#   singularmem-mcp
+#   singularmem (root CLI / library re-export)
+#
+# singularmem-node is excluded (publish = false — napi-rs cdylib for npm).
+#
+# A 30-second sleep between each publish allows the crates.io index to
+# propagate the just-published version before the next crate (which
+# depends on it) tries to resolve. Without the sleep, the next publish
+# can fail with "crate X version Y not found in registry".
+
+name: Publish to crates.io
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Publish all crates in dep order
+        run: |
+          set -euo pipefail
+          # Leaf-first order; sleep 30 between each so the crates.io
+          # index has time to propagate before the next dependent crate.
+          publish_one() {
+            local pkg="$1"
+            echo "=== Publishing $pkg ==="
+            cargo publish -p "$pkg" --no-verify
+            echo "=== Sleeping 30s for crates.io index to propagate ==="
+            sleep 30
+          }
+
+          publish_one singularmem-core
+          publish_one singularmem-search
+          publish_one singularmem-retrieve
+          publish_one singularmem-adapter-claude
+          publish_one singularmem-adapter-openai
+          publish_one singularmem-adapter-gemini
+          publish_one singularmem-mcp
+
+          # Root crate last; no sleep needed after.
+          echo "=== Publishing singularmem (root) ==="
+          cargo publish -p singularmem --no-verify

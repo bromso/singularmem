@@ -15,7 +15,7 @@ testing = []
 workspace = true
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core" }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
 tantivy = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -35,7 +35,7 @@ ort-sys = "=2.0.0-rc.9"
 tempfile = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
-singularmem-core = { path = "../singularmem-core" }  # for test fixtures
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }  # for test fixtures
 
 [[bench]]
 name = "search_perf"
