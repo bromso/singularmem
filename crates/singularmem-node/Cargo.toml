@@ -12,12 +12,12 @@ description = "Native Node.js bindings for Singularmem via napi-rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core" }
-singularmem-search = { path = "../singularmem-search", features = ["testing"] }
-singularmem-retrieve = { path = "../singularmem-retrieve" }
-singularmem-adapter-claude = { path = "../singularmem-adapter-claude" }
-singularmem-adapter-openai = { path = "../singularmem-adapter-openai" }
-singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini" }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0", features = ["testing"] }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
+singularmem-adapter-claude = { path = "../singularmem-adapter-claude", version = "0.16.0" }
+singularmem-adapter-openai = { path = "../singularmem-adapter-openai", version = "0.16.0" }
+singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini", version = "0.16.0" }
 napi = { version = "2", default-features = false, features = ["napi8", "tokio_rt", "serde-json"] }
 napi-derive = "2"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
