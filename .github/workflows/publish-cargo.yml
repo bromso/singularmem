@@ -1,0 +1,64 @@
+# Reusable workflow: publish all publishable crates to crates.io.
+# Called by release.yml's custom-publish-cargo job (cargo-dist publish-job "./publish-cargo").
+# Requires the CRATES_IO_TOKEN repo secret to be set.
+#
+# Publishes crates in dependency order (leaves first):
+#   singularmem-core
+#   singularmem-search
+#   singularmem-retrieve
+#   singularmem-adapter-claude
+#   singularmem-adapter-openai
+#   singularmem-adapter-gemini
+#   singularmem-mcp
+#   singularmem (root CLI / library re-export)
+#
+# singularmem-node is excluded (publish = false — napi-rs cdylib for npm).
+
+name: Publish to crates.io
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Publish singularmem-core
+        run: cargo publish -p singularmem-core --no-verify
+
+      - name: Publish singularmem-search
+        run: cargo publish -p singularmem-search --no-verify
+
+      - name: Publish singularmem-retrieve
+        run: cargo publish -p singularmem-retrieve --no-verify
+
+      - name: Publish singularmem-adapter-claude
+        run: cargo publish -p singularmem-adapter-claude --no-verify
+
+      - name: Publish singularmem-adapter-openai
+        run: cargo publish -p singularmem-adapter-openai --no-verify
+
+      - name: Publish singularmem-adapter-gemini
+        run: cargo publish -p singularmem-adapter-gemini --no-verify
+
+      - name: Publish singularmem-mcp
+        run: cargo publish -p singularmem-mcp --no-verify
+
+      - name: Publish singularmem (root)
+        run: cargo publish -p singularmem --no-verify
