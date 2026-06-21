@@ -13,12 +13,12 @@ homepage = "https://github.com/bromso/singularmem"
 workspace = true
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core" }
-singularmem-search = { path = "../singularmem-search" }
-singularmem-retrieve = { path = "../singularmem-retrieve" }
-singularmem-adapter-claude = { path = "../singularmem-adapter-claude" }
-singularmem-adapter-openai = { path = "../singularmem-adapter-openai" }
-singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini" }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0" }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
+singularmem-adapter-claude = { path = "../singularmem-adapter-claude", version = "0.16.0" }
+singularmem-adapter-openai = { path = "../singularmem-adapter-openai", version = "0.16.0" }
+singularmem-adapter-gemini = { path = "../singularmem-adapter-gemini", version = "0.16.0" }
 rmcp = { version = "=1.7.0", features = ["server", "transport-io", "macros"] }
 schemars = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std"] }
@@ -34,8 +34,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
-singularmem-search = { path = "../singularmem-search", features = ["testing"] }
-singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0", features = ["testing"] }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
 
 [[bin]]
 name = "singularmem-mcp"

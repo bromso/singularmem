@@ -15,8 +15,8 @@ testing = []
 workspace = true
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core" }
-singularmem-search = { path = "../singularmem-search" }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0" }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -26,5 +26,5 @@ jiff = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
-singularmem-search = { path = "../singularmem-search", features = ["testing"] }
-singularmem-core = { path = "../singularmem-core" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0", features = ["testing"] }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }

@@ -12,9 +12,9 @@ description = "Singularmem retrieval adapter for Google Gemini (pure formatter, 
 workspace = true
 
 [dependencies]
-singularmem-retrieve = { path = "../singularmem-retrieve" }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
 
 [dev-dependencies]
-singularmem-core = { path = "../singularmem-core" }
-singularmem-search = { path = "../singularmem-search" }
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0" }
 jiff = { workspace = true }
