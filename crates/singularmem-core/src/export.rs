@@ -1,6 +1,6 @@
 //! `Store::export` — emit the entire store as JSONL on a writer.
 //!
-//! Format spec: `docs/formats/store-v1.md` § "Export format — `export-v1`".
+//! Format spec: `docs/formats/store-v2.md` § "Export format — `export-v1`".
 
 use std::io::Write;
 
@@ -31,7 +31,7 @@ struct ExportItem<'a> {
 
 impl Store {
     /// Stream every item in the store as JSONL into `w`. Format defined in
-    /// `docs/formats/store-v1.md` ("export-v1"). Deterministic order: meta
+    /// `docs/formats/store-v2.md` ("export-v1"). Deterministic order: meta
     /// line first, then items in `created_at` ascending.
     ///
     /// # Errors

@@ -1,7 +1,7 @@
 //! `Store` read methods: `get`, `get_optional`, `list`, `list_by_tags`,
 //! `revision_history`, `latest_revision`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use rusqlite::params;
 
@@ -56,6 +56,66 @@ impl Store {
             Err(Error::NotFound { .. }) => Ok(None),
             Err(other) => Err(other),
         }
+    }
+
+    /// Fetch the item carrying `external_id`, if any.
+    ///
+    /// # Errors
+    /// Returns `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn get_by_external_id(&self, external_id: &str) -> Result<Option<Item>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let id_text: Option<String> = conn
+            .query_row(
+                "SELECT id FROM items WHERE external_id = ?1",
+                params![external_id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(Error::Sqlite {
+                    context: "looking up external_id",
+                    source: other,
+                }),
+            })?;
+        match id_text {
+            None => Ok(None),
+            Some(t) => load_item(&conn, t.parse::<ItemId>()?).map(Some),
+        }
+    }
+
+    /// Return the subset of `ids` that already exist as `external_id` values.
+    /// One indexed point query per id.
+    ///
+    /// # Errors
+    /// Returns `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn existing_external_ids(&self, ids: &[&str]) -> Result<HashSet<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn
+            .prepare_cached("SELECT 1 FROM items WHERE external_id = ?1")
+            .map_err(|e| Error::Sqlite {
+                context: "preparing external_id existence query",
+                source: e,
+            })?;
+        let mut out = HashSet::with_capacity(ids.len());
+        for id in ids {
+            let hit = stmt.exists(params![id]).map_err(|e| Error::Sqlite {
+                context: "checking external_id existence",
+                source: e,
+            })?;
+            if hit {
+                out.insert((*id).to_string());
+            }
+        }
+        Ok(out)
     }
 
     /// Iterate over every item in `created_at` ascending order.

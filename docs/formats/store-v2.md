@@ -1,9 +1,7 @@
-# Singularmem Store Format — v1
-
-> Superseded by [store-v2.md](store-v2.md) as of v0.17.0. Kept for readers of v1 stores.
+# Singularmem Store Format — v2
 
 This document specifies the on-disk format of a Singularmem memory store
-at `format_version = 1`. **A third-party tool that reads this document and
+at `format_version = 2`. **A third-party tool that reads this document and
 has access to a SQLite library can write a complete loader without
 referencing any Singularmem source code.** That property is a
 constitutional requirement (Principle III.b).
@@ -30,12 +28,13 @@ CREATE TABLE singularmem_meta (
 ) STRICT;
 
 CREATE TABLE items (
-    id          TEXT PRIMARY KEY NOT NULL,
-    content     TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    supersedes  TEXT,
-    source      TEXT,
-    metadata    TEXT NOT NULL DEFAULT '{}',
+    id           TEXT PRIMARY KEY NOT NULL,
+    content      TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    supersedes   TEXT,
+    source       TEXT,
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    external_id  TEXT,
     FOREIGN KEY (supersedes) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
     CHECK (length(content) > 0),
     CHECK (length(content) <= 1048576),
@@ -52,6 +51,7 @@ CREATE TABLE item_tags (
 CREATE INDEX idx_items_created_at ON items(created_at);
 CREATE INDEX idx_items_supersedes ON items(supersedes) WHERE supersedes IS NOT NULL;
 CREATE INDEX idx_item_tags_tag ON item_tags(tag);
+CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
 ```
 
 ### Column semantics
@@ -79,6 +79,20 @@ any insertion order.
 constraint enforces that the value is valid JSON AND that the top-level
 type is object (not array, not scalar). Default is `'{}'`.
 
+**`items.external_id`** — Nullable. Optional caller-supplied stable
+identity for idempotent bulk ingest, ≤ 512 bytes, UTF-8, no `\0`. Unique
+across the store when present (`idx_items_external_id` is a partial
+unique index that ignores NULLs, so any number of items may have no
+`external_id`). `None`/NULL for items ingested without one.
+
+Callers are free to choose any non-empty string, but two conventions are
+established by the reference implementation:
+
+| Convention | Example | Used by |
+|---|---|---|
+| `claude-code:<sessionId>:<uuid>[#n]` | `claude-code:8f3a...:c2b1...#2` | Bulk transcript ingestion keyed by conversation turn. The optional `#n` suffix disambiguates multiple items minted from the same turn. |
+| `file:<abs path>[#n]` | `file:/Users/alice/notes.md#1` | Ingestion keyed by a source file path. The optional `#n` suffix disambiguates multiple items from the same file. |
+
 **`item_tags.tag`** — Free-form text, ≤ 64 bytes, no `\0`. Tags are
 stored case-sensitively. The `(item_id, tag)` primary key dedupes within
 an item.
@@ -87,7 +101,7 @@ an item.
 
 | Key | Type | Required? | Purpose |
 |---|---|---|---|
-| `format_version` | string (`"1"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
+| `format_version` | string (`"2"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
 | `created_at` | RFC 3339 | yes | Wall-clock time the store file was first created. |
 
 Future format versions may add keys; readers MUST ignore unknown keys
@@ -105,7 +119,56 @@ maximum version `M`:
   error. It MUST NOT attempt to operate on a newer format.
 
 The Singularmem reference implementation in `crates/singularmem-core` at
-v0.1.0 supports maximum version `1`.
+v0.17.0 supports maximum version `2`.
+
+## Migration 1 → 2
+
+A store opened writable at `format_version = 1` is migrated in place to
+`2` by executing exactly these statements in a single transaction:
+
+```sql
+ALTER TABLE items ADD COLUMN external_id TEXT;
+CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';
+```
+
+The reference implementation opens this transaction with `BEGIN
+IMMEDIATE` (taking the write lock up front, rather than deferring it to
+the first write) and re-reads `format_version` immediately after
+acquiring the lock: if a concurrent writer already completed the
+migration while this connection was waiting for the lock, the migration
+is a no-op — the transaction is rolled back (there is nothing left to
+commit) and `Ok(())` is returned. Otherwise the three statements above
+run and commit together. Any failure rolls the whole transaction back,
+leaving the store at `format_version = 1`.
+
+A **read-only** open of a store still at `format_version = 1` MUST NOT
+migrate (a read-only connection cannot take a write lock) — it fails with
+a migration-required error. The store must be opened writable at least
+once to migrate; after that, subsequent read-only opens succeed against
+the now-`2` store.
+
+## In-place mutation: replacing an externally-keyed item
+
+Every other row in `items` is append-only once inserted — this format's
+one deliberate exception is the transfer of an `external_id` from a
+superseded item to its successor, performed by `Store::ingest_replacing`.
+Inside a single transaction:
+
+```sql
+UPDATE items SET external_id = NULL WHERE id = <old>;
+-- then, in the same transaction:
+INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id)
+VALUES (<new>, ..., <old>, ..., ..., <external_id>);
+```
+
+The successor row carries `supersedes = <old>` and the `external_id` the
+old row just gave up. This is the only `UPDATE` statement the reference
+implementation ever issues against `items`; every other write is an
+`INSERT`. A third-party loader that only ever reads should treat this as
+part of the normal supersedes chain — `get_by_external_id` always
+resolves to the current holder of an id, and the old item remains in the
+store (readable by its own `id`, just with `external_id = NULL`).
 
 ## Export format — `export-v1`
 
@@ -113,30 +176,38 @@ The `singularmem export` CLI verb (and `Store::export` library method)
 emit JSONL on stdout. Format:
 
 ```jsonl
-{"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"1","exported_at":"2026-05-16T12:34:56.000000000Z"}
+{"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"2","exported_at":"2026-05-16T12:34:56.000000000Z"}
 {"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","supersedes":null,"source":null,"tags":["work","decision"],"metadata":{"project":"alpha"}}
-{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","tags":[],"metadata":{}}
+{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","tags":[],"metadata":{},"external_id":"file:/a.rs"}
 ```
 
 Rules:
 
 - The first line is always a meta record naming the format
-  (`"_singularmem_format":"export-v1"`).
+  (`"_singularmem_format":"export-v1"`); the export format itself is
+  unversioned by the store's `format_version` — only `store_format_version`
+  inside the meta line changes, and it is now `"2"`.
 - Each subsequent line is one item, encoded as a single-line JSON object.
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
 - Items are emitted in `created_at` ascending order. Given a
   deterministic store, the export is byte-identical across runs.
 - `tags` is always present; empty array `[]` if the item has no tags.
 - `metadata` is always present; empty object `{}` if the item has none.
+- Item lines MAY carry `"external_id"`. It is present only when the item
+  has one; readers of `export-v1` written by a v1 store simply never see
+  the field, so this is a backward-compatible addition.
 
 ## Writing a third-party loader (walkthrough)
 
 1. Open the SQLite file.
 2. Read `singularmem_meta.format_version`. If not present, the file is
-   not a Singularmem store. If not `"1"`, refuse — see the migration
-   ratchet above.
+   not a Singularmem store. Accept `"1"` or `"2"`; refuse anything else
+   — see the migration ratchet above. When the value is `"2"`, the
+   `items.external_id` column exists (and the associated partial unique
+   index); when `"1"`, it does not.
 3. To list items, `SELECT id, content, created_at, supersedes, source,
-   metadata FROM items ORDER BY created_at ASC`.
+   metadata FROM items ORDER BY created_at ASC` (add `external_id` to the
+   column list at `format_version = 2`).
 4. For each item, fetch its tags: `SELECT tag FROM item_tags WHERE item_id
    = ? ORDER BY tag ASC`.
 5. To follow a supersedes chain, recursively `SELECT supersedes FROM
@@ -145,7 +216,7 @@ Rules:
    `CHECK` constraint.
 
 A loader that follows these steps interoperates with any Singularmem
-store at `format_version = 1` regardless of which binary wrote it.
+store at `format_version = 1` or `2` regardless of which binary wrote it.
 
 ## Tantivy sidecar index (optional, format unstable across Tantivy versions)
 
