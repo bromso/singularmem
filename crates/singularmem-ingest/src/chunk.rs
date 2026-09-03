@@ -9,6 +9,11 @@ pub const DEFAULT_CHUNK_BYTES: usize = 4096;
 /// larger than `max_bytes` is hard-split at the last char boundary that
 /// fits. Chunks are trimmed and never empty. Whitespace-only input yields
 /// no chunks.
+///
+/// `max_bytes` below 4 is raised to 4 so any UTF-8 scalar fits; the
+/// returned chunks are ≤ `max(max_bytes, 4)` bytes. Runs of whitespace
+/// that fall entirely within a hard-split boundary are dropped, not
+/// carried into a neighbouring chunk.
 #[must_use]
 pub fn chunk_text(text: &str, max_bytes: usize) -> Vec<String> {
     let max_bytes = max_bytes.max(4);

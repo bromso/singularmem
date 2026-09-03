@@ -46,3 +46,20 @@ fn hard_splits_oversized_paragraph_on_char_boundary() {
     let chunks = chunk_text(text, 5);
     assert_eq!(chunks, vec!["éé", "éé", "é"]);
 }
+
+#[test]
+fn tiny_max_is_floored_to_four_bytes() {
+    assert_eq!(chunk_text("éé", 1), vec!["éé"]);
+
+    let chunks = chunk_text("abcdefgh", 1);
+    for c in &chunks {
+        assert!(c.len() <= 4, "chunk {c:?} exceeds the 4-byte floor");
+    }
+    assert_eq!(chunks.concat(), "abcdefgh");
+}
+
+#[test]
+fn whitespace_only_hard_split_piece_is_dropped() {
+    let text = format!("a{}b", " ".repeat(10));
+    assert_eq!(chunk_text(&text, 5), vec!["a", "b"]);
+}
