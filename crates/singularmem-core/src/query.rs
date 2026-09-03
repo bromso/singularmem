@@ -274,7 +274,7 @@ fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {
     let id_text = id.to_string();
     let mut stmt = conn
         .prepare(
-            "SELECT content, created_at, supersedes, source, metadata \
+            "SELECT content, created_at, supersedes, source, metadata, external_id \
              FROM items WHERE id = ?1",
         )
         .map_err(|e| Error::Sqlite {
@@ -289,6 +289,7 @@ fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, Option<String>>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|e| match e {
@@ -298,7 +299,7 @@ fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {
                 source: other,
             },
         })?;
-    let (content, created_at_text, supersedes_text, source, metadata_text) = row;
+    let (content, created_at_text, supersedes_text, source, metadata_text, external_id) = row;
     let created_at: jiff::Timestamp = created_at_text.parse().map_err(|_| Error::Sqlite {
         context: "parsing stored created_at",
         source: rusqlite::Error::InvalidColumnType(
@@ -343,5 +344,6 @@ fn load_item(conn: &rusqlite::Connection, id: ItemId) -> Result<Item> {
         tags,
         source,
         metadata,
+        external_id,
     })
 }

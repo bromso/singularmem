@@ -16,9 +16,10 @@ impl Store {
     ///
     /// Returns `Error::Validation` if the item fails any rule (empty or
     /// oversized content, oversized source, non-object metadata, oversized or
-    /// NUL-bearing tags); `Error::SupersedesNotFound` if `supersedes`
-    /// is set to an unknown ID; `Error::Sqlite` on database error;
-    /// `Error::ReadOnly` if the store was opened read-only.
+    /// NUL-bearing tags, invalid `external_id`); `Error::SupersedesNotFound`
+    /// if `supersedes` is set to an unknown ID; `Error::ExternalIdConflict`
+    /// if `external_id` collides with an existing item's; `Error::Sqlite` on
+    /// database error; `Error::ReadOnly` if the store was opened read-only.
     ///
     /// # Panics
     ///
@@ -75,8 +76,8 @@ impl Store {
         let id_text = id.to_string();
 
         tx.execute(
-            "INSERT INTO items (id, content, created_at, supersedes, source, metadata) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 id_text,
                 item.content,
@@ -84,12 +85,10 @@ impl Store {
                 item.supersedes.map(|i| i.to_string()),
                 item.source,
                 metadata_text,
+                item.external_id,
             ],
         )
-        .map_err(|e| Error::Sqlite {
-            context: "inserting item row",
-            source: e,
-        })?;
+        .map_err(|e| map_insert_err(e, item.external_id.as_deref(), "inserting item row"))?;
 
         for tag in &normalised_tags {
             tx.execute(
@@ -126,6 +125,7 @@ impl Store {
                 tags: normalised_tags.clone(),
                 source: item.source.clone(),
                 metadata: item.metadata.clone(),
+                external_id: item.external_id.clone(),
             };
             if let Err(e) = hook.on_ingest(&item_for_hook) {
                 tracing::warn!(
@@ -150,6 +150,7 @@ impl Store {
             tags: normalised_tags,
             source: item.source,
             metadata: item.metadata,
+            external_id: item.external_id,
         })
     }
 
@@ -217,8 +218,8 @@ impl Store {
             let created_at_text = now.to_string();
 
             tx.execute(
-                "INSERT INTO items (id, content, created_at, supersedes, source, metadata) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     id_text,
                     item.content,
@@ -226,12 +227,10 @@ impl Store {
                     item.supersedes.map(|i| i.to_string()),
                     item.source,
                     metadata_text,
+                    item.external_id,
                 ],
             )
-            .map_err(|e| Error::Sqlite {
-                context: "inserting bulk item row",
-                source: e,
-            })?;
+            .map_err(|e| map_insert_err(e, item.external_id.as_deref(), "inserting bulk item row"))?;
 
             for tag in &normalised_tags {
                 tx.execute(
@@ -252,6 +251,7 @@ impl Store {
                 tags: normalised_tags,
                 source: item.source,
                 metadata: item.metadata,
+                external_id: item.external_id,
             });
         }
 
@@ -286,6 +286,21 @@ impl Store {
 
         Ok(out)
     }
+}
+
+/// Map an INSERT error: a unique violation on `external_id` becomes
+/// `ExternalIdConflict`; anything else is `Sqlite`.
+fn map_insert_err(e: rusqlite::Error, external_id: Option<&str>, context: &'static str) -> Error {
+    if let rusqlite::Error::SqliteFailure(ffi, Some(ref msg)) = e {
+        if ffi.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && msg.contains("items.external_id")
+        {
+            return Error::ExternalIdConflict {
+                external_id: external_id.unwrap_or_default().to_string(),
+            };
+        }
+    }
+    Error::Sqlite { context, source: e }
 }
 
 /// Mint a fresh ULID using the store's injected rng and the given timestamp.

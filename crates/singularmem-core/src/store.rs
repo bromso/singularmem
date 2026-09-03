@@ -56,7 +56,9 @@ impl Store {
     ///
     /// Returns `Error::Sqlite` on database open failure, `Error::Io` on
     /// directory creation failure, `Error::UnsupportedFormatVersion` if the
-    /// existing file has a format version this binary cannot read.
+    /// existing file has a format version this binary cannot read, and
+    /// `Error::Migration` if an in-place format migration is needed but
+    /// fails (or is refused because the store was opened read-only).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(path, StoreOptions::default())
     }
@@ -129,12 +131,16 @@ impl Store {
             source: e,
         })?;
 
-        // Pragmas — must run before schema work.
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| Error::Sqlite {
-                context: "setting WAL journal mode",
-                source: e,
-            })?;
+        // Pragmas — must run before schema work. Changing journal_mode writes
+        // the database header, which a read-only connection cannot do; skip
+        // it there and simply read with whatever journal mode is on disk.
+        if !options.read_only {
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(|e| Error::Sqlite {
+                    context: "setting WAL journal mode",
+                    source: e,
+                })?;
+        }
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| Error::Sqlite {
                 context: "enabling foreign_keys pragma",
@@ -154,6 +160,14 @@ impl Store {
                     found: "<missing>".to_string(),
                     max_supported: FORMAT_VERSION,
                 })?;
+            if version == "1" {
+                return Err(Error::Migration {
+                    from: version,
+                    to: FORMAT_VERSION,
+                    reason: "store is opened read-only; open it writable once to migrate"
+                        .to_string(),
+                });
+            }
             if version != FORMAT_VERSION {
                 return Err(Error::UnsupportedFormatVersion {
                     found: version,
@@ -164,9 +178,10 @@ impl Store {
             match schema::read_format_version(&conn)? {
                 None => {
                     let now = clock.now().to_string();
-                    schema::apply_v1(&conn, &now)?;
+                    schema::apply_current(&conn, &now)?;
                 }
-                Some(v) if v == FORMAT_VERSION => { /* already bootstrapped */ }
+                Some(v) if v == FORMAT_VERSION => { /* already current */ }
+                Some(v) if v == "1" => schema::migrate_1_to_2(&conn)?,
                 Some(other) => {
                     return Err(Error::UnsupportedFormatVersion {
                         found: other,

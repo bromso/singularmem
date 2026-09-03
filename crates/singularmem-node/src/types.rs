@@ -227,6 +227,7 @@ pub fn js_new_item_to_core(
         tags: item.tags.unwrap_or_default(),
         source: item.source,
         metadata: item.metadata.unwrap_or_else(|| serde_json::json!({})),
+        external_id: None,
     })
 }
 
@@ -245,6 +246,7 @@ mod tests {
             tags: vec!["a".to_string(), "b".to_string()],
             source: Some("test".to_string()),
             metadata: serde_json::json!({"k": "v"}),
+            external_id: None,
         }
     }
 
