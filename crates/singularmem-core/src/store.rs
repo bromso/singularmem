@@ -126,7 +126,7 @@ impl Store {
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
         };
 
-        let conn = Connection::open_with_flags(path, flags).map_err(|e| Error::Sqlite {
+        let mut conn = Connection::open_with_flags(path, flags).map_err(|e| Error::Sqlite {
             context: "opening database file",
             source: e,
         })?;
@@ -181,7 +181,7 @@ impl Store {
                     schema::apply_current(&conn, &now)?;
                 }
                 Some(v) if v == FORMAT_VERSION => { /* already current */ }
-                Some(v) if v == "1" => schema::migrate_1_to_2(&conn)?,
+                Some(v) if v == "1" => schema::migrate_1_to_2(&mut conn)?,
                 Some(other) => {
                     return Err(Error::UnsupportedFormatVersion {
                         found: other,

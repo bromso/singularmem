@@ -38,31 +38,64 @@ CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
 ";
 
-/// Migration 1 → 2. Runs in one transaction; on failure the store stays at 1.
-const MIGRATE_1_TO_2: &str = "
-BEGIN;
+/// DDL applied by the 1 → 2 migration (excluding the `BEGIN`/`COMMIT`
+/// bracketing, which is handled in Rust so the transaction can be inspected
+/// and conditionally rolled back — see `migrate_1_to_2`).
+const MIGRATE_1_TO_2_DDL: &str = "
 ALTER TABLE items ADD COLUMN external_id TEXT;
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
-UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';
-COMMIT;
 ";
 
 /// Apply the 1 → 2 migration.
+///
+/// Uses `BEGIN IMMEDIATE` to take the write lock up front (avoiding a
+/// deferred-transaction upgrade race against another writer), then re-reads
+/// `format_version` inside the transaction: if another process already won
+/// the race and migrated the store to 2 while we were waiting for the lock,
+/// this is a no-op (the transaction is rolled back — nothing to commit — and
+/// `Ok(())` is returned). Otherwise the DDL and meta update are applied and
+/// committed together.
 ///
 /// # Errors
 ///
 /// Returns `Error::Migration` if any statement fails; the transaction is
 /// rolled back and the store is left at format version 1.
-pub fn migrate_1_to_2(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(MIGRATE_1_TO_2).map_err(|e| {
-        // execute_batch stops at the failing statement; ensure no open tx.
-        let _ = conn.execute_batch("ROLLBACK;");
-        Error::Migration {
-            from: "1".to_string(),
-            to: "2",
-            reason: e.to_string(),
-        }
-    })
+pub fn migrate_1_to_2(conn: &mut rusqlite::Connection) -> Result<()> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| migration_err(e.to_string()))?;
+
+    if read_format_version(&tx)?.as_deref() == Some(FORMAT_VERSION) {
+        // Another process already completed the migration before we
+        // acquired the write lock; nothing left to do.
+        tx.rollback().map_err(|e| migration_err(e.to_string()))?;
+        return Ok(());
+    }
+
+    if let Err(e) = tx.execute_batch(MIGRATE_1_TO_2_DDL) {
+        let _ = tx.rollback();
+        return Err(migration_err(e.to_string()));
+    }
+
+    if let Err(e) = tx.execute(
+        "UPDATE singularmem_meta SET value = ?1 WHERE key = 'format_version'",
+        rusqlite::params![FORMAT_VERSION],
+    ) {
+        let _ = tx.rollback();
+        return Err(migration_err(e.to_string()));
+    }
+
+    tx.commit().map_err(|e| migration_err(e.to_string()))
+}
+
+/// Build an `Error::Migration` from `1` to the current `FORMAT_VERSION` with
+/// the given reason.
+fn migration_err(reason: String) -> Error {
+    Error::Migration {
+        from: "1".to_string(),
+        to: FORMAT_VERSION,
+        reason,
+    }
 }
 
 /// Apply the current (v2) schema and write `format_version = '2'` to the meta

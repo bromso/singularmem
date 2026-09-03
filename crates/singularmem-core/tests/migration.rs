@@ -99,6 +99,72 @@ fn newer_store_still_refused() {
     assert!(matches!(err, Error::UnsupportedFormatVersion { .. }));
 }
 
+/// Simulates the losing side of a migration race: another process already
+/// completed the 1 -> 2 migration (full DDL + meta bump) by the time this
+/// one opens the file. `Store::open` must still succeed and see version 2 —
+/// whether it takes the "already current" fast path or re-enters
+/// `migrate_1_to_2`'s in-transaction re-check, the outcome is the same.
+#[test]
+fn already_migrated_v1_fixture_opens_cleanly_as_v2() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v1(&dir);
+
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE items ADD COLUMN external_id TEXT;
+             CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+             UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';",
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(&path).expect("open of already-migrated fixture succeeds");
+    assert_eq!(store.format_version().unwrap(), "2");
+}
+
+/// Failure path: the migration's `CREATE UNIQUE INDEX idx_items_external_id`
+/// collides with a pre-existing index of the same name (a hostile or
+/// corrupted v1 fixture). The whole transaction — including the preceding
+/// `ALTER TABLE ADD COLUMN` — must roll back: `format_version` stays `'1'`
+/// and `items` must not gain an `external_id` column.
+#[test]
+fn conflicting_index_name_fails_migration_and_leaves_v1_intact() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v1(&dir);
+
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("CREATE INDEX idx_items_external_id ON items(source)", [])
+            .unwrap();
+    }
+
+    let err = Store::open(&path).unwrap_err();
+    assert!(matches!(err, Error::Migration { .. }), "got {err:?}");
+
+    let conn = Connection::open(&path).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM singularmem_meta WHERE key='format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, "1", "format_version must remain 1 after rollback");
+
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        !cols.contains(&"external_id".to_string()),
+        "ALTER TABLE must have been rolled back too: {cols:?}"
+    );
+}
+
 #[test]
 fn fresh_store_is_v2_with_external_id_column() {
     let dir = TempDir::new().unwrap();

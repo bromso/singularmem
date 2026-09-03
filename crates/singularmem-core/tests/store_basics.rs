@@ -69,7 +69,7 @@ fn unsupported_format_version_rejected() {
     let msg = err.to_string();
     assert!(msg.contains("999"), "error mentions found version: {msg}");
     assert!(
-        msg.contains(FORMAT_VERSION),
+        msg.contains(&format!("maximum {FORMAT_VERSION}")),
         "error mentions max supported: {msg}"
     );
 }

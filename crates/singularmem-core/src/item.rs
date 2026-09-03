@@ -389,6 +389,19 @@ mod tests {
     }
 
     #[test]
+    fn nul_in_external_id_rejected() {
+        let mut item = NewItem::text("hello");
+        item.external_id = Some("a\0b".into());
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "external_id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn item_id_orders_by_ulid_bytes() {
         // Two ULIDs in known order; the first lexicographically precedes the second.
         let a: ItemId = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().expect("valid");
