@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 pub mod chunk;
+pub mod claude;
 pub mod error;
 
 pub use chunk::{chunk_text, DEFAULT_CHUNK_BYTES};
+pub use claude::{discover_transcripts, strip_system_reminders, ClaudeTranscript};
 pub use error::{Error, Result};
 
 use singularmem_core::NewItem;
