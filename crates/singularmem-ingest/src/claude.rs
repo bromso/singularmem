@@ -52,7 +52,6 @@ struct Line {
 
 #[derive(Deserialize)]
 struct Message {
-    role: Option<String>,
     content: Option<serde_json::Value>,
 }
 
@@ -112,8 +111,13 @@ impl ClaudeTranscript {
             tracing::warn!(path = %self.path.display(), "message line without uuid; skipped");
             return Some(Vec::new());
         };
-        let msg = line.message?;
-        let (text, tool_names) = extract_text(msg.content.as_ref()?);
+        let Some(msg) = line.message else {
+            return Some(Vec::new());
+        };
+        let Some(content) = msg.content.as_ref() else {
+            return Some(Vec::new());
+        };
+        let (text, tool_names) = extract_text(content);
         let text = if role == "user" {
             strip_system_reminders(&text)
         } else {
@@ -123,7 +127,6 @@ impl ClaudeTranscript {
         if chunks.is_empty() {
             return Some(Vec::new());
         }
-        let _ = msg.role; // role comes from `type`; message.role is informational
         let session_id = line.session_id.unwrap_or_else(|| self.file_stem());
         let occurred_at = line
             .timestamp
@@ -143,6 +146,7 @@ impl ClaudeTranscript {
                 if sidechain {
                     tags.push("sidechain".to_string());
                 }
+                tags.sort();
                 let external_id = if chunk_count == 1 {
                     format!("claude-code:{session_id}:{uuid}")
                 } else {
@@ -240,14 +244,13 @@ impl Source for ClaudeTranscript {
             }
         };
         let reader = BufReader::new(file);
-        let path = self.path.clone();
         let iter = reader.lines().enumerate().flat_map(move |(idx, line)| {
             let line_no = idx + 1;
             let raw = match line {
                 Ok(l) => l,
                 Err(source) => {
                     return vec![Err(Error::Io {
-                        path: path.clone(),
+                        path: self.path.clone(),
                         source,
                     })]
                 }
@@ -259,7 +262,7 @@ impl Source for ClaudeTranscript {
                 Ok(p) => p,
                 Err(source) => {
                     return vec![Err(Error::Json {
-                        path: path.clone(),
+                        path: self.path.clone(),
                         line: line_no,
                         source,
                     })]

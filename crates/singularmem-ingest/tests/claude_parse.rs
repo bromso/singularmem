@@ -7,13 +7,13 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session.jsonl")
 }
 
-fn parse(t: &ClaudeTranscript) -> (Vec<NewItem>, usize) {
+fn parse(t: &ClaudeTranscript) -> (Vec<NewItem>, Vec<singularmem_ingest::Error>) {
     let mut ok = Vec::new();
-    let mut errs = 0;
+    let mut errs = Vec::new();
     for r in t.items() {
         match r {
             Ok(i) => ok.push(i),
-            Err(_) => errs += 1,
+            Err(e) => errs.push(e),
         }
     }
     (ok, errs)
@@ -36,7 +36,12 @@ fn keeps_exactly_the_text_messages() {
             "claude-code:11111111-2222-3333-4444-555555555555:a4",
         ]
     );
-    assert_eq!(errs, 1, "the malformed line");
+    assert_eq!(errs.len(), 1, "the malformed line");
+    assert!(
+        matches!(&errs[0], singularmem_ingest::Error::Json { line: 14, .. }),
+        "expected Json error on line 14, got {:?}",
+        errs[0]
+    );
     // filtered: tool_result-only u2, tool_use-only a2, thinking-only a3, meta u4, sidechain u5
     assert_eq!(t.filtered_count(), 5);
 }
@@ -81,7 +86,10 @@ fn sidechains_opt_in() {
         .iter()
         .find(|i| i.metadata["uuid"] == "u5")
         .expect("sidechain kept");
-    assert!(u5.tags.contains(&"sidechain".to_string()));
+    assert_eq!(
+        u5.tags,
+        vec!["claude-code", "role:user", "sidechain", "transcript"]
+    );
 }
 
 #[test]
@@ -101,8 +109,7 @@ fn long_messages_are_chunked_with_suffixed_ids() {
     // exactly 2 pieces under the real DEFAULT_CHUNK_BYTES (4096). Two
     // separate ~5000-byte paragraphs would each exceed 4096 individually
     // and hard-split into 2 pieces apiece (4 total), not 2.
-    let para = "word ".repeat(1000); // ~5000 bytes
-    let content = para;
+    let content = "word ".repeat(1000); // ~5000 bytes
     let line = serde_json::json!({
         "type":"user","uuid":"big","sessionId":"s","timestamp":"2026-09-01T00:00:00Z",
         "message":{"role":"user","content":content}
@@ -131,6 +138,46 @@ fn session_id_falls_back_to_file_stem() {
         items[0].external_id.as_deref(),
         Some("claude-code:abc-123:u")
     );
+}
+
+#[test]
+fn message_without_content_counts_as_filtered() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let p = dir.path().join("bodyless.jsonl");
+    std::fs::write(
+        &p,
+        concat!(
+            "{\"type\":\"user\",\"uuid\":\"u\",\"sessionId\":\"s\"}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"a\",\"sessionId\":\"s\",\"message\":{\"role\":\"assistant\"}}\n",
+        ),
+    )
+    .unwrap();
+    let t = ClaudeTranscript::open(&p).unwrap();
+    let (items, errs) = parse(&t);
+    assert!(items.is_empty());
+    assert!(errs.is_empty());
+    assert_eq!(t.filtered_count(), 2);
+}
+
+#[test]
+fn strip_system_reminders_cases() {
+    use singularmem_ingest::strip_system_reminders;
+
+    assert_eq!(
+        strip_system_reminders("a<system-reminder>x</system-reminder>b"),
+        "ab"
+    );
+    assert_eq!(
+        strip_system_reminders(
+            "a<system-reminder>x</system-reminder><system-reminder>y</system-reminder>b"
+        ),
+        "ab"
+    );
+    assert_eq!(
+        strip_system_reminders("a<system-reminder>unterminated"),
+        "a"
+    );
+    assert_eq!(strip_system_reminders("  plain  "), "plain");
 }
 
 #[test]
