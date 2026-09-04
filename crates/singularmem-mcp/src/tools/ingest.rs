@@ -30,6 +30,9 @@ pub struct MemoryIngestArgs {
     /// Optional user-defined JSON object.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Optional scope path (validated, lowercased).
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// Handler output: the new memory's ID and timestamp.
@@ -74,6 +77,10 @@ pub fn tool_descriptor() -> Tool {
             "metadata": {
                 "type": "object",
                 "description": "Optional user-defined JSON object. Soft warning threshold 64 KiB."
+            },
+            "scope": {
+                "type": "string",
+                "description": "Optional scope path (validated, lowercased)."
             }
         },
         "required": ["content"]
@@ -118,6 +125,7 @@ pub fn handle_memory_ingest(args: MemoryIngestArgs, config: &Config) -> Result<M
     item.tags = args.tags.unwrap_or_default();
     item.source = args.source;
     item.supersedes = supersedes;
+    item.scope = args.scope;
     if let Some(meta) = args.metadata {
         item.metadata = meta;
     }
@@ -216,6 +224,7 @@ mod tests {
             source: None,
             supersedes: None,
             metadata: None,
+            scope: None,
         };
         let out = handle_memory_ingest(args, &config).expect("ok");
         assert!(
@@ -239,6 +248,7 @@ mod tests {
             source: None,
             supersedes: None,
             metadata: None,
+            scope: None,
         };
         let r = handle_memory_ingest(args, &config);
         assert!(
@@ -265,6 +275,7 @@ mod tests {
                 source: None,
                 supersedes: None,
                 metadata: None,
+                scope: None,
             },
             &config,
         )
@@ -278,6 +289,7 @@ mod tests {
                 source: None,
                 supersedes: Some(first.id.to_string()),
                 metadata: None,
+                scope: None,
             },
             &config,
         )
@@ -298,6 +310,7 @@ mod tests {
             source: None,
             supersedes: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()),
             metadata: None,
+            scope: None,
         };
         let r = handle_memory_ingest(args, &config);
         assert!(
@@ -320,6 +333,7 @@ mod tests {
             source: Some("test-source".to_string()),
             supersedes: None,
             metadata: None,
+            scope: None,
         };
         let out = handle_memory_ingest(args, &config).expect("ok");
 
@@ -341,11 +355,30 @@ mod tests {
             source: None,
             supersedes: None,
             metadata: None,
+            scope: None,
         };
         let r = handle_memory_ingest(args, &config);
         assert!(
             matches!(r, Err(Error::ReadOnly)),
             "expected ReadOnly, got {r:?}"
         );
+    }
+
+    #[test]
+    fn ingest_persists_normalised_scope() {
+        let (_dir, config) = fresh_config(false);
+        let args = MemoryIngestArgs {
+            content: "scoped content".to_string(),
+            tags: None,
+            source: None,
+            supersedes: None,
+            metadata: None,
+            scope: Some("Team/X".to_string()),
+        };
+        let out = handle_memory_ingest(args, &config).expect("ok");
+
+        let store = Store::open(&config.store_path).unwrap();
+        let item = store.get(out.id).unwrap();
+        assert_eq!(item.scope, Some("team/x".to_string()));
     }
 }

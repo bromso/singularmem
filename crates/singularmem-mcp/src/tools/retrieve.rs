@@ -24,6 +24,14 @@ pub struct MemoryRetrieveArgs {
     /// `default_adapter` when absent.
     #[serde(default)]
     pub adapter: Option<String>,
+    /// Restrict to this scope path and its descendants (or, with
+    /// `scope_exact`, only this exact scope).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// When `true`, match only the exact scope given in `scope`
+    /// (rather than including descendants). Default: `false`.
+    #[serde(default)]
+    pub scope_exact: Option<bool>,
 }
 
 /// Output of the `memory_retrieve` handler. The MCP transport layer
@@ -59,11 +67,12 @@ pub fn handle_memory_retrieve(
 
     // 2. Clamp limit to [1, 50] per spec.
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
+    let scope = crate::tools::util::scope_filter(args.scope.as_deref(), args.scope_exact)?;
     let opts = RetrieveOptions {
         max_blocks: limit,
         min_score: 0.0,
         search: HybridSearchOptions::default(),
-        scope: None,
+        scope,
     };
 
     // 3. Open store + indexes per-request. The spec is explicit: no
@@ -166,6 +175,38 @@ mod tests {
         (dir, config)
     }
 
+    /// Like `seeded`, but every item `i` gets scope `"even"` (even `i`)
+    /// or `"odd"` (odd `i`).
+    #[allow(clippy::missing_panics_doc)]
+    fn seeded_with_scopes(n: usize, default_adapter: &str) -> (TempDir, Config) {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("store.db.tantivy");
+        let sem_path = dir.path().join("store.db.vectors");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let sem_hook = EmbedderIndex::open(
+            &sem_path,
+            Box::new(singularmem_search::testing::MockEmbedder::default()),
+        )
+        .unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
+        let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+        for i in 0..n {
+            let mut item = NewItem::text(format!("seed memory number {i}"));
+            item.scope = Some(if i % 2 == 0 { "even" } else { "odd" }.to_string());
+            store.ingest(item).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        std::env::set_var("SINGULARMEM_TEST_EMBEDDER", "mock");
+
+        let config = Config::new(store_path, default_adapter.to_string(), false);
+        (dir, config)
+    }
+
     #[test]
     fn handler_uses_default_adapter_when_arg_absent() {
         let (_dir, config) = seeded(3, "claude");
@@ -173,6 +214,8 @@ mod tests {
             query: "seed memory".to_string(),
             limit: None,
             adapter: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_retrieve(&args, &config).expect("ok");
         assert!(
@@ -189,6 +232,8 @@ mod tests {
             query: "seed memory".to_string(),
             limit: None,
             adapter: Some("openai".to_string()),
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_retrieve(&args, &config).expect("ok");
         assert!(
@@ -210,6 +255,8 @@ mod tests {
             query: "seed memory".to_string(),
             limit: None,
             adapter: Some("nonexistent".to_string()),
+            scope: None,
+            scope_exact: None,
         };
         let r = handle_memory_retrieve(&args, &config);
         assert!(
@@ -225,6 +272,8 @@ mod tests {
             query: "seed memory".to_string(),
             limit: Some(3),
             adapter: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_retrieve(&args, &config).expect("ok");
         let heading_count = out.text.matches("## memory").count();
@@ -242,6 +291,8 @@ mod tests {
             query: "seed memory".to_string(),
             limit: Some(1000),
             adapter: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_retrieve(&args, &config).expect("ok");
         let heading_count = out.text.matches("## memory").count();
@@ -258,6 +309,8 @@ mod tests {
             query: String::new(),
             limit: None,
             adapter: None,
+            scope: None,
+            scope_exact: None,
         };
         let r = handle_memory_retrieve(&args, &config);
         assert!(
@@ -280,11 +333,36 @@ mod tests {
             query: "anything".to_string(),
             limit: None,
             adapter: None,
+            scope: None,
+            scope_exact: None,
         };
         let r = handle_memory_retrieve(&args, &config);
         assert!(
             matches!(r, Err(Error::Search(singularmem_search::Error::NoIndexes))),
             "expected Search(NoIndexes): {r:?}"
+        );
+    }
+
+    #[test]
+    fn retrieve_respects_scope_filter() {
+        let (_dir, config) = seeded_with_scopes(4, "plain");
+        let args = MemoryRetrieveArgs {
+            query: "seed memory".to_string(),
+            limit: None,
+            adapter: None,
+            scope: Some("even".to_string()),
+            scope_exact: None,
+        };
+        let out = handle_memory_retrieve(&args, &config).expect("ok");
+        assert!(
+            !out.text.contains("number 1"),
+            "expected only even-scoped hits, found an odd one: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("number 3"),
+            "expected only even-scoped hits, found an odd one: {}",
+            out.text
         );
     }
 }

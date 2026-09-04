@@ -19,8 +19,8 @@ use serde_json::json;
 
 use crate::tools::{
     handle_memory_get, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, MemoryGetArgs, MemoryIngestArgs, MemoryListArgs, MemoryRetrieveArgs,
-    MemoryRevisionsArgs,
+    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryIngestArgs, MemoryListArgs,
+    MemoryRetrieveArgs, MemoryRevisionsArgs,
 };
 use crate::{Config, Error, Result};
 
@@ -58,6 +58,15 @@ impl SingularmemServer {
                     "type": "string",
                     "description": "Which provider-specific format to render memories with.",
                     "enum": ["plain", "claude", "openai", "gemini"]
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "Restrict to this scope path and its descendants, e.g. \"claude-code/myproj\"."
+                },
+                "scope_exact": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Match only the exact scope."
                 }
             },
             "required": ["query"]
@@ -92,6 +101,7 @@ impl ServerHandler for SingularmemServer {
             crate::tools::get::tool_descriptor(),
             crate::tools::list::tool_descriptor(),
             crate::tools::revisions::tool_descriptor(),
+            crate::tools::scopes::tool_descriptor(),
         ];
         if !self.config.read_only {
             tools.push(crate::tools::ingest::tool_descriptor());
@@ -136,6 +146,9 @@ impl ServerHandler for SingularmemServer {
                             "no memories indexed yet; run `singularmem ingest` first",
                             None,
                         ))
+                    }
+                    Err(Error::Core(singularmem_core::Error::Validation { field, reason })) => {
+                        Err(McpError::invalid_params(format!("{field}: {reason}"), None))
                     }
                     Err(other) => {
                         Err(McpError::internal_error(other.to_string(), None))
@@ -214,9 +227,16 @@ impl ServerHandler for SingularmemServer {
                 };
                 match handle_memory_list(&args, &config) {
                     Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                    Err(Error::Core(singularmem_core::Error::Validation { field, reason })) => {
+                        Err(McpError::invalid_params(format!("{field}: {reason}"), None))
+                    }
                     Err(other) => Err(McpError::internal_error(other.to_string(), None)),
                 }
             }
+            "memory_scopes" => match handle_memory_scopes(&config) {
+                Ok(out) => Ok(CallToolResult::success(vec![Content::text(out.text)])),
+                Err(other) => Err(McpError::internal_error(other.to_string(), None)),
+            },
             "memory_revisions" => {
                 let args_value = serde_json::Value::Object(request.arguments.unwrap_or_default());
                 let args: MemoryRevisionsArgs = match serde_json::from_value(args_value) {

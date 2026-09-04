@@ -143,8 +143,8 @@ fn handshake_and_retrieve_end_to_end() {
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        5,
-        "expected 5 tools (memory_retrieve + 4 new), got: {tools:?}"
+        6,
+        "expected 6 tools (memory_retrieve + 5 new), got: {tools:?}"
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in &[
@@ -153,6 +153,7 @@ fn handshake_and_retrieve_end_to_end() {
         "memory_list",
         "memory_revisions",
         "memory_ingest",
+        "memory_scopes",
     ] {
         assert!(
             names.contains(expected),

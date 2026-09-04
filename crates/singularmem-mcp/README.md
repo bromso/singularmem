@@ -8,8 +8,8 @@ your personal Singularmem store and use them to ground its responses.
 
 **Status:** sub-project 4b — read + write tools shipped. The server's
 tool surface matches the `singularmem` CLI's operations: retrieve,
-ingest, get, list, revisions. Run with `--read-only` to disable
-ingest for shared-memory deployments.
+ingest, get, list, revisions, scopes. Run with `--read-only` to
+disable ingest for shared-memory deployments.
 
 ## Quick start
 
@@ -83,6 +83,8 @@ the configured (or client-specified) adapter.
 | `query` | string | yes | — | Natural-language query for the search. |
 | `limit` | integer | no | 10 | Maximum number of blocks to return. Clamped to `[1, 50]`. |
 | `adapter` | enum string | no | server default | One of `plain`, `claude`, `openai`, `gemini`. |
+| `scope` | string | no | (none) | Restrict to this scope path and its descendants, e.g. `"claude-code/myproj"`. |
+| `scope_exact` | boolean | no | `false` | Match only the exact scope given in `scope`. |
 
 **Example call:**
 
@@ -138,6 +140,8 @@ semantics). Returns a compact listing with IDs and content snippets.
 |---|---|---|---|---|
 | `tags` | string[] | no | (none) | AND-filter tags. |
 | `limit` | integer | no | 50 | Maximum number of items to return. Clamped to `[1, 100]`. |
+| `scope` | string | no | (none) | Restrict to this scope path and its descendants, e.g. `"claude-code/myproj"`. |
+| `scope_exact` | boolean | no | `false` | Match only the exact scope given in `scope`. |
 
 **Example response:**
 
@@ -185,12 +189,32 @@ memory's ID and timestamp.
 | `source` | string | no | (none) | Optional provenance label. Max 256 bytes. |
 | `supersedes` | string | no | (none) | Optional ULID of an existing memory this one corrects. Must exist in the store. |
 | `metadata` | object | no | `{}` | Optional user-defined JSON object. Soft warning threshold 64 KiB. |
+| `scope` | string | no | (none) | Optional scope path (validated, lowercased). |
 
 **Example response:**
 
 ```
 Ingested memory 01ARZ3NDEKTSV4RRFFQ69G5FAV at 2026-05-18T14:30:00Z
 ```
+
+### `memory_scopes`
+
+Lists every scope path present in the store with its item count,
+sorted by path. Use a returned path as the `scope` argument of
+`memory_list` or `memory_retrieve`.
+
+**Arguments:** none.
+
+**Example response:**
+
+```
+claude-code/singularmem	12
+claude-code/singularmem/auth	3
+work/notes	5
+```
+
+If the store has no scoped items, the response is
+`No scopes (all items are unscoped).`
 
 ## Configuration
 
