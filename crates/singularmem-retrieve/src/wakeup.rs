@@ -24,15 +24,29 @@ impl ScopeSet {
     /// `include_files`, `files/<b>`. A basename that is not a valid scope
     /// segment yields an empty set.
     ///
-    /// `dir` is canonicalised first (falling back to `dir` unchanged if
-    /// canonicalisation fails, e.g. the path does not exist) so that `.` and
-    /// `..` — whose `Path::file_name` is `None` — resolve to the real
-    /// basename instead of silently yielding an empty scope set.
+    /// The basename is taken from `dir` **as given**, not from its canonical
+    /// form: the save side derives `<editor>/<basename of the raw cwd>` the
+    /// editor reported, so canonicalising here would make a symlinked
+    /// project directory (`~/dev/current -> ~/dev/project-v2`) save under
+    /// `current` and wake up under `project-v2`.
+    ///
+    /// `dir` is canonicalised only when its raw basename is unusable —
+    /// `None` (`.` and `..`, whose `Path::file_name` is `None`) or empty —
+    /// so those still resolve to the real basename instead of silently
+    /// yielding an empty scope set. Canonicalisation falling back to `dir`
+    /// unchanged (e.g. the path does not exist) yields an empty set.
     #[must_use]
     pub fn for_project(dir: &Path, include_files: bool) -> Self {
-        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        let Some(base) = dir.file_name().and_then(|b| b.to_str()) else {
-            return Self(Vec::new());
+        let canonical: std::path::PathBuf;
+        let base = match dir.file_name().and_then(|b| b.to_str()) {
+            Some(b) if !b.is_empty() => b,
+            _ => {
+                canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                match canonical.file_name().and_then(|b| b.to_str()) {
+                    Some(b) if !b.is_empty() => b,
+                    _ => return Self(Vec::new()),
+                }
+            }
         };
         let mut prefixes: Vec<&str> = EDITOR_PREFIXES.to_vec();
         if include_files {
@@ -137,32 +151,44 @@ pub fn build(store: &Store, scopes: &ScopeSet, opts: &WakeupOptions) -> crate::R
     })
 }
 
-/// The one-line header that always precedes the rendered blocks.
+/// The one-line header for the *pre-budget* block count (`w.shown`).
+///
+/// [`render`] recomputes its own header with the post-budget count via
+/// [`header_for`]; use this only when no budgeting is applied.
 #[must_use]
 pub fn header(w: &Wakeup) -> String {
+    header_for(w, w.shown)
+}
+
+/// The one-line header that always precedes the rendered blocks, reporting
+/// `kept` as the number of blocks actually shown.
+#[must_use]
+pub fn header_for(w: &Wakeup, kept: usize) -> String {
     format!(
         "# Singularmem wake-up — {} — {} items, showing last {}\n",
         w.scopes.join(", "),
         w.total,
-        w.shown
+        kept
     )
 }
 
-/// Header plus adapter output, dropping the oldest blocks until the whole
-/// string fits in `max_bytes`. The header always survives.
+/// Header plus adapter output, budgeted to `max_bytes`.
+///
+/// Drops the oldest blocks until the whole string fits. The header always
+/// survives, and is recomputed on every iteration so its `showing last N`
+/// reflects the blocks that actually survived the budget rather than the
+/// pre-budget `w.shown`.
 #[must_use]
 pub fn render(w: &Wakeup, adapter: &dyn Adapter, max_bytes: usize) -> String {
-    let head = header(w);
     let mut ctx = w.context.clone();
     loop {
-        let body = if ctx.blocks.is_empty() {
-            String::new()
-        } else {
-            adapter.format(&ctx)
-        };
-        let out = format!("{head}{body}");
-        if out.len() <= max_bytes || ctx.blocks.is_empty() {
-            return if ctx.blocks.is_empty() { head } else { out };
+        let head = header_for(w, ctx.blocks.len());
+        if ctx.blocks.is_empty() {
+            return head;
+        }
+        let out = format!("{head}{}", adapter.format(&ctx));
+        if out.len() <= max_bytes {
+            return out;
         }
         ctx.blocks.remove(0);
     }

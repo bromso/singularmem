@@ -2252,6 +2252,118 @@ fn hook_claude_stop_ingests_transcript_and_session_start_prints_envelope() {
     assert!(ctx.contains("Run cargo test."));
 }
 
+/// The save side scopes items by the basename of the **raw** `cwd` the
+/// editor reported. When that cwd is a symlink (`<tmp>/current ->
+/// <tmp>/real-name`), a `session-start` that canonicalised first would look
+/// under `claude-code/real-name` and find nothing. Stop then session-start
+/// with the same cwd must round-trip.
+#[test]
+#[cfg(unix)]
+fn hook_round_trips_a_symlinked_project_dir() {
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real-name");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("current");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let link_s = link.to_str().unwrap();
+
+    // A one-line transcript whose `cwd` is the symlink path.
+    let transcript = dir.path().join("session.jsonl");
+    let user_line = serde_json::json!({
+        "type": "user",
+        "uuid": "u1",
+        "parentUuid": serde_json::Value::Null,
+        "sessionId": "11111111-2222-3333-4444-555555555555",
+        "timestamp": "2026-09-01T10:00:00.000Z",
+        "cwd": link_s,
+        "isSidechain": false,
+        "message": {"role": "user", "content": "symlinked project question"},
+    });
+    std::fs::write(&transcript, format!("{user_line}\n")).unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let payload = serde_json::json!({
+        "session_id": "s",
+        "transcript_path": transcript,
+        "cwd": link_s,
+        "hook_event_name": "Stop",
+    })
+    .to_string();
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "stop"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("claude-code/current\t1\n");
+
+    let start = serde_json::json!({
+        "session_id": "s",
+        "cwd": link_s,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+    })
+    .to_string();
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "session-start"])
+        .write_stdin(start)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        ctx.contains("claude-code/current"),
+        "wake-up must use the raw basename: {ctx}"
+    );
+    assert!(
+        ctx.contains("1 items"),
+        "wake-up must find the item saved under the symlink's basename: {ctx}"
+    );
+    assert!(ctx.contains("symlinked project question"));
+}
+
+/// Cursor can report several workspace roots for one window; `session-start`
+/// unions every root's scopes (spec: "Cursor multi-root union").
+#[test]
+fn hook_cursor_session_start_unions_workspace_roots() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    for (c, sc) in [("alpha note", "cursor/alpha"), ("beta note", "cursor/beta")] {
+        singularmem()
+            .args(["--store", db_s, "ingest", "--content", c, "--scope", sc])
+            .assert()
+            .success();
+    }
+
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "cursor", "session-start"])
+        .write_stdin(r#"{"workspace_roots":["/w/alpha","/w/beta"],"session_id":"q"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ctx = v["additional_context"].as_str().unwrap();
+    assert!(ctx.contains("cursor/alpha"), "{ctx}");
+    assert!(ctx.contains("cursor/beta"), "{ctx}");
+    assert!(ctx.contains("2 items"), "{ctx}");
+    assert!(
+        ctx.contains("alpha note") && ctx.contains("beta note"),
+        "{ctx}"
+    );
+}
+
 #[test]
 fn hook_never_fails_the_editor() {
     let dir = TempDir::new().unwrap();

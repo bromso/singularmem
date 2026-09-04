@@ -1276,15 +1276,14 @@ fn cmd_wake_up(store: &Store, args: &WakeUpArgs) -> Result<(), CliError> {
     use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
 
     let set = if args.scope.is_empty() {
-        // Route through `canonicalize_project` — the same helper the ingest
-        // commands use — so `--project .` (and any other relative path)
-        // resolves to the real directory before `ScopeSet::for_project`
-        // derives a basename from it. `for_project` also canonicalises
-        // internally, so this is belt-and-suspenders, not load-bearing on
-        // its own; keeping both layers in agreement avoids surprises if one
-        // changes without the other.
-        let dir = match canonicalize_project(args.project.as_ref()) {
-            Some(p) => p,
+        // Pass `--project` through **raw**. The save side derives
+        // `<editor>/<basename of the cwd the editor reported>`, so
+        // canonicalising here would look up a different scope than the one
+        // written for a symlinked project directory. `ScopeSet::for_project`
+        // canonicalises internally only when the raw basename is unusable
+        // (`.`, `..`), which is what makes `--project .` work.
+        let dir = match &args.project {
+            Some(p) => p.clone(),
             None => std::env::current_dir()?,
         };
         ScopeSet::for_project(&dir, args.include_files)
@@ -1441,6 +1440,12 @@ fn cmd_hook_entry(cli: &Cli, args: &HookArgs) -> Result<(), CliError> {
 /// The `SessionStart` hook: build the project's wake-up context (scoped to
 /// `input.cwd`, or the current directory when the editor sends none) and
 /// print it wrapped in the editor's session-start envelope.
+///
+/// Cursor is the one editor that can have several workspace roots open in
+/// the same window, and it reports all of them; the spec calls for the union
+/// of every root's scopes there, rather than just the first one's (which is
+/// all `input.cwd` carries). Duplicate scope paths — two roots with the same
+/// basename — are collapsed so the scope set stays a set.
 fn hook_session_start(
     store: &Store,
     editor: singularmem_hooks::Editor,
@@ -1449,11 +1454,25 @@ fn hook_session_start(
     use singularmem_hooks::session_start_envelope;
     use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
 
-    let dir = match &input.cwd {
-        Some(p) => p.clone(),
-        None => std::env::current_dir()?,
-    };
-    let set = ScopeSet::for_project(&dir, false);
+    let set =
+        if matches!(editor, singularmem_hooks::Editor::Cursor) && input.workspace_roots.len() > 1 {
+            let mut seen = std::collections::HashSet::new();
+            let mut filters = Vec::new();
+            for root in &input.workspace_roots {
+                for f in ScopeSet::for_project(root, false).0 {
+                    if seen.insert(f.path.clone()) {
+                        filters.push(f);
+                    }
+                }
+            }
+            ScopeSet(filters)
+        } else {
+            let dir = match &input.cwd {
+                Some(p) => p.clone(),
+                None => std::env::current_dir()?,
+            };
+            ScopeSet::for_project(&dir, false)
+        };
     let opts = WakeupOptions::default();
     let text = match build(store, &set, &opts) {
         Ok(w) => render(&w, &singularmem_retrieve::PlainAdapter, opts.max_bytes),

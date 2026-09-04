@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use singularmem_core::{NewItem, ScopeFilter, Store};
-use singularmem_retrieve::wakeup::{build, header, render, ScopeSet, WakeupOptions};
+use singularmem_retrieve::wakeup::{build, header, header_for, render, ScopeSet, WakeupOptions};
 use singularmem_retrieve::PlainAdapter;
 use tempfile::TempDir;
 
@@ -90,6 +90,28 @@ fn scope_set_for_project_canonicalizes_dot_and_dot_dot() {
     );
 }
 
+/// The save side derives `claude-code/<basename of the raw cwd>` the editor
+/// reported. If `for_project` canonicalised first, a symlinked project
+/// directory (`<tmp>/current -> <tmp>/real-name`) would save under `current`
+/// and wake up under `real-name` — an empty wake-up. The basename must come
+/// from the raw path.
+#[test]
+#[cfg(unix)]
+fn scope_set_for_project_uses_the_raw_basename_through_a_symlink() {
+    let d = TempDir::new().unwrap();
+    let real = d.path().join("real-name");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = d.path().join("current");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let set = ScopeSet::for_project(&link, false);
+    assert_eq!(
+        set.names(),
+        vec!["claude-code/current", "codex/current", "cursor/current"],
+        "basename must come from the raw path, not the symlink target"
+    );
+}
+
 #[test]
 fn build_returns_recent_items_oldest_to_newest_across_scopes() {
     let (_d, s) = store_with(&[
@@ -134,16 +156,28 @@ fn render_has_header_and_budget_drops_oldest_first() {
     assert!(full.starts_with("# Singularmem wake-up — codex/p — 3 items, showing last 3\n"));
     assert!(full.contains("aaaa") && full.contains("cccc"));
     let small = render(&w, &PlainAdapter, full.len() - 20);
-    assert!(small.starts_with(&header(&w)));
+    // The header must report the *post-budget* count, not the pre-budget
+    // `shown` — one block was dropped, so it says "showing last 2".
+    assert!(
+        small.starts_with("# Singularmem wake-up — codex/p — 3 items, showing last 2\n"),
+        "header must be recomputed after budgeting: {small:?}"
+    );
+    assert_eq!(small.lines().next(), Some(header_for(&w, 2).trim_end()));
+    assert_ne!(
+        small.lines().next(),
+        Some(header(&w).trim_end()),
+        "the pre-budget header would still say 'showing last 3'"
+    );
     assert!(!small.contains("aaaa"), "oldest dropped first");
     assert!(small.contains("cccc"));
     assert!(small.len() <= full.len() - 20);
     let tiny = render(&w, &PlainAdapter, 10);
     assert_eq!(
         tiny.trim_end(),
-        header(&w).trim_end(),
-        "header always survives"
+        header_for(&w, 0).trim_end(),
+        "header always survives, reporting 0 blocks kept"
     );
+    assert!(tiny.contains("showing last 0"));
 }
 
 #[test]
