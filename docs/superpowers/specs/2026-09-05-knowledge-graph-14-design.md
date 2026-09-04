@@ -263,7 +263,7 @@ call `memory_graph_query` for current facts before answering.
 ## Error handling
 
 - `Validation { field: "entity" | "predicate" | "confidence" | "valid_window" | "kind" }` for bad input; nothing written.
-- `NotFound` for invalidate/supersede-old with no open head (supersede tolerates it and reports `old: null`).
+- `FactNotFound { subject, predicate }` (new `Error` variant, exit 2) for invalidate/supersede-old with no open head (supersede tolerates it and reports `old: null`).
 - `ReadOnly` for any writer on a read-only store; exit 2 from the CLI, `invalid_params` from MCP.
 - `source_item_id` that does not exist → `SupersedesNotFound`-style `Validation { field: "source_item_id" }` (checked in the transaction).
 - Migration 3→4 failure leaves the store at 3 (same runner and tests as before).
