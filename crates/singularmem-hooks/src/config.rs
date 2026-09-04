@@ -203,6 +203,12 @@ fn group_is_ours(editor: Editor, group: &Value) -> bool {
 ///
 /// `existing` need not be an object; anything else is treated as `{}`.
 /// Idempotent: merging the result again with the same `bin` is a no-op.
+///
+/// If `existing["hooks"]` is present but is **not** an object (a
+/// hand-edited file, or an unrelated `hooks` setting written by something
+/// else), it cannot be merged into: it is logged with `tracing::warn!` and
+/// replaced by the hooks object we build. Every other key in `existing` is
+/// preserved either way.
 #[must_use]
 pub fn merge(editor: Editor, existing: &Value, bin: &Path) -> Value {
     let mut result = existing.as_object().cloned().unwrap_or_default();
@@ -215,11 +221,18 @@ pub fn merge(editor: Editor, existing: &Value, bin: &Path) -> Value {
         return Value::Object(result);
     };
 
-    let mut hooks_obj = result
-        .get("hooks")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let mut hooks_obj = match result.get("hooks") {
+        Some(Value::Object(obj)) => obj.clone(),
+        Some(other) => {
+            tracing::warn!(
+                found = %other,
+                editor = %editor,
+                "existing \"hooks\" value is not an object; replacing it"
+            );
+            serde_json::Map::new()
+        }
+        None => serde_json::Map::new(),
+    };
 
     for (event_key, our_group) in ours_hooks {
         let our_arr = our_group.as_array().cloned().unwrap_or_default();

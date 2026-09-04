@@ -188,3 +188,25 @@ fn status_detects_ours_and_bin_existence() {
     let stale = merge(Editor::Codex, &json!({}), Path::new("/nope/singularmem"));
     assert!(!status(Editor::Codex, &stale).bin_exists);
 }
+
+/// A config whose `hooks` key holds something other than an object (a
+/// hand-edited file, or another tool's unrelated `hooks` setting) cannot be
+/// merged into. `merge` replaces it with our object and warns, rather than
+/// silently dropping our entries on the floor.
+#[test]
+fn merge_replaces_a_non_object_hooks_value() {
+    for bogus in [json!([]), json!("off"), json!(3), json!(null), json!(true)] {
+        let existing = json!({"keep": "me", "hooks": bogus});
+        let merged = merge(Editor::ClaudeCode, &existing, Path::new(BIN));
+        assert_eq!(merged["keep"], "me", "unrelated keys survive");
+        assert!(
+            merged["hooks"].is_object(),
+            "hooks must be replaced with our object"
+        );
+        assert_eq!(
+            merged["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            format!("\"{BIN}\" hook claude-code session-start")
+        );
+        assert!(status(Editor::ClaudeCode, &merged).installed);
+    }
+}

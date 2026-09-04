@@ -12,8 +12,9 @@ description = "Editor hook envelopes and config-file merging for Singularmem (Cl
 workspace = true
 
 [dependencies]
-serde_json = { workspace = true, features = ["preserve_order"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

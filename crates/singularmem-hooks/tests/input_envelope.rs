@@ -96,3 +96,62 @@ fn config_paths_follow_env_and_project() {
         },
     );
 }
+
+/// On Windows `HOME` is usually unset and `USERPROFILE` is the home
+/// directory; `config_path` must fall back to it rather than failing.
+#[test]
+fn config_path_falls_back_to_userprofile_when_home_is_unset() {
+    let d = tempfile::TempDir::new().unwrap();
+    temp_env::with_vars(
+        [
+            ("HOME", None),
+            ("USERPROFILE", Some(d.path().to_str().unwrap())),
+        ],
+        || {
+            assert_eq!(
+                config_path(Editor::ClaudeCode, None).unwrap(),
+                d.path().join(".claude/settings.json")
+            );
+        },
+    );
+}
+
+/// `HOME` wins when both are set.
+#[test]
+fn config_path_prefers_home_over_userprofile() {
+    let home = tempfile::TempDir::new().unwrap();
+    let profile = tempfile::TempDir::new().unwrap();
+    temp_env::with_vars(
+        [
+            ("HOME", Some(home.path().to_str().unwrap())),
+            ("USERPROFILE", Some(profile.path().to_str().unwrap())),
+        ],
+        || {
+            assert_eq!(
+                config_path(Editor::Codex, None).unwrap(),
+                home.path().join(".codex/hooks.json")
+            );
+        },
+    );
+}
+
+/// With neither variable set and no `--project` override there is no base
+/// directory to join onto, so `config_path` reports `NoHome` rather than
+/// guessing (or panicking).
+#[test]
+fn config_path_without_home_or_userprofile_is_no_home() {
+    temp_env::with_vars([("HOME", None::<&str>), ("USERPROFILE", None)], || {
+        for editor in [Editor::ClaudeCode, Editor::Codex, Editor::Cursor] {
+            match config_path(editor, None) {
+                Err(singularmem_hooks::Error::NoHome) => {}
+                other => panic!("expected Error::NoHome for {editor}, got {other:?}"),
+            }
+        }
+        // An explicit project override still works with no home at all.
+        let p = PathBuf::from("/repo");
+        assert_eq!(
+            config_path(Editor::Cursor, Some(&p)).unwrap(),
+            PathBuf::from("/repo/.cursor/hooks.json")
+        );
+    });
+}
