@@ -2063,6 +2063,58 @@ fn wake_up_project_dot_resolves_via_canonicalize() {
     ));
 }
 
+/// `--project` names the directory the editor actually opened, even when
+/// that path is a symlink to a differently-named target — e.g. Claude
+/// Code's `current` symlink under a Codex-style session layout. Scoping must
+/// key off the link's own basename (`current`), not the resolved target's
+/// (`real-name`), since that is the name the transcript was ingested under.
+#[test]
+#[cfg(unix)]
+fn wake_up_project_symlink_uses_link_name() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real-name");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("current");
+    symlink(&real, &link).unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest",
+            "--content",
+            "note via symlink",
+            "--scope",
+            "claude-code/current",
+        ])
+        .assert()
+        .success();
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--project",
+            link.to_str().unwrap(),
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    let header = text.lines().next().unwrap();
+    assert!(header.contains("claude-code/current"), "{header}");
+    assert!(header.contains("1 items"), "{header}");
+}
+
 #[test]
 fn wake_up_text_format_defaults_to_project_editor_scopes() {
     let (_dir, db) = wake_up_test_store();
@@ -2504,6 +2556,49 @@ fn hook_cursor_stop_ingests_only_that_conversation() {
         .success()
         .stdout(predicate::str::contains("two"))
         .stdout(predicate::str::contains("one").not());
+}
+
+/// A payload with `conversation_id` but no `cwd` falls back to the first
+/// `workspace_roots` entry as `cwd` (see `singularmem_hooks::input::parse_input`).
+/// When that entry names the wrong workspace, the `cwd`-filtered scan finds
+/// nothing at all — not even an existing item skipped as a duplicate — and
+/// the hook must retry once across every workspace rather than losing the
+/// transcript.
+#[test]
+fn hook_cursor_stop_retries_across_workspaces_when_cwd_guess_misses() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/other"),
+            composers: vec![(
+                "c1",
+                "A",
+                1_700_000_000_000,
+                vec![FixtureBubble {
+                    id: "b1",
+                    kind: 1,
+                    text: "found me anyway",
+                }],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db_s, "hook", "cursor", "stop"])
+        .write_stdin(r#"{"conversation_id":"c1","workspace_roots":["/w/nomatch"]}"#)
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("found me anyway"));
 }
 
 #[test]

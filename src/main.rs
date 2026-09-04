@@ -660,12 +660,15 @@ const INDEX_LOCK_ATTEMPTS: u32 = 5;
 const INDEX_LOCK_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Whether `e` is Tantivy's writer-lockfile contention, as opposed to a
-/// corrupt or schema-mismatched sidecar. Matched on the rendered message
-/// (case-insensitively, so both `Lockfile` and `lock` hit) because the
-/// lock failure arrives wrapped in `tantivy::TantivyError` with no
-/// dedicated variant to match on.
+/// corrupt or schema-mismatched sidecar. Matched on the rendered message,
+/// lowercased, against Tantivy's actual lock-failure wording (`"lockfile"`
+/// or `"failed to acquire lock"`) because the lock failure arrives wrapped
+/// in `tantivy::TantivyError` with no dedicated variant to match on. A bare
+/// `contains("lock")` is too broad — it misfires on paths like
+/// `~/dev/blockchain` appearing in an unrelated error message.
 fn is_index_lock_error(e: &singularmem_search::Error) -> bool {
-    e.to_string().to_lowercase().contains("lock")
+    let msg = e.to_string().to_lowercase();
+    msg.contains("lockfile") || msg.contains("failed to acquire lock")
 }
 
 /// Open the Tantivy sidecar at `path`, retrying a writer-lock conflict with
@@ -1676,7 +1679,23 @@ fn hook_ingest_cursor(
     let mut src = CursorChats::open(&user)?;
     src.conversation_filter.clone_from(&input.conversation_id);
     src.project_filter.clone_from(&input.cwd);
-    Ok(ingest_source(store, &src, false)?)
+    let report = ingest_source(store, &src, false)?;
+
+    // A known `conversation_id` whose project-filtered scan turned up
+    // nothing at all (not even an existing item skipped as a duplicate)
+    // means `cwd` named the wrong workspace — e.g. the payload only carried
+    // `workspace_roots`, whose first entry became `cwd` (see
+    // `singularmem_hooks::input::parse_input`), but the conversation lives
+    // under a different one of those roots. Retry once across every
+    // workspace rather than losing the transcript.
+    if input.conversation_id.is_some() && report.ingested == 0 && report.skipped_existing == 0 {
+        tracing::warn!("cursor conversation not found under cwd; retrying across all workspaces");
+        let mut retry = CursorChats::open(&user)?;
+        retry.conversation_filter.clone_from(&input.conversation_id);
+        return Ok(ingest_source(store, &retry, false)?);
+    }
+
+    Ok(report)
 }
 
 /// `hooks install|uninstall|status`. Never opens the store — see the
@@ -2124,5 +2143,32 @@ mod tests {
             start.elapsed() < std::time::Duration::from_millis(200),
             "must not have slept"
         );
+    }
+
+    /// A bare `contains("lock")` would misfire on an unrelated error whose
+    /// message happens to mention a path like `~/dev/blockchain`. Matching
+    /// must require Tantivy's actual lock-failure wording.
+    #[test]
+    fn is_index_lock_error_does_not_misfire_on_unrelated_lock_substring() {
+        let err = singularmem_search::Error::Tantivy {
+            context: "opening index",
+            source: tantivy::TantivyError::SystemError(
+                "no such directory: ~/dev/blockchain".to_string(),
+            ),
+        };
+        assert!(!is_index_lock_error(&err), "not a lock error: {err}");
+    }
+
+    /// Tantivy's real wording ("Failed to acquire Lockfile") must still be
+    /// recognised regardless of case.
+    #[test]
+    fn is_index_lock_error_recognises_tantivys_actual_wording() {
+        let err = singularmem_search::Error::Tantivy {
+            context: "opening index",
+            source: tantivy::TantivyError::SystemError(
+                "Failed to acquire Lockfile: try again".to_string(),
+            ),
+        };
+        assert!(is_index_lock_error(&err), "expected a lock error: {err}");
     }
 }

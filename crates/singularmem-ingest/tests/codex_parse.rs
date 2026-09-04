@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use singularmem_ingest::{discover_codex_sessions, CodexRollout, Source};
+use singularmem_ingest::{default_codex_root, discover_codex_sessions, CodexRollout, Source};
 
 fn fx(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -130,4 +130,25 @@ fn discover_finds_rollout_files_only() {
         .to_str()
         .unwrap()
         .starts_with("rollout-"));
+}
+
+/// On Windows `HOME` is usually unset and `USERPROFILE` is the home
+/// directory; `default_codex_root` must fall back to it rather than
+/// returning `None`.
+#[test]
+fn default_codex_root_falls_back_to_userprofile_when_home_is_unset() {
+    temp_env::with_vars(
+        [
+            ("HOME", None::<&str>),
+            ("USERPROFILE", Some("/Users/example")),
+        ],
+        || {
+            let root = default_codex_root().unwrap();
+            assert!(
+                root.ends_with(".codex/sessions"),
+                "expected root to end with .codex/sessions, got {}",
+                root.display()
+            );
+        },
+    );
 }

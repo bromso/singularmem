@@ -95,13 +95,14 @@ run.
 Reads one JSON payload from stdin (the exact shape the editor sends
 for that event) and either:
 
-- **`session-start`** — resolves the project directory (`cwd` from the
-  payload; for Cursor, the first entry of `workspace_roots` when `cwd`
-  is absent; otherwise the current directory), builds the wake-up
-  context for that project's `claude-code/<project>`, `codex/<project>`,
-  and `cursor/<project>` scopes with the `plain` adapter and default
-  wake-up options (20 items, 8192-byte budget), and prints it wrapped
-  in the editor's `SessionStart` envelope.
+- **`session-start`** — resolves the project scope(s): for Cursor with
+  more than one `workspace_roots` entry, the union of every entry's scopes
+  (ignoring `cwd` entirely); otherwise the single project directory —
+  `cwd` from the payload, or the current directory when `cwd` is absent.
+  Builds the wake-up context for that project's `claude-code/<project>`,
+  `codex/<project>`, and `cursor/<project>` scopes with the `plain`
+  adapter and default wake-up options (20 items, 8192-byte budget), and
+  prints it wrapped in the editor's `SessionStart` envelope.
 - **`stop` / `pre-compact` / `session-end`** — ingests the session
   transcript:
   - **Claude Code** ingests `transcript_path` from the payload.

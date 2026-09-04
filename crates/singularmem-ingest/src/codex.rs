@@ -310,8 +310,11 @@ impl Source for CodexRollout {
 /// `$HOME/.codex/sessions`, if a home directory is known.
 ///
 /// Falls back to `%USERPROFILE%` when `HOME` is unset, so the default
-/// resolves on Windows too — the same fallback [`crate::default_cursor_user_dir`]
-/// and the hooks crate's `config_path` use.
+/// resolves on Windows too — the same `HOME`-then-`USERPROFILE` fallback
+/// the hooks crate's `config_path` uses. This is *not* what
+/// [`crate::default_cursor_user_dir`] does: that function keys off
+/// `target_os` directly and uses `%APPDATA%` (not `USERPROFILE`) on
+/// Windows, `HOME` everywhere else, with no fallback between the two.
 #[must_use]
 pub fn default_codex_root() -> Option<PathBuf> {
     std::env::var_os("HOME")

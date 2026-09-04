@@ -48,11 +48,15 @@ pub struct Store {
 /// through the busy handler, so `busy_timeout` does not cover it. Two
 /// processes opening the same store at the same moment (a burst of editor
 /// hooks on a brand-new machine) therefore race. Retry a bounded number of
-/// times, and treat "already `wal`" as success: the journal mode is a
+/// times, doubling the delay each attempt up to a cap so the total retry
+/// budget is roughly in line with the 5-second `busy_timeout` set alongside
+/// it, and treat "already `wal`" as success: the journal mode is a
 /// persistent property of the file, so whoever won the race set it for
 /// everyone.
 fn set_wal_journal_mode(conn: &Connection) -> Result<()> {
     const ATTEMPTS: u32 = 10;
+    const BASE_DELAY_MS: u64 = 50;
+    const MAX_DELAY_MS: u64 = 500;
 
     let mut last = None;
     for attempt in 0..ATTEMPTS {
@@ -66,7 +70,10 @@ fn set_wal_journal_mode(conn: &Connection) -> Result<()> {
                     return Ok(());
                 }
                 last = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt + 1)));
+                let delay_ms = BASE_DELAY_MS
+                    .saturating_mul(1u64 << attempt.min(31))
+                    .min(MAX_DELAY_MS);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
         }
     }
