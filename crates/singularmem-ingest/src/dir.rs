@@ -38,6 +38,10 @@ pub struct DirectoryWalker {
     /// Explicit scope override; wins over the root-basename-derived default.
     /// Left `None` for [`DirectoryWalker::default_scope`] to derive one.
     pub scope_override: Option<String>,
+    /// The root-basename-derived scope, computed once in [`Self::new`]
+    /// (the root does not change per-item, so there is nothing to
+    /// recompute — and nothing to re-warn about — per item).
+    derived_scope: Option<String>,
     filtered: Cell<usize>,
     visited: Cell<usize>,
 }
@@ -59,24 +63,36 @@ impl DirectoryWalker {
             path: root.to_path_buf(),
             source,
         })?;
+        let derived_scope = Self::compute_derived_scope(&root);
         Ok(Self {
             root,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             scope_override: None,
+            derived_scope,
             filtered: Cell::new(0),
             visited: Cell::new(0),
         })
     }
 
     /// Derive `files/<root-basename>`, or `None` if the root has no
-    /// basename or the basename is not a valid scope segment.
-    fn derived_scope(&self) -> Option<String> {
-        let base = self.root.file_name()?.to_str()?;
+    /// basename, the basename is not valid UTF-8, or the basename is not a
+    /// valid scope segment. Called once from [`Self::new`]; every failure
+    /// mode is logged since a root, unlike a transcript `cwd`, is never
+    /// legitimately absent.
+    fn compute_derived_scope(root: &Path) -> Option<String> {
+        let Some(base) = root.file_name() else {
+            tracing::warn!(root = %root.display(), "root has no basename; items left unscoped");
+            return None;
+        };
+        let Some(base) = base.to_str() else {
+            tracing::warn!(root = %root.display(), "root basename is not valid UTF-8; items left unscoped");
+            return None;
+        };
         match singularmem_core::scope::validate(&format!("files/{base}")) {
             Ok(s) => Some(s),
             Err(e) => {
-                tracing::warn!(root = %self.root.display(), error = %e, "root basename is not a valid scope segment; items left unscoped");
+                tracing::warn!(root = %root.display(), error = %e, "root basename is not a valid scope segment; items left unscoped");
                 None
             }
         }
@@ -232,10 +248,19 @@ impl Source for DirectoryWalker {
     }
 
     fn default_scope(&self, _item: &NewItem) -> Option<String> {
-        self.scope_override.as_ref().map_or_else(
-            || self.derived_scope(),
-            |o| singularmem_core::scope::validate(o).ok(),
-        )
+        if let Some(o) = &self.scope_override {
+            match singularmem_core::scope::validate(o) {
+                Ok(s) => return Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        r#override = %o,
+                        error = %e,
+                        "ignoring invalid scope override; using derived scope"
+                    );
+                }
+            }
+        }
+        self.derived_scope.clone()
     }
 }
 

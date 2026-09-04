@@ -4,7 +4,7 @@
 //! payloads, tool results, and thinking blocks are skipped; tool names
 //! are recorded in metadata.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -33,6 +33,10 @@ pub struct ClaudeTranscript {
     /// `None` for [`ClaudeTranscript::default_scope`] to derive one.
     pub scope_override: Option<String>,
     filtered: Cell<usize>,
+    /// Memoises the last `(cwd, derived scope)` pair so a transcript whose
+    /// lines share one `cwd` (the common case) only warns once on an
+    /// invalid basename, rather than once per item.
+    derived_memo: RefCell<Option<(String, Option<String>)>>,
 }
 
 #[derive(Deserialize)]
@@ -116,6 +120,7 @@ impl ClaudeTranscript {
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             scope_override: None,
             filtered: Cell::new(0),
+            derived_memo: RefCell::new(None),
         })
     }
 
@@ -228,10 +233,34 @@ impl ClaudeTranscript {
 
     /// Derive `claude-code/<cwd-basename>` from `item.metadata.cwd`, or
     /// `None` if `cwd` is absent, has no basename, or the basename is not a
-    /// valid scope segment.
-    fn derived_scope(item: &NewItem) -> Option<String> {
+    /// valid scope segment. Memoised per `cwd` so a transcript whose lines
+    /// share one `cwd` only logs once.
+    ///
+    /// A missing `cwd` is normal for some transcript lines (e.g. structural
+    /// entries) and stays silent; a `cwd` that fails to yield a valid scope
+    /// segment is logged.
+    fn derived_scope(&self, item: &NewItem) -> Option<String> {
         let cwd = item.metadata.get("cwd")?.as_str()?;
-        let base = Path::new(cwd).file_name()?.to_str()?;
+        if let Some((seen, result)) = self.derived_memo.borrow().as_ref() {
+            if seen == cwd {
+                return result.clone();
+            }
+        }
+        let result = Self::compute_derived_scope(cwd);
+        *self.derived_memo.borrow_mut() = Some((cwd.to_string(), result.clone()));
+        result
+    }
+
+    /// Actually derive the scope for a given `cwd`, logging on any failure.
+    fn compute_derived_scope(cwd: &str) -> Option<String> {
+        let Some(base) = Path::new(cwd).file_name() else {
+            tracing::warn!(cwd, "cwd has no basename; item left unscoped");
+            return None;
+        };
+        let Some(base) = base.to_str() else {
+            tracing::warn!(cwd, "cwd basename is not valid UTF-8; item left unscoped");
+            return None;
+        };
         match singularmem_core::scope::validate(&format!("claude-code/{base}")) {
             Ok(s) => Some(s),
             Err(e) => {
@@ -351,10 +380,19 @@ impl Source for ClaudeTranscript {
     }
 
     fn default_scope(&self, item: &NewItem) -> Option<String> {
-        self.scope_override.as_ref().map_or_else(
-            || Self::derived_scope(item),
-            |o| singularmem_core::scope::validate(o).ok(),
-        )
+        if let Some(o) = &self.scope_override {
+            match singularmem_core::scope::validate(o) {
+                Ok(s) => return Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        r#override = %o,
+                        error = %e,
+                        "ignoring invalid scope override; using derived scope"
+                    );
+                }
+            }
+        }
+        self.derived_scope(item)
     }
 }
 

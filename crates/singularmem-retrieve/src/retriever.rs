@@ -24,6 +24,12 @@ pub struct RetrieveOptions {
     /// `None`. Copied onto `search.scope` before searching (this field is
     /// the source of truth for scope filtering — a scope set directly on
     /// `search` is overwritten).
+    ///
+    /// When this is `Some` and `searcher` has no scope lookup attached,
+    /// [`Retriever::retrieve`] supplies its own `store` as the lookup
+    /// automatically, so semantic and hybrid searches do not need
+    /// `HybridSearcher::with_scope_lookup` called ahead of time. A lookup
+    /// explicitly attached to `searcher` is respected and left untouched.
     pub scope: Option<ScopeFilter>,
 }
 
@@ -123,7 +129,12 @@ impl<'a> Retriever<'a> {
         let start = std::time::Instant::now();
         let mut search_opts = opts.search.clone();
         search_opts.scope.clone_from(&opts.scope);
-        let results = self.searcher.search(query, &search_opts)?;
+        let searcher = if opts.scope.is_some() && !self.searcher.has_scope_lookup() {
+            (*self.searcher).with_scope_lookup(self.store)
+        } else {
+            *self.searcher
+        };
+        let results = searcher.search(query, &search_opts)?;
         let total_considered = results.total_fused;
 
         let blocks: crate::Result<Vec<MemoryBlock>> = results
@@ -363,6 +374,46 @@ mod tests {
             ..Default::default()
         };
         let r = retriever.retrieve("zebra", &opts).expect("ok");
+        assert_eq!(r.blocks.len(), 1, "expected only the in-scope hit");
+        assert_eq!(r.blocks[0].scope.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn scoped_retrieve_works_on_hybrid_searcher_without_explicit_lookup() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+        let sem_path = dir.path().join("sem");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let sem_hook = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        let multi =
+            singularmem_core::hook::MultiHook::new(vec![Box::new(lex_hook), Box::new(sem_hook)]);
+        let store = Store::open_with_hook(&store_path, Box::new(multi)).unwrap();
+        let mut inside = NewItem::text("zebra inside");
+        inside.scope = Some("a".into());
+        let mut outside = NewItem::text("zebra outside");
+        outside.scope = Some("x".into());
+        store.ingest(inside).unwrap();
+        store.ingest(outside).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let store = Store::open(&store_path).unwrap();
+        let lex = Index::open(&lex_path).unwrap();
+        let sem = EmbedderIndex::open(&sem_path, Box::new(MockEmbedder::default())).unwrap();
+        // No `with_scope_lookup` attached — the retriever must supply its
+        // own `store` as the lookup.
+        let searcher = HybridSearcher::new(&lex, &sem);
+        let retriever = Retriever::new(&store, &searcher);
+        let opts = RetrieveOptions {
+            min_score: 0.0,
+            scope: Some(singularmem_core::ScopeFilter::descendants("a").unwrap()),
+            ..Default::default()
+        };
+        let r = retriever
+            .retrieve("zebra", &opts)
+            .expect("retrieve should succeed using the retriever's own scope lookup");
         assert_eq!(r.blocks.len(), 1, "expected only the in-scope hit");
         assert_eq!(r.blocks[0].scope.as_deref(), Some("a"));
     }

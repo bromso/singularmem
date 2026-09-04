@@ -105,6 +105,7 @@ use crate::vector_index::EmbedderIndex;
 /// [`HybridSearcher::semantic_only`] depending on what's available at the call
 /// site. The CLI's `cmd_search` chooses based on directory probes when
 /// `--mode auto`; explicit modes pick directly.
+#[derive(Clone, Copy)]
 pub struct HybridSearcher<'a> {
     /// Lexical (Tantivy) index, when available.
     pub lexical: Option<&'a Index>,
@@ -154,6 +155,14 @@ impl<'a> HybridSearcher<'a> {
     pub const fn with_scope_lookup(mut self, lookup: &'a dyn ScopeLookup) -> Self {
         self.scope_lookup = Some(lookup);
         self
+    }
+
+    /// True when a [`ScopeLookup`] has been attached via
+    /// [`Self::with_scope_lookup`]. Lets callers (e.g. `singularmem-retrieve`)
+    /// decide whether to supply their own lookup without exposing the field.
+    #[must_use]
+    pub const fn has_scope_lookup(&self) -> bool {
+        self.scope_lookup.is_some()
     }
 }
 
