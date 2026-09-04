@@ -160,7 +160,7 @@ impl Store {
                     found: "<missing>".to_string(),
                     max_supported: FORMAT_VERSION,
                 })?;
-            if version == "1" {
+            if version == "1" || version == "2" {
                 return Err(Error::Migration {
                     from: version,
                     to: FORMAT_VERSION,
@@ -181,7 +181,11 @@ impl Store {
                     schema::apply_current(&conn, &now)?;
                 }
                 Some(v) if v == FORMAT_VERSION => { /* already current */ }
-                Some(v) if v == "1" => schema::migrate_1_to_2(&mut conn)?,
+                Some(v) if v == "1" => {
+                    schema::migrate_1_to_2(&mut conn)?;
+                    schema::migrate_2_to_3(&mut conn)?;
+                }
+                Some(v) if v == "2" => schema::migrate_2_to_3(&mut conn)?,
                 Some(other) => {
                     return Err(Error::UnsupportedFormatVersion {
                         found: other,

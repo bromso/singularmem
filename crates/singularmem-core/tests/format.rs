@@ -45,8 +45,12 @@ fn open_core_only_round_trip() {
     keyed.external_id = Some("test:keyed".into());
     let _keyed = store.ingest(keyed).unwrap();
 
+    let mut scoped = NewItem::text("scoped note");
+    scoped.scope = Some("Rt/Scope".into());
+    let _scoped = store.ingest(scoped).unwrap();
+
     let originals: Vec<Item> = store.list().unwrap().map(|r| r.unwrap()).collect();
-    assert_eq!(originals.len(), 5);
+    assert_eq!(originals.len(), 6);
 
     // Export to a buffer.
     let mut buf = Vec::new();
@@ -55,11 +59,11 @@ fn open_core_only_round_trip() {
     // Manually re-parse the JSONL: skip meta line, parse items.
     let text = String::from_utf8(buf.clone()).expect("utf8");
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 6, "1 meta + 5 items");
+    assert_eq!(lines.len(), 7, "1 meta + 6 items");
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(meta["_singularmem_format"], "export-v1");
-    assert_eq!(meta["store_format_version"], "2");
+    assert_eq!(meta["store_format_version"], "3");
 
     // Parse each item line as a serde-deserialised Item to prove the wire
     // shape is round-trip-compatible with the type itself.
@@ -109,6 +113,11 @@ fn open_core_only_round_trip() {
     assert!(parsed_items
         .iter()
         .any(|i| i.external_id.as_deref() == Some("test:keyed")));
+
+    // Cross-check: the scope survived, normalised.
+    assert!(parsed_items
+        .iter()
+        .any(|i| i.scope.as_deref() == Some("rt/scope")));
 
     // Last sanity check: the export is deterministic byte-for-byte across
     // two runs of the same store. (Cannot include exported_at in this

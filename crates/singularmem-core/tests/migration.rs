@@ -1,6 +1,7 @@
-//! Store format 1 → 2 migration. Builds a v1 store with raw SQL (the exact
-//! DDL from `docs/formats/store-v1.md`), opens it with the current binary,
-//! and asserts it is upgraded in place with all data intact.
+//! Store format migrations (1 → 2 → 3). Builds v1 and v2 stores with raw
+//! SQL (the exact DDL from `docs/formats/store-v1.md` and the 1 → 2
+//! migration statements), opens them with the current binary, and asserts
+//! each is upgraded in place with all data intact.
 
 use rusqlite::Connection;
 use singularmem_core::{Error, Store, StoreOptions};
@@ -34,13 +35,25 @@ fn make_v1(dir: &TempDir) -> std::path::PathBuf {
     path
 }
 
+fn make_v2(dir: &TempDir) -> std::path::PathBuf {
+    let path = make_v1(dir);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE items ADD COLUMN external_id TEXT;
+         CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+         UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';",
+    )
+    .unwrap();
+    path
+}
+
 #[test]
-fn v1_store_migrates_to_v2_on_open() {
+fn v1_store_migrates_to_v3_on_open() {
     let dir = TempDir::new().unwrap();
     let path = make_v1(&dir);
 
     let store = Store::open(&path).expect("open migrates");
-    assert_eq!(store.format_version().unwrap(), "2");
+    assert_eq!(store.format_version().unwrap(), "3");
 
     let item = store
         .get("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap())
@@ -90,7 +103,7 @@ fn newer_store_still_refused() {
     let path = make_v1(&dir);
     let conn = Connection::open(&path).unwrap();
     conn.execute(
-        "UPDATE singularmem_meta SET value='3' WHERE key='format_version'",
+        "UPDATE singularmem_meta SET value='4' WHERE key='format_version'",
         [],
     )
     .unwrap();
@@ -100,27 +113,28 @@ fn newer_store_still_refused() {
 }
 
 /// Simulates the losing side of a migration race: another process already
-/// completed the 1 -> 2 migration (full DDL + meta bump) by the time this
-/// one opens the file. `Store::open` must still succeed and see version 2 —
-/// whether it takes the "already current" fast path or re-enters
-/// `migrate_1_to_2`'s in-transaction re-check, the outcome is the same.
+/// completed the 1 -> 2 -> 3 migration chain (full DDL + meta bump) by the
+/// time this one opens the file. `Store::open` must still succeed and see
+/// version 3 — whether it takes the "already current" fast path or
+/// re-enters a migration function's in-transaction re-check, the outcome is
+/// the same.
 #[test]
-fn already_migrated_v1_fixture_opens_cleanly_as_v2() {
+fn already_migrated_v2_fixture_opens_cleanly_as_v3() {
     let dir = TempDir::new().unwrap();
-    let path = make_v1(&dir);
+    let path = make_v2(&dir);
 
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE items ADD COLUMN external_id TEXT;
-             CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
-             UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';",
+            "ALTER TABLE items ADD COLUMN scope TEXT;
+             CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+             UPDATE singularmem_meta SET value = '3' WHERE key = 'format_version';",
         )
         .unwrap();
     }
 
     let store = Store::open(&path).expect("open of already-migrated fixture succeeds");
-    assert_eq!(store.format_version().unwrap(), "2");
+    assert_eq!(store.format_version().unwrap(), "3");
 }
 
 /// Failure path: the migration's `CREATE UNIQUE INDEX idx_items_external_id`
@@ -166,11 +180,11 @@ fn conflicting_index_name_fails_migration_and_leaves_v1_intact() {
 }
 
 #[test]
-fn fresh_store_is_v2_with_external_id_column() {
+fn fresh_store_is_v3_with_external_id_column() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("fresh.db");
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.format_version().unwrap(), "2");
+    assert_eq!(store.format_version().unwrap(), "3");
     let mut item = singularmem_core::NewItem::text("x");
     item.external_id = Some("test:1".into());
     let stored = store.ingest(item).unwrap();
@@ -182,7 +196,7 @@ fn fresh_store_is_v2_with_external_id_column() {
 }
 
 /// Plan acceptance criterion 5: a v1 store written by an older binary opens
-/// under the current one and exports cleanly at `store_format_version = 2`.
+/// under the current one and exports cleanly at `store_format_version = 3`.
 #[test]
 fn migrated_v1_store_exports_cleanly() {
     let dir = TempDir::new().unwrap();
@@ -196,7 +210,7 @@ fn migrated_v1_store_exports_cleanly() {
 
     let meta: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(meta["_kind"], "meta");
-    assert_eq!(meta["store_format_version"], "2");
+    assert_eq!(meta["store_format_version"], "3");
 
     let item: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(item["_kind"], "item");
@@ -208,4 +222,116 @@ fn migrated_v1_store_exports_cleanly() {
         "a migrated legacy row carries no external_id: {item}"
     );
     assert!(lines.next().is_none(), "exactly one item line");
+}
+
+#[test]
+fn v2_store_migrates_to_v3_on_open() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v2(&dir);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.format_version().unwrap(), "3");
+    let item = store
+        .get("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap())
+        .unwrap();
+    assert_eq!(item.scope, None);
+    drop(store);
+    let conn = Connection::open(&path).unwrap();
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(cols.contains(&"scope".to_string()));
+    let idx: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_items_scope'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 1);
+}
+
+#[test]
+fn v1_store_migrates_through_the_chain_to_v3() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v1(&dir);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.format_version().unwrap(), "3");
+    let conn = Connection::open(&path).unwrap();
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(cols.contains(&"external_id".to_string()) && cols.contains(&"scope".to_string()));
+}
+
+#[test]
+fn failing_2_to_3_leaves_store_at_v2_and_readable() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v2(&dir);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE INDEX idx_items_scope ON items(source);")
+        .unwrap();
+    drop(conn);
+    let err = Store::open(&path).unwrap_err();
+    assert!(
+        matches!(err, Error::Migration { ref from, to: "3", .. } if from == "2"),
+        "{err:?}"
+    );
+    let conn = Connection::open(&path).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM singularmem_meta WHERE key='format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, "2");
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!cols.contains(&"scope".to_string()));
+}
+
+#[test]
+fn read_only_v2_refuses_to_migrate() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v2(&dir);
+    let err = Store::open_with_options(&path, StoreOptions { read_only: true }).unwrap_err();
+    assert!(matches!(err, Error::Migration { .. }));
+}
+
+#[test]
+fn fresh_store_is_v3_and_round_trips_scope() {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("f.db")).unwrap();
+    assert_eq!(store.format_version().unwrap(), "3");
+    let mut n = singularmem_core::NewItem::text("x");
+    n.scope = Some("Proj/Sub".into());
+    let stored = store.ingest(n).unwrap();
+    assert_eq!(
+        stored.scope.as_deref(),
+        Some("proj/sub"),
+        "normalised at ingest"
+    );
+    assert_eq!(
+        store.get(stored.id).unwrap().scope.as_deref(),
+        Some("proj/sub")
+    );
+    let mut bad = singularmem_core::NewItem::text("y");
+    bad.scope = Some("a//b".into());
+    assert!(matches!(
+        store.ingest(bad),
+        Err(Error::Validation { field: "scope", .. })
+    ));
 }

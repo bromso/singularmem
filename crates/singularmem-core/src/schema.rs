@@ -1,11 +1,11 @@
-//! SQL DDL for `format_version = 2` and the migration runner.
+//! SQL DDL for `format_version = 3` and the migration runner.
 
 use crate::error::{Error, Result};
 use crate::format::FORMAT_VERSION;
 
-/// The full v2 DDL for a fresh store: v1 plus the nullable, unique
-/// `external_id` column. Spec: `docs/formats/store-v2.md`.
-const DDL_V2: &str = "
+/// The full v3 DDL for a fresh store: v2 plus the nullable, indexed `scope`
+/// column. Spec: `docs/formats/store-v3.md`.
+const DDL_V3: &str = "
 CREATE TABLE singularmem_meta (
     key    TEXT PRIMARY KEY NOT NULL,
     value  TEXT NOT NULL
@@ -19,6 +19,7 @@ CREATE TABLE items (
     source       TEXT,
     metadata     TEXT NOT NULL DEFAULT '{}',
     external_id  TEXT,
+    scope        TEXT,
     FOREIGN KEY (supersedes) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
     CHECK (length(content) > 0),
     CHECK (length(content) <= 1048576),
@@ -36,76 +37,112 @@ CREATE INDEX idx_items_created_at ON items(created_at);
 CREATE INDEX idx_items_supersedes ON items(supersedes) WHERE supersedes IS NOT NULL;
 CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
 ";
 
 /// DDL applied by the 1 → 2 migration (excluding the `BEGIN`/`COMMIT`
 /// bracketing, which is handled in Rust so the transaction can be inspected
-/// and conditionally rolled back — see `migrate_1_to_2`).
+/// and conditionally rolled back — see `run_migration`).
 const MIGRATE_1_TO_2_DDL: &str = "
 ALTER TABLE items ADD COLUMN external_id TEXT;
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
 ";
 
+/// DDL applied by the 2 → 3 migration (same transactional shape as 1 → 2;
+/// see `run_migration`).
+const MIGRATE_2_TO_3_DDL: &str = "
+ALTER TABLE items ADD COLUMN scope TEXT;
+CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+";
+
 /// Apply the 1 → 2 migration.
-///
-/// Uses `BEGIN IMMEDIATE` to take the write lock up front (avoiding a
-/// deferred-transaction upgrade race against another writer), then re-reads
-/// `format_version` inside the transaction: if another process already won
-/// the race and migrated the store to 2 while we were waiting for the lock,
-/// this is a no-op (the transaction is rolled back — nothing to commit — and
-/// `Ok(())` is returned). Otherwise the DDL and meta update are applied and
-/// committed together.
 ///
 /// # Errors
 ///
 /// Returns `Error::Migration` if any statement fails; the transaction is
 /// rolled back and the store is left at format version 1.
 pub fn migrate_1_to_2(conn: &mut rusqlite::Connection) -> Result<()> {
+    run_migration(conn, "1", "2", MIGRATE_1_TO_2_DDL)
+}
+
+/// Apply the 2 → 3 migration.
+///
+/// # Errors
+///
+/// Returns `Error::Migration { from: "2", to: "3", .. }` if any statement
+/// fails; the transaction is rolled back and the store is left at format
+/// version 2.
+pub fn migrate_2_to_3(conn: &mut rusqlite::Connection) -> Result<()> {
+    run_migration(conn, "2", "3", MIGRATE_2_TO_3_DDL)
+}
+
+/// Run a single-step format migration from `from` to `to`, applying `ddl`.
+///
+/// Uses `BEGIN IMMEDIATE` to take the write lock up front (avoiding a
+/// deferred-transaction upgrade race against another writer), then re-reads
+/// `format_version` inside the transaction: if it no longer equals `from`
+/// (another process already migrated the store while we were waiting for
+/// the lock), this is a no-op — the transaction is rolled back and `Ok(())`
+/// is returned. Otherwise `ddl` and the meta update are applied and
+/// committed together.
+///
+/// # Errors
+///
+/// Returns `Error::Migration { from, to, .. }` if any statement fails; the
+/// transaction is rolled back and the store is left at `from`.
+fn run_migration(
+    conn: &mut rusqlite::Connection,
+    from: &'static str,
+    to: &'static str,
+    ddl: &str,
+) -> Result<()> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| migration_err(e.to_string()))?;
+        .map_err(|e| migration_err(from, to, e.to_string()))?;
 
-    let current = read_format_version(&tx).map_err(|e| migration_err(e.to_string()))?;
-    if current.as_deref() == Some(FORMAT_VERSION) {
-        // Another process already completed the migration before we
-        // acquired the write lock; nothing left to do.
-        tx.rollback().map_err(|e| migration_err(e.to_string()))?;
+    let current = read_format_version(&tx).map_err(|e| migration_err(from, to, e.to_string()))?;
+    if current.as_deref() != Some(from) {
+        // Another process already completed this migration (or moved the
+        // store past it) before we acquired the write lock; nothing left
+        // to do.
+        tx.rollback()
+            .map_err(|e| migration_err(from, to, e.to_string()))?;
         return Ok(());
     }
 
-    if let Err(e) = tx.execute_batch(MIGRATE_1_TO_2_DDL) {
+    if let Err(e) = tx.execute_batch(ddl) {
         let _ = tx.rollback();
-        return Err(migration_err(e.to_string()));
+        return Err(migration_err(from, to, e.to_string()));
     }
 
     if let Err(e) = tx.execute(
         "UPDATE singularmem_meta SET value = ?1 WHERE key = 'format_version'",
-        rusqlite::params![FORMAT_VERSION],
+        rusqlite::params![to],
     ) {
         let _ = tx.rollback();
-        return Err(migration_err(e.to_string()));
+        return Err(migration_err(from, to, e.to_string()));
     }
 
-    tx.commit().map_err(|e| migration_err(e.to_string()))
+    tx.commit()
+        .map_err(|e| migration_err(from, to, e.to_string()))
 }
 
-/// Build an `Error::Migration` from `1` to the current `FORMAT_VERSION` with
-/// the given reason.
-fn migration_err(reason: String) -> Error {
+/// Build an `Error::Migration` from `from` to `to` with the given reason.
+fn migration_err(from: &str, to: &'static str, reason: String) -> Error {
     Error::Migration {
-        from: "1".to_string(),
-        to: FORMAT_VERSION,
+        from: from.to_string(),
+        to,
         reason,
     }
 }
 
-/// Apply the current (v2) schema and write `format_version = '2'` to the meta
+/// Apply the current (v3) schema and write `format_version = '3'` to the meta
 /// table. Used by `Store::open` on a fresh store. Idempotent only in the
 /// sense that `CREATE TABLE` will fail loudly if the schema already exists —
 /// callers must check the meta table first.
 pub fn apply_current(conn: &rusqlite::Connection, created_at: &str) -> Result<()> {
-    conn.execute_batch(DDL_V2).map_err(|e| Error::Sqlite {
-        context: "applying v2 schema",
+    conn.execute_batch(DDL_V3).map_err(|e| Error::Sqlite {
+        context: "applying v3 schema",
         source: e,
     })?;
 

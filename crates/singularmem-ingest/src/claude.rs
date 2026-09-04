@@ -215,6 +215,7 @@ impl ClaudeTranscript {
                         "chunk_count": chunk_count,
                     }),
                     external_id: Some(external_id),
+                    scope: None,
                 }
             })
             .collect();

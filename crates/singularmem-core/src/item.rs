@@ -84,6 +84,10 @@ pub struct Item {
     /// present. `None` for items ingested without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
+    /// Hierarchical scope path (e.g. `claude-code/singularmem`), normalised.
+    /// `None` for unscoped items. See `docs/formats/store-v3.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// The "to be ingested" form of an item. The store assigns `id` and
@@ -102,6 +106,8 @@ pub struct NewItem {
     pub metadata: serde_json::Value,
     /// Optional stable identity, ≤ 512 bytes, unique across the store.
     pub external_id: Option<String>,
+    /// Optional scope path; validated and normalised at ingest.
+    pub scope: Option<String>,
 }
 
 impl NewItem {
@@ -115,6 +121,7 @@ impl NewItem {
             source: None,
             metadata: default_metadata(),
             external_id: None,
+            scope: None,
         }
     }
 }
@@ -148,11 +155,21 @@ pub(crate) const MAX_EXTERNAL_ID_BYTES: usize = 512;
 #[allow(dead_code)]
 pub(crate) const METADATA_WARN_BYTES: usize = 65_536;
 
-/// Validate a `NewItem`. Returns the normalised tag list (deduped, sorted) on
-/// success. Returns `Error::Validation` with the field name and a reason on
-/// failure. Does not touch the store.
+/// The normalised output of [`validate`]: the deduped, sorted tag list plus
+/// the normalised scope path (if any).
 #[allow(dead_code)]
-pub(crate) fn validate(item: &NewItem) -> crate::Result<Vec<String>> {
+pub(crate) struct Validated {
+    /// Deduped, sorted tags.
+    pub tags: Vec<String>,
+    /// Normalised scope path, or `None` if the item is unscoped.
+    pub scope: Option<String>,
+}
+
+/// Validate a `NewItem`. Returns the normalised tags and scope on success.
+/// Returns `Error::Validation` with the field name and a reason on failure.
+/// Does not touch the store.
+#[allow(dead_code)]
+pub(crate) fn validate(item: &NewItem) -> crate::Result<Validated> {
     use crate::Error;
 
     if item.content.is_empty() {
@@ -226,8 +243,23 @@ pub(crate) fn validate(item: &NewItem) -> crate::Result<Vec<String>> {
         );
     }
 
-    let mut normalised = Vec::with_capacity(item.tags.len());
-    for tag in &item.tags {
+    let tags = normalise_tags(&item.tags)?;
+    let scope = item
+        .scope
+        .as_deref()
+        .map(crate::scope::validate)
+        .transpose()?;
+
+    Ok(Validated { tags, scope })
+}
+
+/// Validate and normalise a tag list: reject empty, oversized, or
+/// NUL-bearing tags; otherwise dedupe and sort.
+fn normalise_tags(tags: &[String]) -> crate::Result<Vec<String>> {
+    use crate::Error;
+
+    let mut normalised = Vec::with_capacity(tags.len());
+    for tag in tags {
         if tag.is_empty() {
             return Err(Error::Validation {
                 field: "tags",
@@ -253,7 +285,6 @@ pub(crate) fn validate(item: &NewItem) -> crate::Result<Vec<String>> {
     }
     normalised.sort();
     normalised.dedup();
-
     Ok(normalised)
 }
 
@@ -329,7 +360,7 @@ mod tests {
         let mut item = NewItem::text("hello");
         item.tags = vec!["a".into(), "a".into(), "b".into(), "a".into()];
         let normalised = validate(&item).expect("valid");
-        assert_eq!(normalised, vec!["a", "b"]);
+        assert_eq!(normalised.tags, vec!["a", "b"]);
     }
 
     #[test]
@@ -359,7 +390,7 @@ mod tests {
         item.source = Some("test".into());
         item.metadata = serde_json::json!({"k": "v"});
         let normalised = validate(&item).expect("valid");
-        assert_eq!(normalised, vec!["bar", "foo"]); // sorted
+        assert_eq!(normalised.tags, vec!["bar", "foo"]); // sorted
     }
 
     #[test]

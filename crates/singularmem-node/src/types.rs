@@ -234,6 +234,7 @@ pub fn js_new_item_to_core(
         source: item.source,
         metadata: item.metadata.unwrap_or_else(|| serde_json::json!({})),
         external_id: None,
+        scope: None,
     })
 }
 
@@ -253,6 +254,7 @@ mod tests {
             source: Some("test".to_string()),
             metadata: serde_json::json!({"k": "v"}),
             external_id: Some("k".to_string()),
+            scope: None,
         }
     }
 
