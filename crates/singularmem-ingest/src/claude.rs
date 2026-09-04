@@ -23,7 +23,9 @@ pub struct ClaudeTranscript {
     pub path: PathBuf,
     /// Keep messages flagged `isSidechain` (subagent conversations).
     pub include_sidechains: bool,
-    /// When set, keep only messages whose `cwd` equals this path.
+    /// When set, keep only messages whose `cwd` names this directory
+    /// (compared both as raw paths and, when both resolve, canonically —
+    /// so `/tmp/x` matches a transcript recorded under `/private/tmp/x`).
     pub project_filter: Option<PathBuf>,
     /// Chunk cap in bytes.
     pub chunk_bytes: usize,
@@ -53,6 +55,45 @@ struct Line {
 #[derive(Deserialize)]
 struct Message {
     content: Option<serde_json::Value>,
+}
+
+/// A resolved `--project` filter: the raw path, its canonical form when it
+/// resolves, and a one-entry memo so a transcript whose thousands of lines
+/// share one `cwd` costs a single `canonicalize` call.
+#[derive(Debug)]
+struct ProjectFilter {
+    raw: PathBuf,
+    canonical: Option<PathBuf>,
+    memo: Option<(String, bool)>,
+}
+
+impl ProjectFilter {
+    fn new(raw: &Path) -> Self {
+        Self {
+            raw: raw.to_path_buf(),
+            canonical: raw.canonicalize().ok(),
+            memo: None,
+        }
+    }
+
+    /// True when `cwd` names the same directory as the filter: equal as raw
+    /// paths, or equal once both sides canonicalize successfully. A `cwd`
+    /// that no longer exists on this machine can still match by raw path.
+    fn matches(&mut self, cwd: Option<&str>) -> bool {
+        let Some(cwd) = cwd else { return false };
+        if let Some((seen, verdict)) = &self.memo {
+            if seen == cwd {
+                return *verdict;
+            }
+        }
+        let verdict = self.raw.as_path() == Path::new(cwd)
+            || match (&self.canonical, Path::new(cwd).canonicalize().ok()) {
+                (Some(a), Some(b)) => *a == b,
+                _ => false,
+            };
+        self.memo = Some((cwd.to_string(), verdict));
+        verdict
+    }
 }
 
 impl ClaudeTranscript {
@@ -90,7 +131,11 @@ impl ClaudeTranscript {
         clippy::too_many_lines,
         reason = "linear per-field extraction; splitting would obscure the single control flow"
     )]
-    fn line_to_items(&self, line: Line) -> Option<Vec<NewItem>> {
+    fn line_to_items(
+        &self,
+        line: Line,
+        filter: Option<&mut ProjectFilter>,
+    ) -> Option<Vec<NewItem>> {
         if line.kind != "user" && line.kind != "assistant" {
             return None; // structural line; not counted as filtered
         }
@@ -102,8 +147,8 @@ impl ClaudeTranscript {
         if sidechain && !self.include_sidechains {
             return Some(Vec::new());
         }
-        if let Some(filter) = &self.project_filter {
-            if line.cwd.as_deref().map(Path::new) != Some(filter.as_path()) {
+        if let Some(filter) = filter {
+            if !filter.matches(line.cwd.as_deref()) {
                 return Some(Vec::new());
             }
         }
@@ -244,6 +289,8 @@ impl Source for ClaudeTranscript {
             }
         };
         let reader = BufReader::new(file);
+        // Resolve the filter once per run, not once per line.
+        let mut filter = self.project_filter.as_deref().map(ProjectFilter::new);
         let iter = reader.lines().enumerate().flat_map(move |(idx, line)| {
             let line_no = idx + 1;
             let raw = match line {
@@ -268,12 +315,13 @@ impl Source for ClaudeTranscript {
                     })]
                 }
             };
-            self.line_to_items(parsed).map_or_else(Vec::new, |items| {
-                if items.is_empty() {
-                    self.filtered.set(self.filtered.get() + 1);
-                }
-                items.into_iter().map(Ok).collect()
-            })
+            self.line_to_items(parsed, filter.as_mut())
+                .map_or_else(Vec::new, |items| {
+                    if items.is_empty() {
+                        self.filtered.set(self.filtered.get() + 1);
+                    }
+                    items.into_iter().map(Ok).collect()
+                })
         });
         Box::new(iter)
     }

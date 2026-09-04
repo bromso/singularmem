@@ -201,3 +201,70 @@ fn open_missing_path_is_not_found() {
         Err(singularmem_ingest::Error::NotFound { .. })
     ));
 }
+
+/// Two paths naming one directory: a non-canonical one and its canonical
+/// form. On macOS a `TempDir` already lives under the `/var` → `/private/var`
+/// symlink; elsewhere we make the symlink explicitly.
+#[cfg(unix)]
+fn two_paths_to_one_dir(d: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    let raw = d.path().to_path_buf();
+    let canon = raw.canonicalize().unwrap();
+    if canon != raw {
+        return (raw, canon);
+    }
+    let target = raw.join("real");
+    std::fs::create_dir_all(&target).unwrap();
+    let link = raw.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    (link, target)
+}
+
+#[cfg(unix)]
+fn one_line_transcript(path: &Path, cwd: &Path) {
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "u",
+        "sessionId": "s",
+        "cwd": cwd.display().to_string(),
+        "message": {"role": "user", "content": "hello from the symlinked tree"},
+    });
+    std::fs::write(path, format!("{line}\n")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn project_filter_matches_across_symlinks_in_both_directions() {
+    let d = tempfile::TempDir::new().unwrap();
+    let (raw, canon) = two_paths_to_one_dir(&d);
+    assert_ne!(raw, canon, "fixture must offer two distinct paths");
+
+    // cwd non-canonical, filter canonical (the CLI's shape: it
+    // canonicalises --project before handing it to the parser).
+    let a = d.path().join("a.jsonl");
+    one_line_transcript(&a, &raw);
+    let mut t = ClaudeTranscript::open(&a).unwrap();
+    t.project_filter = Some(canon.clone());
+    let (items, _) = parse(&t);
+    assert_eq!(items.len(), 1, "canonical filter must match symlinked cwd");
+
+    // cwd canonical, filter non-canonical.
+    let b = d.path().join("b.jsonl");
+    one_line_transcript(&b, &canon);
+    let mut t = ClaudeTranscript::open(&b).unwrap();
+    t.project_filter = Some(raw);
+    let (items, _) = parse(&t);
+    assert_eq!(items.len(), 1, "symlinked filter must match canonical cwd");
+}
+
+#[cfg(unix)]
+#[test]
+fn project_filter_still_rejects_a_different_directory() {
+    let d = tempfile::TempDir::new().unwrap();
+    let (raw, _canon) = two_paths_to_one_dir(&d);
+    let a = d.path().join("a.jsonl");
+    one_line_transcript(&a, &raw);
+    let mut t = ClaudeTranscript::open(&a).unwrap();
+    t.project_filter = Some(PathBuf::from("/definitely/elsewhere"));
+    let (items, _) = parse(&t);
+    assert!(items.is_empty());
+}

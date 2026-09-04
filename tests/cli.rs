@@ -1537,3 +1537,50 @@ fn ingest_dir_long_path_is_counted_not_fatal() {
         .success()
         .stdout(predicate::function(|s: &str| s.lines().count() == 1));
 }
+
+#[cfg(unix)]
+#[test]
+fn ingest_transcript_project_filter_matches_symlinked_cwd() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+
+    // A directory reachable by two names. On macOS the TempDir already sits
+    // under /var -> /private/var; elsewhere make the symlink explicitly.
+    let raw = dir.path().to_path_buf();
+    let canon = raw.canonicalize().unwrap();
+    let (raw, _canon) = if canon == raw {
+        let target = raw.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = raw.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        (link, target)
+    } else {
+        (raw, canon)
+    };
+
+    let tx = dir.path().join("s.jsonl");
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "u",
+        "sessionId": "s",
+        "cwd": raw.display().to_string(),
+        "message": {"role": "user", "content": "symlinked project message"},
+    });
+    std::fs::write(&tx, format!("{line}\n")).unwrap();
+
+    // The CLI canonicalises --project; the transcript's cwd is the
+    // non-canonical spelling of the same directory.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            tx.to_str().unwrap(),
+            "--project",
+            raw.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 1"));
+}
