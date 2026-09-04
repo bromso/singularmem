@@ -649,6 +649,68 @@ fn resolve_store_path(cli: &Cli) -> PathBuf {
         .unwrap_or_else(default_store_path)
 }
 
+/// Attempts and base backoff used when opening the Tantivy sidecar for a
+/// write. Tantivy allows one writer per directory, so two hooks firing at
+/// once (a `Stop` in two editor windows, say) contend for
+/// `.tantivy-writer.lock`. The schedule sleeps `50, 100, 200, 400` ms
+/// between five attempts — comfortably longer than a hook's own indexing
+/// pass — before giving up.
+const INDEX_LOCK_ATTEMPTS: u32 = 5;
+const INDEX_LOCK_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Whether `e` is Tantivy's writer-lockfile contention, as opposed to a
+/// corrupt or schema-mismatched sidecar. Matched on the rendered message
+/// (case-insensitively, so both `Lockfile` and `lock` hit) because the
+/// lock failure arrives wrapped in `tantivy::TantivyError` with no
+/// dedicated variant to match on.
+fn is_index_lock_error(e: &singularmem_search::Error) -> bool {
+    e.to_string().to_lowercase().contains("lock")
+}
+
+/// Open the Tantivy sidecar at `path`, retrying a writer-lock conflict with
+/// bounded exponential backoff.
+///
+/// Makes at most `attempts` opens, sleeping `base_delay`, `2 × base_delay`,
+/// … between them (so `attempts - 1` sleeps; no sleep follows the final
+/// attempt, which would only add latency to the failure). Only a lock error
+/// is retried — see [`is_index_lock_error`]; anything else fails fast, since
+/// a corrupt sidecar will not fix itself by waiting.
+///
+/// # Errors
+/// The last error returned by `Index::open`.
+fn open_index_with_retry(
+    path: &Path,
+    attempts: u32,
+    base_delay: std::time::Duration,
+) -> Result<singularmem_search::Index, singularmem_search::Error> {
+    let attempts = attempts.max(1);
+    let mut delay = base_delay;
+    let mut last: Option<singularmem_search::Error> = None;
+    for attempt in 1..=attempts {
+        match singularmem_search::Index::open(path) {
+            Ok(idx) => return Ok(idx),
+            Err(e) => {
+                if !is_index_lock_error(&e) {
+                    return Err(e);
+                }
+                tracing::debug!(
+                    error = %e,
+                    attempt,
+                    attempts,
+                    path = %path.display(),
+                    "Tantivy writer lock is held; retrying"
+                );
+                last = Some(e);
+                if attempt < attempts {
+                    std::thread::sleep(delay);
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| unreachable!("at least one attempt always runs")))
+}
+
 /// Wire up the Tantivy (and, opt-in, vector) `IndexHook`s on `store` so live
 /// writes populate the search sidecars. A no-op when `no_index` is set.
 ///
@@ -663,7 +725,7 @@ fn wire_index_hooks(store: &mut Store, store_path: &Path, no_index: bool) {
 
     // Tantivy lexical-search hook (sub-project 2a behaviour — always attempt).
     let index_path = derive_index_path(store_path);
-    match singularmem_search::Index::open(&index_path) {
+    match open_index_with_retry(&index_path, INDEX_LOCK_ATTEMPTS, INDEX_LOCK_BASE_DELAY) {
         Ok(idx) => hooks.push(Box::new(idx)),
         Err(e) => tracing::warn!(
             error = %e,
@@ -1994,4 +2056,59 @@ fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tantivy allows a single writer per directory, so a second
+    /// `Index::open` while one is live fails with "Failed to acquire
+    /// Lockfile". `open_index_with_retry` must recognise that as transient
+    /// contention, back off, and still surface the error once the attempts
+    /// run out — then succeed as soon as the first writer is dropped.
+    #[test]
+    fn open_index_with_retry_backs_off_on_a_held_writer_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("index");
+        let held = singularmem_search::Index::open(&path).expect("first open takes the lock");
+
+        let base = std::time::Duration::from_millis(10);
+        let start = std::time::Instant::now();
+        let err = open_index_with_retry(&path, 2, base)
+            .err()
+            .expect("the writer lock is held, so every attempt must fail");
+        let elapsed = start.elapsed();
+        assert!(
+            is_index_lock_error(&err),
+            "expected a lockfile error, got: {err}"
+        );
+        assert!(
+            elapsed >= base,
+            "two attempts must sleep at least one base delay, slept {elapsed:?}"
+        );
+
+        drop(held);
+        open_index_with_retry(&path, 2, base).expect("the lock is free again");
+    }
+
+    /// A non-lock failure (here: a sidecar path that is a regular file, so
+    /// the directory cannot be created) must fail fast rather than burn the
+    /// whole backoff schedule — waiting cannot fix it.
+    #[test]
+    fn open_index_with_retry_does_not_retry_non_lock_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("not-a-dir");
+        std::fs::write(&path, b"regular file").unwrap();
+
+        let start = std::time::Instant::now();
+        let err = open_index_with_retry(&path, 5, std::time::Duration::from_millis(200))
+            .err()
+            .expect("a file where the sidecar directory should be cannot open");
+        assert!(!is_index_lock_error(&err), "not a lock error: {err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(200),
+            "must not have slept"
+        );
+    }
 }

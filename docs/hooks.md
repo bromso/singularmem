@@ -159,3 +159,15 @@ session start, or a session doesn't seem to have been ingested, this
 is the first thing to check, followed by `singularmem hooks status`
 to confirm the hook is actually installed and its binary path still
 exists.
+
+**If search misses recent sessions, run `singularmem reindex`.** The
+Tantivy sidecar allows a single writer at a time, so two hooks firing
+at once — a `Stop` in two editor windows, or a `Stop` racing a manual
+`ingest-*` — contend for its write lock. The hook retries the open
+with a bounded backoff (five attempts over ~750 ms), which serialises
+the common case, but a longer burst can still exhaust it. When that
+happens the item is still written to the store (nothing is lost) and
+the hook logs `could not open Tantivy index` at `warn` before
+continuing without the index hook — the session simply won't appear
+in `search` results until the sidecar is rebuilt. `singularmem
+reindex` rebuilds it from `SQLite`.
