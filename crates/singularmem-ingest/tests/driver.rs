@@ -201,3 +201,18 @@ fn in_run_duplicate_of_existing_key_is_replaced_at_most_once() {
     assert_eq!(s.list().unwrap().count(), 2);
     assert_eq!(s.revision_history(newest.id).unwrap().len(), 2);
 }
+
+#[test]
+fn item_rejected_by_validation_is_counted_not_fatal() {
+    let d = TempDir::new().unwrap();
+    let s = Store::open(d.path().join("s.db")).unwrap();
+    let src = Fixed(vec![
+        keyed("a", "k:1"),
+        keyed("bad", &"x".repeat(600)),
+        keyed("b", "k:2"),
+    ]);
+    let r = ingest_source(&s, &src, false).unwrap();
+    assert_eq!(r.ingested, 2);
+    assert_eq!(r.failed, 1);
+    assert_eq!(s.list().unwrap().count(), 2);
+}

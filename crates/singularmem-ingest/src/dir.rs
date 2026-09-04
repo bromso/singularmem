@@ -13,6 +13,14 @@ use crate::Source;
 /// Default per-file size cap (1 MiB).
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 1_048_576;
 
+/// The store's `external_id` cap. Mirrors `singularmem_core`'s private
+/// `MAX_EXTERNAL_ID_BYTES`; a longer id would be rejected at validation.
+const MAX_EXTERNAL_ID_BYTES: usize = 512;
+
+/// The store's per-tag cap. Mirrors `singularmem_core`'s private
+/// `MAX_TAG_BYTES`.
+const MAX_TAG_BYTES: usize = 64;
+
 /// Walks a directory and yields one item per readable UTF-8 text file.
 #[derive(Debug)]
 pub struct DirectoryWalker {
@@ -82,8 +90,30 @@ impl DirectoryWalker {
         let rel = abs.strip_prefix(&self.root).unwrap_or(abs);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let abs_str = abs.display().to_string();
-        let ext = abs.extension().map(|e| e.to_string_lossy().to_lowercase());
         let chunk_count = chunks.len();
+
+        // Reject the whole file up front rather than letting the store fail
+        // validation mid-batch: one over-long path must not sink the run.
+        // The last chunk carries the longest `#<n>` suffix.
+        let longest_id_len = if chunk_count == 1 {
+            "file:".len() + abs_str.len()
+        } else {
+            "file:".len() + abs_str.len() + 1 + (chunk_count - 1).to_string().len()
+        };
+        if longest_id_len > MAX_EXTERNAL_ID_BYTES {
+            return Err(Error::Unsupported {
+                path: abs.to_path_buf(),
+                reason: format!(
+                    "path too long for external_id (max {MAX_EXTERNAL_ID_BYTES} bytes)"
+                ),
+            });
+        }
+
+        // An extension too long to fit a tag is dropped, not fatal.
+        let ext = abs
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .filter(|e| "ext:".len() + e.len() <= MAX_TAG_BYTES);
         Ok(chunks
             .into_iter()
             .enumerate()

@@ -40,4 +40,15 @@ pub enum Error {
         /// The missing path.
         path: PathBuf,
     },
+
+    /// The file exists and is readable but cannot be represented as items
+    /// (e.g. its absolute path does not fit the store's `external_id` cap).
+    /// The file is skipped; the run continues.
+    #[error("unsupported input at {path}: {reason}")]
+    Unsupported {
+        /// The file involved.
+        path: PathBuf,
+        /// Why it cannot be turned into items.
+        reason: String,
+    },
 }

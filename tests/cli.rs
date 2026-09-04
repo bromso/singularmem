@@ -1505,3 +1505,35 @@ fn ingest_dir_read_only_store_is_exit_2() {
         .code(2)
         .stderr(predicate::str::contains("read-only"));
 }
+
+#[test]
+fn ingest_dir_long_path_is_counted_not_fatal() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("ok.txt"), "fine").unwrap();
+
+    // Nest 100-char directories until the leaf file's absolute path is
+    // longer than the store's 512-byte external_id cap.
+    let mut deep = tree.clone();
+    while deep.join("f.txt").as_os_str().len() <= 520 {
+        deep = deep.join("a".repeat(100));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("f.txt"), "too deep").unwrap();
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 1"))
+        .stderr(predicate::str::contains("1 failed"));
+
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 1));
+}

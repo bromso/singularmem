@@ -32,9 +32,13 @@ pub struct Report {
 /// [`BATCH_SIZE`]. With `dry_run`, nothing is written but counts are
 /// computed as if it were.
 ///
+/// A batch the store rejects with `Error::Validation` is retried item by
+/// item so that one bad item (an over-long `external_id`, say) costs one
+/// `Report::failed` rather than the whole batch.
+///
 /// # Errors
 /// Returns `Err` only for store-level failures (read-only, `SQLite`). Source
-/// errors are counted in `Report::failed`.
+/// errors and per-item validation rejects are counted in `Report::failed`.
 pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Result<Report> {
     let mut report = Report::default();
     let mut candidates: Vec<NewItem> = Vec::new();
@@ -103,6 +107,18 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
         return Ok(report);
     }
 
+    write_batches(store, source, fresh, &mut report)?;
+    Ok(report)
+}
+
+/// Write `fresh` to `store` in [`BATCH_SIZE`] transactions, updating
+/// `report`. Split out of [`ingest_source`] to keep each function readable.
+fn write_batches(
+    store: &Store,
+    source: &dyn Source,
+    mut fresh: Vec<NewItem>,
+    report: &mut Report,
+) -> Result<()> {
     while !fresh.is_empty() {
         let n = fresh.len().min(BATCH_SIZE);
         let batch: Vec<NewItem> = fresh.drain(..n).collect();
@@ -128,8 +144,28 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
                 let written = store.ingest_many(retry)?;
                 report.ingested += written.len();
             }
+            Err(CoreError::Validation { .. }) => {
+                // One malformed item must not sink the whole batch: retry
+                // the batch item by item so the rest still lands.
+                for item in batch {
+                    let key = item.external_id.clone().unwrap_or_default();
+                    match store.ingest(item) {
+                        Ok(_) => report.ingested += 1,
+                        Err(e @ CoreError::Validation { .. }) => {
+                            tracing::warn!(
+                                external_id = %key,
+                                source = %source.name(),
+                                error = %e,
+                                "store rejected item"
+                            );
+                            report.failed += 1;
+                        }
+                        Err(e) => return Err(Error::Core(e)),
+                    }
+                }
+            }
             Err(e) => return Err(Error::Core(e)),
         }
     }
-    Ok(report)
+    Ok(())
 }

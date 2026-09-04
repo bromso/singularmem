@@ -134,3 +134,48 @@ fn walk_error_reports_failing_path() {
         "expected an Io error under `locked`, got: {errors:?}"
     );
 }
+
+/// Build a directory chain under `root` until the absolute path of a file
+/// placed inside it exceeds `target` bytes. Returns that file's path.
+fn deep_file(root: &std::path::Path, target: usize) -> std::path::PathBuf {
+    let mut dir = root.to_path_buf();
+    while dir.join("f.txt").as_os_str().len() <= target {
+        dir = dir.join("a".repeat(100));
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("f.txt");
+    fs::write(&f, "deep").unwrap();
+    f
+}
+
+#[test]
+fn over_long_path_is_an_error_not_a_dropped_run() {
+    let d = TempDir::new().unwrap();
+    fs::write(d.path().join("ok.txt"), "fine").unwrap();
+    let long = deep_file(d.path(), 520);
+    assert!(long.as_os_str().len() > 520);
+
+    let w = DirectoryWalker::new(d.path()).unwrap();
+    let (oks, errs): (Vec<_>, Vec<_>) = w.items().partition(Result::is_ok);
+    assert_eq!(oks.len(), 1, "the normal file still yields an item");
+    assert_eq!(errs.len(), 1, "the over-long path yields one error");
+    assert!(
+        matches!(
+            errs.into_iter().map(Result::unwrap_err).next().unwrap(),
+            singularmem_ingest::Error::Unsupported { ref reason, .. }
+                if reason.contains("512")
+        ),
+        "expected an Unsupported error naming the 512-byte cap"
+    );
+}
+
+#[test]
+fn over_long_extension_drops_the_ext_tag_only() {
+    let d = TempDir::new().unwrap();
+    let name = format!("x.{}", "e".repeat(80));
+    fs::write(d.path().join(&name), "body").unwrap();
+    let w = DirectoryWalker::new(d.path()).unwrap();
+    let items: Vec<_> = w.items().map(Result::unwrap).collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].tags, vec!["file"], "ext: tag omitted, not fatal");
+}
