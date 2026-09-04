@@ -29,6 +29,9 @@ pub struct ClaudeTranscript {
     pub project_filter: Option<PathBuf>,
     /// Chunk cap in bytes.
     pub chunk_bytes: usize,
+    /// Explicit scope override; wins over the `cwd`-derived default. Left
+    /// `None` for [`ClaudeTranscript::default_scope`] to derive one.
+    pub scope_override: Option<String>,
     filtered: Cell<usize>,
 }
 
@@ -111,6 +114,7 @@ impl ClaudeTranscript {
             include_sidechains: false,
             project_filter: None,
             chunk_bytes: DEFAULT_CHUNK_BYTES,
+            scope_override: None,
             filtered: Cell::new(0),
         })
     }
@@ -221,6 +225,21 @@ impl ClaudeTranscript {
             .collect();
         Some(items)
     }
+
+    /// Derive `claude-code/<cwd-basename>` from `item.metadata.cwd`, or
+    /// `None` if `cwd` is absent, has no basename, or the basename is not a
+    /// valid scope segment.
+    fn derived_scope(item: &NewItem) -> Option<String> {
+        let cwd = item.metadata.get("cwd")?.as_str()?;
+        let base = Path::new(cwd).file_name()?.to_str()?;
+        match singularmem_core::scope::validate(&format!("claude-code/{base}")) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(cwd, error = %e, "cwd basename is not a valid scope segment; item left unscoped");
+                None
+            }
+        }
+    }
 }
 
 /// Concatenate text blocks and collect tool names from a message `content`.
@@ -329,6 +348,13 @@ impl Source for ClaudeTranscript {
 
     fn filtered_count(&self) -> usize {
         self.filtered.get()
+    }
+
+    fn default_scope(&self, item: &NewItem) -> Option<String> {
+        self.scope_override.as_ref().map_or_else(
+            || Self::derived_scope(item),
+            |o| singularmem_core::scope::validate(o).ok(),
+        )
     }
 }
 

@@ -35,6 +35,9 @@ pub struct DirectoryWalker {
     pub max_file_bytes: u64,
     /// Chunk cap in bytes.
     pub chunk_bytes: usize,
+    /// Explicit scope override; wins over the root-basename-derived default.
+    /// Left `None` for [`DirectoryWalker::default_scope`] to derive one.
+    pub scope_override: Option<String>,
     filtered: Cell<usize>,
     visited: Cell<usize>,
 }
@@ -60,9 +63,23 @@ impl DirectoryWalker {
             root,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             chunk_bytes: DEFAULT_CHUNK_BYTES,
+            scope_override: None,
             filtered: Cell::new(0),
             visited: Cell::new(0),
         })
+    }
+
+    /// Derive `files/<root-basename>`, or `None` if the root has no
+    /// basename or the basename is not a valid scope segment.
+    fn derived_scope(&self) -> Option<String> {
+        let base = self.root.file_name()?.to_str()?;
+        match singularmem_core::scope::validate(&format!("files/{base}")) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(root = %self.root.display(), error = %e, "root basename is not a valid scope segment; items left unscoped");
+                None
+            }
+        }
     }
 
     /// Files handed to the content pipeline this run (items produced,
@@ -212,6 +229,13 @@ impl Source for DirectoryWalker {
 
     fn filtered_count(&self) -> usize {
         self.filtered.get()
+    }
+
+    fn default_scope(&self, _item: &NewItem) -> Option<String> {
+        self.scope_override.as_ref().map_or_else(
+            || self.derived_scope(),
+            |o| singularmem_core::scope::validate(o).ok(),
+        )
     }
 }
 

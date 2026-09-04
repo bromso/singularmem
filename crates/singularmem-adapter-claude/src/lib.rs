@@ -112,6 +112,7 @@ mod tests {
             source: source.map(String::from),
             tags: tags.into_iter().map(String::from).collect(),
             created_at: Timestamp::from_str("2026-05-12T14:30:00Z").unwrap(),
+            scope: None,
         }
     }
 

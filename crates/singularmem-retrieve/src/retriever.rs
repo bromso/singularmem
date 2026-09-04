@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use serde::Serialize;
-use singularmem_core::ItemId;
+use singularmem_core::{ItemId, ScopeFilter};
 use singularmem_search::{HybridSearchOptions, ScoreKind};
 
 /// Options controlling a `Retriever::retrieve` call.
@@ -20,6 +20,11 @@ pub struct RetrieveOptions {
     pub min_score: f32,
     /// Underlying hybrid-search options (passed through to `HybridSearcher`).
     pub search: HybridSearchOptions,
+    /// Restrict retrieval to a scope subtree (or an exact scope). Default
+    /// `None`. Copied onto `search.scope` before searching (this field is
+    /// the source of truth for scope filtering — a scope set directly on
+    /// `search` is overwritten).
+    pub scope: Option<ScopeFilter>,
 }
 
 impl Default for RetrieveOptions {
@@ -28,6 +33,7 @@ impl Default for RetrieveOptions {
             max_blocks: 10,
             min_score: 0.0,
             search: HybridSearchOptions::default(),
+            scope: None,
         }
     }
 }
@@ -66,6 +72,8 @@ pub struct MemoryBlock {
     pub tags: Vec<String>,
     /// Wall-clock timestamp the store assigned at ingest.
     pub created_at: Timestamp,
+    /// Scope from the underlying [`singularmem_core::Item`], if any.
+    pub scope: Option<String>,
 }
 
 use singularmem_core::Store;
@@ -113,7 +121,9 @@ impl<'a> Retriever<'a> {
         }
 
         let start = std::time::Instant::now();
-        let results = self.searcher.search(query, &opts.search)?;
+        let mut search_opts = opts.search.clone();
+        search_opts.scope.clone_from(&opts.scope);
+        let results = self.searcher.search(query, &search_opts)?;
         let total_considered = results.total_fused;
 
         let blocks: crate::Result<Vec<MemoryBlock>> = results
@@ -131,6 +141,7 @@ impl<'a> Retriever<'a> {
                     source: item.source,
                     tags: item.tags,
                     created_at: item.created_at,
+                    scope: item.scope,
                 })
             })
             .collect();
@@ -324,6 +335,36 @@ mod tests {
             ),
             "expected Error::Core(NotFound), got {result:?}"
         );
+    }
+
+    #[test]
+    fn retrieve_applies_scope_filter() {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let lex_path = dir.path().join("lex");
+
+        let lex_hook = Index::open(&lex_path).unwrap();
+        let store = Store::open_with_hook(&store_path, Box::new(lex_hook)).unwrap();
+        let mut item_a = NewItem::text("zebra in scope a");
+        item_a.scope = Some("a".into());
+        store.ingest(item_a).unwrap();
+        let mut item_b = NewItem::text("zebra in scope b");
+        item_b.scope = Some("b".into());
+        store.ingest(item_b).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(store);
+
+        let store = Store::open(&store_path).unwrap();
+        let lex = Index::open(&lex_path).unwrap();
+        let searcher = HybridSearcher::lexical_only(&lex);
+        let retriever = Retriever::new(&store, &searcher);
+        let opts = RetrieveOptions {
+            scope: Some(singularmem_core::ScopeFilter::descendants("a").unwrap()),
+            ..Default::default()
+        };
+        let r = retriever.retrieve("zebra", &opts).expect("ok");
+        assert_eq!(r.blocks.len(), 1, "expected only the in-scope hit");
+        assert_eq!(r.blocks[0].scope.as_deref(), Some("a"));
     }
 
     #[test]

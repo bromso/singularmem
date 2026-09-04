@@ -63,6 +63,7 @@ pub fn handle_memory_retrieve(
         max_blocks: limit,
         min_score: 0.0,
         search: HybridSearchOptions::default(),
+        scope: None,
     };
 
     // 3. Open store + indexes per-request. The spec is explicit: no

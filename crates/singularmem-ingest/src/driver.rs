@@ -44,7 +44,12 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
     let mut candidates: Vec<NewItem> = Vec::new();
     for r in source.items() {
         match r {
-            Ok(item) => candidates.push(item),
+            Ok(mut item) => {
+                if item.scope.is_none() {
+                    item.scope = source.default_scope(&item);
+                }
+                candidates.push(item);
+            }
             Err(e) => {
                 tracing::warn!(source = %source.name(), error = %e, "skipping item");
                 report.failed += 1;

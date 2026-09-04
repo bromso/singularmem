@@ -731,6 +731,7 @@ fn run_retrieve(
             include_snippets: false,
             scope: None,
         },
+        scope: None,
     };
     retriever
         .retrieve(query, &opts)

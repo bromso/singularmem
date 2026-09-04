@@ -34,4 +34,10 @@ pub trait Source {
     fn filtered_count(&self) -> usize {
         0
     }
+
+    /// Scope to apply when `item.scope` is `None`. Sources derive it from
+    /// their input (see the spec); the driver applies it.
+    fn default_scope(&self, _item: &NewItem) -> Option<String> {
+        None
+    }
 }

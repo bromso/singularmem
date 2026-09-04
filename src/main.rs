@@ -967,6 +967,7 @@ fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result
         max_blocks: args.limit,
         min_score: args.min_score,
         search: search_opts,
+        scope: None,
     };
 
     // Open whichever indexes the resolved mode requires.
