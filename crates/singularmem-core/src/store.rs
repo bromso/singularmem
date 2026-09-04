@@ -40,6 +40,42 @@ pub struct Store {
     pub(crate) hook: Mutex<Option<Box<dyn IndexHook>>>,
 }
 
+/// Put the connection's journal mode into WAL, tolerating a concurrent
+/// opener of the same fresh store.
+///
+/// `PRAGMA journal_mode = WAL` needs a brief exclusive lock and — unlike an
+/// ordinary statement — reports `SQLITE_BUSY` immediately instead of going
+/// through the busy handler, so `busy_timeout` does not cover it. Two
+/// processes opening the same store at the same moment (a burst of editor
+/// hooks on a brand-new machine) therefore race. Retry a bounded number of
+/// times, and treat "already `wal`" as success: the journal mode is a
+/// persistent property of the file, so whoever won the race set it for
+/// everyone.
+fn set_wal_journal_mode(conn: &Connection) -> Result<()> {
+    const ATTEMPTS: u32 = 10;
+
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let already_wal = conn
+                    .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                    .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"));
+                if already_wal {
+                    return Ok(());
+                }
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt + 1)));
+            }
+        }
+    }
+    Err(Error::Sqlite {
+        context: "setting WAL journal mode",
+        source: last.unwrap_or_else(|| unreachable!("at least one attempt always runs")),
+    })
+}
+
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
@@ -131,24 +167,24 @@ impl Store {
             source: e,
         })?;
 
-        // Pragmas — must run before schema work. Changing journal_mode writes
-        // the database header, which a read-only connection cannot do; skip
-        // it there and simply read with whatever journal mode is on disk.
+        // Pragmas — must run before schema work. `busy_timeout` comes first
+        // so every later statement waits for a competing writer instead of
+        // returning SQLITE_BUSY at once.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| Error::Sqlite {
+                context: "setting busy_timeout",
+                source: e,
+            })?;
+
+        // Changing journal_mode writes the database header, which a read-only
+        // connection cannot do; skip it there and simply read with whatever
+        // journal mode is on disk.
         if !options.read_only {
-            conn.pragma_update(None, "journal_mode", "WAL")
-                .map_err(|e| Error::Sqlite {
-                    context: "setting WAL journal mode",
-                    source: e,
-                })?;
+            set_wal_journal_mode(&conn)?;
         }
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| Error::Sqlite {
                 context: "enabling foreign_keys pragma",
-                source: e,
-            })?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| Error::Sqlite {
-                context: "setting busy_timeout",
                 source: e,
             })?;
 
@@ -178,7 +214,10 @@ impl Store {
             match schema::read_format_version(&conn)? {
                 None => {
                     let now = clock.now().to_string();
-                    schema::apply_current(&conn, &now)?;
+                    // Transactional and race-safe: a concurrent first open
+                    // of the same fresh store rolls back and returns Ok
+                    // rather than failing with "table already exists".
+                    schema::apply_current(&mut conn, &now)?;
                 }
                 Some(v) if v == FORMAT_VERSION => { /* already current */ }
                 Some(v) if v == "1" => {
