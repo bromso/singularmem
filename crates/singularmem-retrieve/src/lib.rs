@@ -11,6 +11,7 @@ pub mod adapter;
 pub mod error;
 pub mod retriever;
 pub mod testing;
+pub mod wakeup;
 
 pub use crate::adapter::{Adapter, PlainAdapter};
 pub use crate::error::{Error, Result};
