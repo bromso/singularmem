@@ -1435,6 +1435,27 @@ fn ingest_transcript_missing_path_is_exit_2() {
 }
 
 #[test]
+fn ingest_transcript_with_explicit_path_does_not_need_home() {
+    // `resolve_ingest_files`'s default root (`$HOME/.claude/projects`) is
+    // only computed when `paths` is empty; an explicit path must not require
+    // `HOME` to be resolvable at all.
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let fx = fixture_transcripts();
+    singularmem()
+        .env_remove("HOME")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1) // malformed line still counts, per the other fixture tests
+        .stderr(predicate::str::contains("ingested 4"));
+}
+
+#[test]
 fn ingest_dir_tracks_changes_via_supersedes() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("store.db");
@@ -1813,4 +1834,1062 @@ fn stale_tantivy_sidecar_exits_2_and_reindex_recovers() {
         .assert()
         .success()
         .stdout(predicate::str::contains("zebra"));
+}
+
+fn fixture_codex() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex")
+}
+
+#[test]
+fn ingest_codex_is_idempotent_and_scoped() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-codex",
+            fixture_codex().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 2 filtered, 1 failed across 1 files",
+        ));
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-codex",
+            fixture_codex().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("codex/proj\t2\n");
+}
+
+#[test]
+fn ingest_cursor_reads_a_fixture_user_dir() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/proj"),
+            composers: vec![(
+                "c1",
+                "T",
+                1_700_000_000_000,
+                vec![
+                    FixtureBubble {
+                        id: "b1",
+                        kind: 1,
+                        text: "hello cursor",
+                    },
+                    FixtureBubble {
+                        id: "b2",
+                        kind: 2,
+                        text: "hi",
+                    },
+                ],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            user.to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 0 filtered, 0 failed across 1 files",
+        ));
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            user.to_str().unwrap(),
+            "--conversation",
+            "c1",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("cursor/proj\t2\n");
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            dir.path().join("nope").to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+
+    // Without --cursor-dir, SINGULARMEM_CURSOR_DIR supplies the default —
+    // the same override the `hook` verb honours (docs/hooks.md).
+    let db2 = dir.path().join("store2.db");
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db2.to_str().unwrap(), "ingest-cursor", "--quiet"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 0 filtered, 0 failed across 1 files",
+        ));
+    // An explicit --cursor-dir still wins over the environment variable.
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args([
+            "--store",
+            db2.to_str().unwrap(),
+            "ingest-cursor",
+            "--cursor-dir",
+            dir.path().join("nope").to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+}
+
+/// The Codex hook's fallback scan: no `transcript_path` in the payload, so
+/// it searches `SINGULARMEM_CODEX_ROOT` for a rollout whose filename
+/// carries the payload's `session_id`.
+#[test]
+fn hook_codex_stop_scans_the_env_root_for_the_session() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CODEX_ROOT", fixture_codex().to_str().unwrap())
+        .args(["--store", db_s, "hook", "codex", "stop"])
+        .write_stdin(r#"{"session_id":"sess1","cwd":"/home/me/proj"}"#)
+        .assert()
+        .success();
+    // The fixture rollout holds one user and one assistant message.
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("codex/proj\t2\n");
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("How do I run the tests?"))
+        .stdout(predicate::str::contains("Run cargo test."));
+}
+
+/// Build a store with items across `claude-code/proj`, `codex/proj`,
+/// `files/proj`, and `claude-code/other`, for the `wake-up` tests below.
+fn wake_up_test_store() -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    for (c, sc) in [
+        ("first note", "claude-code/proj"),
+        ("second note", "codex/proj"),
+        ("a file", "files/proj"),
+        ("elsewhere", "claude-code/other"),
+    ] {
+        singularmem()
+            .args(["--store", db_s, "ingest", "--content", c, "--scope", sc])
+            .assert()
+            .success();
+    }
+    (dir, db)
+}
+
+#[test]
+fn wake_up_project_dot_resolves_via_canonicalize() {
+    // `Path::new(".").file_name()` is `None`, so before the fix
+    // `ScopeSet::for_project` silently returned an empty scope set for
+    // `--project .` — a plausible, common invocation (run from the project
+    // root). `--project .` must canonicalise to the real directory and
+    // derive its basename, same as passing the absolute path would.
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest",
+            "--content",
+            "note",
+            "--scope",
+            "claude-code/proj",
+        ])
+        .assert()
+        .success();
+
+    let out = singularmem()
+        .current_dir(&proj)
+        .args(["--store", db_s, "wake-up", "--project", "."])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with(
+        "# Singularmem wake-up — claude-code/proj, codex/proj, cursor/proj — 1 items, showing last 1\n"
+    ));
+}
+
+/// `--project` names the directory the editor actually opened, even when
+/// that path is a symlink to a differently-named target — e.g. Claude
+/// Code's `current` symlink under a Codex-style session layout. Scoping must
+/// key off the link's own basename (`current`), not the resolved target's
+/// (`real-name`), since that is the name the transcript was ingested under.
+#[test]
+#[cfg(unix)]
+fn wake_up_project_symlink_uses_link_name() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real-name");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("current");
+    symlink(&real, &link).unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest",
+            "--content",
+            "note via symlink",
+            "--scope",
+            "claude-code/current",
+        ])
+        .assert()
+        .success();
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--project",
+            link.to_str().unwrap(),
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    let header = text.lines().next().unwrap();
+    assert!(header.contains("claude-code/current"), "{header}");
+    assert!(header.contains("1 items"), "{header}");
+}
+
+#[test]
+fn wake_up_text_format_defaults_to_project_editor_scopes() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args(["--store", db_s, "wake-up", "--project", "/x/proj"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with(
+        "# Singularmem wake-up — claude-code/proj, codex/proj, cursor/proj — 2 items, showing last 2\n"
+    ));
+    assert!(text.contains("first note") && text.contains("second note"));
+    assert!(!text.contains("a file") && !text.contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--project",
+            "/x/proj",
+            "--include-files",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("3 items, showing last 1") && text.contains("a file"));
+}
+
+#[test]
+fn wake_up_hook_and_json_formats() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "claude-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "codex-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "cursor-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["blocks"][0]["content"], "elsewhere");
+}
+
+#[test]
+fn wake_up_empty_and_invalid_scope() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args(["--store", db_s, "wake-up", "--scope", "nothing/here"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "# Singularmem wake-up — nothing/here — 0 items, showing last 0\n"
+    );
+    singularmem()
+        .args(["--store", db_s, "wake-up", "--scope", "a//b"])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn wake_up_repeatable_scope_dedups_overlapping_filters() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    // Repeatable --scope with overlapping filters must not duplicate ids
+    // (sub-project 13 task 5 follow-up: see wakeup::build's HashSet dedup).
+    // This store's items don't tie on created_at, so this test doesn't
+    // discriminate the old adjacent-`dedup_by` bug from the fix — that
+    // coverage lives in singularmem-retrieve's
+    // build_dedups_items_seen_via_overlapping_scope_filters (fixed clock,
+    // forced tie). This test instead covers the end-to-end CLI wiring and
+    // the union `total`.
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ids: Vec<&str> = v["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+    assert_eq!(ids.len(), unique.len(), "no duplicate ids: {ids:?}");
+    assert!(!ids.is_empty());
+    // `claude-code` matches both `claude-code/proj` and `claude-code/other`
+    // (2 items); `claude-code/other` matches `claude-code/other` again (1
+    // more). The union is 2 distinct items, not the 3 a naive per-filter sum
+    // would give.
+    assert_eq!(v["total"], 2);
+}
+
+#[test]
+fn hook_claude_stop_ingests_transcript_and_session_start_prints_envelope() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let transcript = fixture_transcripts().join("proj/session.jsonl");
+    let payload = serde_json::json!({"session_id":"s","transcript_path":transcript,"cwd":"/home/me/proj","hook_event_name":"Stop"}).to_string();
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "stop"])
+        .write_stdin(payload.clone())
+        .assert()
+        .success()
+        .stdout("");
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("claude-code/other\t1\nclaude-code/proj\t3\n");
+    // Idempotent on the second stop; still exit 0 even though the fixture has a malformed line.
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "pre-compact"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+
+    let start = serde_json::json!({"session_id":"s","cwd":"/home/me/proj","hook_event_name":"SessionStart","source":"startup"}).to_string();
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "session-start"])
+        .write_stdin(start)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(ctx.starts_with(
+        "# Singularmem wake-up — claude-code/proj, codex/proj, cursor/proj — 3 items"
+    ));
+    assert!(ctx.contains("Run cargo test."));
+}
+
+/// The save side scopes items by the basename of the **raw** `cwd` the
+/// editor reported. When that cwd is a symlink (`<tmp>/current ->
+/// <tmp>/real-name`), a `session-start` that canonicalised first would look
+/// under `claude-code/real-name` and find nothing. Stop then session-start
+/// with the same cwd must round-trip.
+#[test]
+#[cfg(unix)]
+fn hook_round_trips_a_symlinked_project_dir() {
+    let dir = TempDir::new().unwrap();
+    let real = dir.path().join("real-name");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("current");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let link_s = link.to_str().unwrap();
+
+    // A one-line transcript whose `cwd` is the symlink path.
+    let transcript = dir.path().join("session.jsonl");
+    let user_line = serde_json::json!({
+        "type": "user",
+        "uuid": "u1",
+        "parentUuid": serde_json::Value::Null,
+        "sessionId": "11111111-2222-3333-4444-555555555555",
+        "timestamp": "2026-09-01T10:00:00.000Z",
+        "cwd": link_s,
+        "isSidechain": false,
+        "message": {"role": "user", "content": "symlinked project question"},
+    });
+    std::fs::write(&transcript, format!("{user_line}\n")).unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let payload = serde_json::json!({
+        "session_id": "s",
+        "transcript_path": transcript,
+        "cwd": link_s,
+        "hook_event_name": "Stop",
+    })
+    .to_string();
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "stop"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("claude-code/current\t1\n");
+
+    let start = serde_json::json!({
+        "session_id": "s",
+        "cwd": link_s,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+    })
+    .to_string();
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "session-start"])
+        .write_stdin(start)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ctx = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        ctx.contains("claude-code/current"),
+        "wake-up must use the raw basename: {ctx}"
+    );
+    assert!(
+        ctx.contains("1 items"),
+        "wake-up must find the item saved under the symlink's basename: {ctx}"
+    );
+    assert!(ctx.contains("symlinked project question"));
+}
+
+/// Cursor can report several workspace roots for one window; `session-start`
+/// unions every root's scopes (spec: "Cursor multi-root union").
+#[test]
+fn hook_cursor_session_start_unions_workspace_roots() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    for (c, sc) in [("alpha note", "cursor/alpha"), ("beta note", "cursor/beta")] {
+        singularmem()
+            .args(["--store", db_s, "ingest", "--content", c, "--scope", sc])
+            .assert()
+            .success();
+    }
+
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "cursor", "session-start"])
+        .write_stdin(r#"{"workspace_roots":["/w/alpha","/w/beta"],"session_id":"q"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ctx = v["additional_context"].as_str().unwrap();
+    assert!(ctx.contains("cursor/alpha"), "{ctx}");
+    assert!(ctx.contains("cursor/beta"), "{ctx}");
+    assert!(ctx.contains("2 items"), "{ctx}");
+    assert!(
+        ctx.contains("alpha note") && ctx.contains("beta note"),
+        "{ctx}"
+    );
+}
+
+#[test]
+fn hook_never_fails_the_editor() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "stop"])
+        .write_stdin("{not json")
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains("hook input"));
+    singularmem()
+        .args(["--store", db_s, "hook", "claude-code", "stop"])
+        .write_stdin(r#"{"cwd":"/x"}"#)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("transcript_path"));
+    singularmem()
+        .args(["--store", db_s, "hook", "codex", "stop"])
+        .write_stdin(
+            r#"{"session_id":"k","transcript_path":"/definitely/missing.jsonl","cwd":"/x"}"#,
+        )
+        .assert()
+        .success();
+    let out = singularmem()
+        .args(["--store", db_s, "hook", "cursor", "session-start"])
+        .write_stdin(r#"{"workspace_roots":["/x/proj"],"session_id":"q"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap()
+        .contains("0 items"));
+}
+
+#[test]
+fn hook_cursor_stop_ingests_only_that_conversation() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/proj"),
+            composers: vec![
+                (
+                    "c1",
+                    "A",
+                    1_700_000_000_000,
+                    vec![FixtureBubble {
+                        id: "b1",
+                        kind: 1,
+                        text: "one",
+                    }],
+                ),
+                (
+                    "c2",
+                    "B",
+                    1_700_000_001_000,
+                    vec![FixtureBubble {
+                        id: "b2",
+                        kind: 1,
+                        text: "two",
+                    }],
+                ),
+            ],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db_s, "hook", "cursor", "stop"])
+        .write_stdin(r#"{"conversation_id":"c2","workspace_roots":["/w/proj"]}"#)
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("two"))
+        .stdout(predicate::str::contains("one").not());
+}
+
+/// A payload with `conversation_id` but no `cwd` falls back to the first
+/// `workspace_roots` entry as `cwd` (see `singularmem_hooks::input::parse_input`).
+/// When that entry names the wrong workspace, the `cwd`-filtered scan finds
+/// nothing at all — not even an existing item skipped as a duplicate — and
+/// the hook must retry once across every workspace rather than losing the
+/// transcript.
+#[test]
+fn hook_cursor_stop_retries_across_workspaces_when_cwd_guess_misses() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/other"),
+            composers: vec![(
+                "c1",
+                "A",
+                1_700_000_000_000,
+                vec![FixtureBubble {
+                    id: "b1",
+                    kind: 1,
+                    text: "found me anyway",
+                }],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db_s, "hook", "cursor", "stop"])
+        .write_stdin(r#"{"conversation_id":"c1","workspace_roots":["/w/nomatch"]}"#)
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("found me anyway"));
+}
+
+#[test]
+fn hooks_install_status_uninstall_round_trip() {
+    let home = TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let original = "{\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(ls)\"\n    ]\n  },\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"echo other\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+    std::fs::write(&settings, original).unwrap();
+    let h = home.path().to_str().unwrap();
+
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tabsent"));
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "install", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(settings.to_str().unwrap()));
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(after["permissions"]["allow"][0], "Bash(ls)");
+    assert_eq!(after["hooks"]["Stop"].as_array().unwrap().len(), 2);
+    assert!(after["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .contains("hook claude-code session-start"));
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "install", "claude-code"])
+        .assert()
+        .success();
+    let again = std::fs::read_to_string(&settings).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&again).unwrap(),
+        after,
+        "idempotent"
+    );
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "status", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tinstalled"))
+        .stdout(predicate::str::contains("bin ok"));
+    let printed = singularmem()
+        .env("HOME", h)
+        .args(["hooks", "install", "codex", "--print"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&printed).unwrap();
+    assert!(v["hooks"]["SessionStart"].is_array());
+    assert!(
+        !home.path().join(".codex/hooks.json").exists(),
+        "--print writes nothing"
+    );
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "uninstall", "claude-code"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        original,
+        "foreign entries byte-identical"
+    );
+    std::fs::write(&settings, "{ not json").unwrap();
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "install", "claude-code"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("settings.json"));
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        "{ not json",
+        "never overwrites invalid JSON"
+    );
+}
+
+#[test]
+fn hook_exits_zero_when_store_cannot_be_opened() {
+    let dir = TempDir::new().unwrap();
+    // A directory, not a valid SQLite file: `Store::open_with_options` fails
+    // to open it no matter which command tries to use it.
+    let bad = dir.path().join("not-a-store");
+    std::fs::create_dir_all(&bad).unwrap();
+    let bad_s = bad.to_str().unwrap();
+
+    singularmem()
+        .args(["--store", bad_s, "hook", "claude-code", "stop"])
+        .write_stdin(r#"{"transcript_path":"/does/not/matter.jsonl"}"#)
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains(bad_s));
+
+    let out = singularmem()
+        .args(["--store", bad_s, "hook", "claude-code", "session-start"])
+        .write_stdin(r#"{"cwd":"/x/proj"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn hook_codex_stop_without_session_id_ingests_nothing() {
+    let dir = TempDir::new().unwrap();
+    let codex_root = dir.path().join("codex_root");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let rollout = fixture_codex().join("2026/09/01/rollout-2026-09-01T10-00-00-sess1.jsonl");
+    std::fs::copy(
+        &rollout,
+        codex_root.join("rollout-2026-09-01T10-00-00-sess1.jsonl"),
+    )
+    .unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CODEX_ROOT", codex_root.to_str().unwrap())
+        .args(["--store", db_s, "hook", "codex", "stop"])
+        .write_stdin(r#"{"cwd":"/x"}"#)
+        .assert()
+        .success();
+
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn hook_cursor_stop_without_conversation_or_cwd_ingests_nothing() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/proj"),
+            composers: vec![(
+                "c1",
+                "A",
+                1_700_000_000_000,
+                vec![FixtureBubble {
+                    id: "b1",
+                    kind: 1,
+                    text: "one",
+                }],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db_s, "hook", "cursor", "stop"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn hooks_status_reports_invalid_for_unparsable_config() {
+    let home = TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{ not json").unwrap();
+    let h = home.path().to_str().unwrap();
+
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "status", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tinvalid"))
+        .stderr(predicate::str::contains("settings.json"));
+}
+
+#[test]
+fn hooks_uninstall_does_not_rewrite_foreign_only_config() {
+    let home = TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    // 4-space indentation — different from `write_config`'s 2-space output,
+    // so a spurious rewrite would be detectable even if the content were
+    // otherwise unchanged.
+    let original = "{\n    \"permissions\": {\n        \"allow\": [\n            \"Bash(ls)\"\n        ]\n    }\n}\n";
+    std::fs::write(&settings, original).unwrap();
+    let h = home.path().to_str().unwrap();
+
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "uninstall", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(settings.to_str().unwrap()));
+
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        original,
+        "foreign-only config left byte-identical"
+    );
+}
+
+#[test]
+fn hooks_status_project_flag_reads_project_config() {
+    let project = TempDir::new().unwrap();
+    let project_dir = project.path().to_str().unwrap();
+    let settings = project.path().join(".claude/settings.json");
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "status", "claude-code", "--project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tabsent"))
+        .stdout(predicate::str::contains(settings.to_str().unwrap()));
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "install", "claude-code", "--project"])
+        .assert()
+        .success();
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "status", "claude-code", "--project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tinstalled"));
+}
+
+#[test]
+fn store_env_var_is_honoured_and_flag_wins() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a.db");
+    let b = dir.path().join("b.db");
+
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["ingest", "--content", "via env"])
+        .assert()
+        .success();
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("via env"));
+
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args([
+            "--store",
+            b.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "via flag",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["--store", b.to_str().unwrap(), "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("via flag"))
+        .stdout(predicate::str::contains("via env").not());
 }

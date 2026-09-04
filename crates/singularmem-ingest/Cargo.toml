@@ -11,6 +11,9 @@ description = "Bulk, idempotent ingestion sources for Singularmem: Claude Code t
 [lints]
 workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
 serde = { workspace = true }
@@ -18,9 +21,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 jiff = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
 ignore = "0.4"
 sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+singularmem-ingest = { path = ".", features = ["testing"] }
+temp-env = "0.3"

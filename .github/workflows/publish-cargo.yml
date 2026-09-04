@@ -9,6 +9,7 @@
 #   singularmem-search
 #   singularmem-retrieve
 #   singularmem-ingest
+#   singularmem-hooks
 #   singularmem-adapter-claude
 #   singularmem-adapter-openai
 #   singularmem-adapter-gemini
@@ -64,6 +65,7 @@ jobs:
           publish_one singularmem-search
           publish_one singularmem-retrieve
           publish_one singularmem-ingest
+          publish_one singularmem-hooks
           publish_one singularmem-adapter-claude
           publish_one singularmem-adapter-openai
           publish_one singularmem-adapter-gemini

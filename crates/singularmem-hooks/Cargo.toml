@@ -1,0 +1,21 @@
+[package]
+name = "singularmem-hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Editor hook envelopes and config-file merging for Singularmem (Claude Code, Codex, Cursor)."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+temp-env = "0.3"

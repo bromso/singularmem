@@ -274,6 +274,8 @@ Rules:
 - `external_id` and `scope` are therefore present only on items that have
   one; readers of `export-v1` written by a v1 or v2 store simply never
   see those fields, so these are backward-compatible additions.
+- Object key order in `metadata` follows insertion order from v0.18.0
+  (previously alphabetical); loaders must not depend on key order.
 
 ## Known limitations
 

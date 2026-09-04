@@ -14,7 +14,11 @@ authors = ["Jonas Broms"]
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 ulid = { version = "1.1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `preserve_order` is required, not incidental: the hooks crate rewrites an
+# editor's config file in place and must not reorder the user's keys, and
+# `config::remove` relies on `Map::shift_remove`, which only exists with it.
+# Declared once here so every member shares one resolved feature set.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 thiserror = "2.0"
 jiff = { version = "0.1", features = ["serde"] }
 tracing = "0.1"
@@ -58,6 +62,7 @@ singularmem-adapter-claude = { path = "crates/singularmem-adapter-claude" }
 singularmem-adapter-openai = { path = "crates/singularmem-adapter-openai" }
 singularmem-adapter-gemini = { path = "crates/singularmem-adapter-gemini" }
 singularmem-ingest = { path = "crates/singularmem-ingest" }
+singularmem-hooks = { path = "crates/singularmem-hooks" }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 dirs = "5"
 serde_json = { workspace = true }
@@ -71,6 +76,7 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 tantivy = { workspace = true }
+singularmem-ingest = { path = "crates/singularmem-ingest", features = ["testing"] }
 
 [[bin]]
 name = "singularmem"

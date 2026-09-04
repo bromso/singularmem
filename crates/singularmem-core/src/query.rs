@@ -267,6 +267,129 @@ impl Store {
             .collect())
     }
 
+    /// The newest `limit` items, optionally restricted to `filter`. Newest
+    /// first (callers wanting chronological order reverse the vector).
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn recent(&self, filter: Option<&ScopeFilter>, limit: usize) -> Result<Vec<Item>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from("SELECT id FROM items WHERE 1=1");
+        let mut params: Vec<String> = Vec::new();
+        if let Some(f) = filter {
+            let (clause, binds) = f.sql_clause();
+            sql.push_str(" AND ");
+            sql.push_str(clause);
+            params.extend(binds);
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let bind_params = params
+            .iter()
+            .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::ToSql>)
+            .chain(std::iter::once(
+                Box::new(limit_i64) as Box<dyn rusqlite::ToSql>
+            ))
+            .collect::<Vec<_>>();
+
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(&sql).map_err(|e| Error::Sqlite {
+            context: "preparing recent query",
+            source: e,
+        })?;
+        let id_strings: Vec<String> = stmt
+            .query_map(
+                rusqlite::params_from_iter(bind_params.iter().map(std::convert::AsRef::as_ref)),
+                |r| r.get::<_, String>(0),
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "executing recent query",
+                source: e,
+            })?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(|e| Error::Sqlite {
+                context: "collecting recent IDs",
+                source: e,
+            })?;
+        drop(stmt);
+        drop(conn);
+        let ids = id_strings
+            .into_iter()
+            .map(|s| s.parse::<ItemId>())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.into_iter().map(|id| self.get(id)).collect()
+    }
+
+    /// Number of items matching `filter` (all items when `None`).
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn count_scoped(&self, filter: Option<&ScopeFilter>) -> Result<usize> {
+        let mut sql = String::from("SELECT COUNT(*) FROM items WHERE 1=1");
+        let mut params: Vec<String> = Vec::new();
+        if let Some(f) = filter {
+            let (clause, binds) = f.sql_clause();
+            sql.push_str(" AND ");
+            sql.push_str(clause);
+            params.extend(binds);
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let n: i64 = conn
+            .query_row(&sql, rusqlite::params_from_iter(params.iter()), |r| {
+                r.get(0)
+            })
+            .map_err(|e| Error::Sqlite {
+                context: "counting scoped items",
+                source: e,
+            })?;
+        drop(conn);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// Number of items matching the union (OR) of `filters`. Unlike calling
+    /// `count_scoped` once per filter and summing, an item matching more
+    /// than one filter (e.g. filters on `a` and `a/b`, both of which match
+    /// an item scoped to `a/b`) is counted once, not once per match. An
+    /// empty `filters` slice returns `0`.
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn count_scoped_any(&self, filters: &[ScopeFilter]) -> Result<usize> {
+        if filters.is_empty() {
+            return Ok(0);
+        }
+        let mut clauses: Vec<String> = Vec::with_capacity(filters.len());
+        let mut params: Vec<String> = Vec::new();
+        for f in filters {
+            let (clause, binds) = f.sql_clause();
+            clauses.push(format!("({clause})"));
+            params.extend(binds);
+        }
+        let sql = format!("SELECT COUNT(*) FROM items WHERE {}", clauses.join(" OR "));
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let n: i64 = conn
+            .query_row(&sql, rusqlite::params_from_iter(params.iter()), |r| {
+                r.get(0)
+            })
+            .map_err(|e| Error::Sqlite {
+                context: "counting scoped items (union)",
+                source: e,
+            })?;
+        drop(conn);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// The scope of one item (cheap point read, no payload).
     ///
     /// # Errors

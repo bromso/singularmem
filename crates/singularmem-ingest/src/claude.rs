@@ -14,6 +14,7 @@ use singularmem_core::NewItem;
 
 use crate::chunk::{chunk_text, DEFAULT_CHUNK_BYTES};
 use crate::error::{Error, Result};
+use crate::project_filter::{derive_scope, ProjectFilter};
 use crate::Source;
 
 /// A single Claude Code session file.
@@ -62,45 +63,6 @@ struct Line {
 #[derive(Deserialize)]
 struct Message {
     content: Option<serde_json::Value>,
-}
-
-/// A resolved `--project` filter: the raw path, its canonical form when it
-/// resolves, and a one-entry memo so a transcript whose thousands of lines
-/// share one `cwd` costs a single `canonicalize` call.
-#[derive(Debug)]
-struct ProjectFilter {
-    raw: PathBuf,
-    canonical: Option<PathBuf>,
-    memo: Option<(String, bool)>,
-}
-
-impl ProjectFilter {
-    fn new(raw: &Path) -> Self {
-        Self {
-            raw: raw.to_path_buf(),
-            canonical: raw.canonicalize().ok(),
-            memo: None,
-        }
-    }
-
-    /// True when `cwd` names the same directory as the filter: equal as raw
-    /// paths, or equal once both sides canonicalize successfully. A `cwd`
-    /// that no longer exists on this machine can still match by raw path.
-    fn matches(&mut self, cwd: Option<&str>) -> bool {
-        let Some(cwd) = cwd else { return false };
-        if let Some((seen, verdict)) = &self.memo {
-            if seen == cwd {
-                return *verdict;
-            }
-        }
-        let verdict = self.raw.as_path() == Path::new(cwd)
-            || match (&self.canonical, Path::new(cwd).canonicalize().ok()) {
-                (Some(a), Some(b)) => *a == b,
-                _ => false,
-            };
-        self.memo = Some((cwd.to_string(), verdict));
-        verdict
-    }
 }
 
 impl ClaudeTranscript {
@@ -246,28 +208,9 @@ impl ClaudeTranscript {
                 return result.clone();
             }
         }
-        let result = Self::compute_derived_scope(cwd);
+        let result = derive_scope("claude-code", cwd);
         *self.derived_memo.borrow_mut() = Some((cwd.to_string(), result.clone()));
         result
-    }
-
-    /// Actually derive the scope for a given `cwd`, logging on any failure.
-    fn compute_derived_scope(cwd: &str) -> Option<String> {
-        let Some(base) = Path::new(cwd).file_name() else {
-            tracing::warn!(cwd, "cwd has no basename; item left unscoped");
-            return None;
-        };
-        let Some(base) = base.to_str() else {
-            tracing::warn!(cwd, "cwd basename is not valid UTF-8; item left unscoped");
-            return None;
-        };
-        match singularmem_core::scope::validate(&format!("claude-code/{base}")) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!(cwd, error = %e, "cwd basename is not a valid scope segment; item left unscoped");
-                None
-            }
-        }
     }
 }
 

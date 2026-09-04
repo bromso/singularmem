@@ -405,3 +405,46 @@ fn fresh_store_is_v3_and_round_trips_scope() {
         Err(Error::Validation { field: "scope", .. })
     ));
 }
+
+/// Four processes (here: threads) opening the same *non-existent* store at
+/// once all take the fresh-store bootstrap branch. Without a transaction
+/// around the DDL, the losers hit "table singularmem_meta already exists"
+/// and `Store::open` fails — exactly the shape a burst of editor hooks
+/// produces on a brand-new machine.
+#[test]
+fn concurrent_first_open_of_a_fresh_store_all_succeed() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("fresh.db");
+    assert!(!path.exists());
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                Store::open(&path).map(|s| (i, s))
+            })
+        })
+        .collect();
+
+    let mut stores = Vec::new();
+    for h in handles {
+        match h.join().expect("thread panicked") {
+            Ok((i, s)) => {
+                assert_eq!(s.format_version().unwrap(), "3", "opener {i}");
+                stores.push(s);
+            }
+            Err(e) => panic!("concurrent Store::open failed: {e}"),
+        }
+    }
+    assert_eq!(stores.len(), 4);
+
+    // Exactly one bootstrap ran: one format_version row, one created_at row.
+    let conn = Connection::open(&path).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM singularmem_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 2, "one format_version and one created_at row");
+}

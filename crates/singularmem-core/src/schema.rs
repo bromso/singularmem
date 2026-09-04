@@ -136,35 +136,74 @@ fn migration_err(from: &str, to: &'static str, reason: String) -> Error {
     }
 }
 
-/// Apply the current (v3) schema and write `format_version = '3'` to the meta
-/// table. Used by `Store::open` on a fresh store. Idempotent only in the
-/// sense that `CREATE TABLE` will fail loudly if the schema already exists —
-/// callers must check the meta table first.
-pub fn apply_current(conn: &rusqlite::Connection, created_at: &str) -> Result<()> {
-    conn.execute_batch(DDL_V3).map_err(|e| Error::Sqlite {
-        context: "applying v3 schema",
-        source: e,
-    })?;
+/// Apply the current (v3) schema and write `format_version = '3'` to the
+/// meta table. Used by `Store::open` on a fresh store.
+///
+/// Takes the write lock up front with `BEGIN IMMEDIATE` and re-reads
+/// `format_version` inside the transaction, exactly as `run_migration`
+/// does: if a version row now exists, another process bootstrapped the
+/// store while we were waiting for the lock, so this rolls back and
+/// returns `Ok(())` rather than failing with "table … already exists".
+/// The DDL and both meta rows are otherwise applied and committed
+/// together, so a concurrent opener never observes a half-built schema.
+///
+/// # Errors
+///
+/// `Error::Sqlite` if the transaction, the DDL, or either meta insert
+/// fails; the transaction is rolled back, leaving the file as it was.
+pub fn apply_current(conn: &mut rusqlite::Connection, created_at: &str) -> Result<()> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| Error::Sqlite {
+            context: "beginning fresh-store bootstrap transaction",
+            source: e,
+        })?;
 
-    conn.execute(
-        "INSERT INTO singularmem_meta (key, value) VALUES ('format_version', ?1)",
-        rusqlite::params![FORMAT_VERSION],
-    )
-    .map_err(|e| Error::Sqlite {
-        context: "writing format_version meta row",
-        source: e,
-    })?;
+    if read_format_version(&tx)?.is_some() {
+        // Another process finished the bootstrap before we took the lock.
+        tx.rollback().map_err(|e| Error::Sqlite {
+            context: "rolling back a bootstrap another process already did",
+            source: e,
+        })?;
+        return Ok(());
+    }
 
-    conn.execute(
-        "INSERT INTO singularmem_meta (key, value) VALUES ('created_at', ?1)",
-        rusqlite::params![created_at],
-    )
-    .map_err(|e| Error::Sqlite {
-        context: "writing created_at meta row",
-        source: e,
-    })?;
+    let applied = tx
+        .execute_batch(DDL_V3)
+        .map_err(|e| Error::Sqlite {
+            context: "applying v3 schema",
+            source: e,
+        })
+        .and_then(|()| {
+            tx.execute(
+                "INSERT INTO singularmem_meta (key, value) VALUES ('format_version', ?1)",
+                rusqlite::params![FORMAT_VERSION],
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "writing format_version meta row",
+                source: e,
+            })
+        })
+        .and_then(|_| {
+            tx.execute(
+                "INSERT INTO singularmem_meta (key, value) VALUES ('created_at', ?1)",
+                rusqlite::params![created_at],
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "writing created_at meta row",
+                source: e,
+            })
+        });
 
-    Ok(())
+    if let Err(e) = applied {
+        let _ = tx.rollback();
+        return Err(e);
+    }
+
+    tx.commit().map_err(|e| Error::Sqlite {
+        context: "committing fresh-store bootstrap",
+        source: e,
+    })
 }
 
 /// Read the `format_version` meta row. Returns `None` if the row does not
