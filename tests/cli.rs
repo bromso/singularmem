@@ -1326,7 +1326,7 @@ fn ingest_transcript_is_idempotent_and_searchable() {
     let db_s = db.to_str().unwrap();
     let fx = fixture_transcripts();
 
-    // The fixture's malformed line 14 makes failed=1 → exit 1 (see the
+    // The fixture's malformed line 15 makes failed=1 → exit 1 (see the
     // dry-run test below, which documents the same reasoning).
     singularmem()
         .args(["--store", db_s, "ingest-transcript", fx.to_str().unwrap()])

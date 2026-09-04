@@ -1,4 +1,5 @@
 {"type":"last-prompt","lastPrompt":"x","sessionId":"11111111-2222-3333-4444-555555555555"}
+{"type":"mode","mode":"default","sessionId":"11111111-2222-3333-4444-555555555555"}
 {"type":"user","uuid":"u1","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-09-01T10:00:00.000Z","cwd":"/home/me/proj","gitBranch":"main","isSidechain":false,"message":{"role":"user","content":"How do I run the tests?"}}
 {"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-09-01T10:00:01.000Z","cwd":"/home/me/proj","gitBranch":"main","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"Run cargo test."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}
 {"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-09-01T10:00:02.000Z","cwd":"/home/me/proj","gitBranch":"main","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}

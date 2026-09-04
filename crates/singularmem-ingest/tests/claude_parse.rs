@@ -38,8 +38,8 @@ fn keeps_exactly_the_text_messages() {
     );
     assert_eq!(errs.len(), 1, "the malformed line");
     assert!(
-        matches!(&errs[0], singularmem_ingest::Error::Json { line: 14, .. }),
-        "expected Json error on line 14, got {:?}",
+        matches!(&errs[0], singularmem_ingest::Error::Json { line: 15, .. }),
+        "expected Json error on line 15, got {:?}",
         errs[0]
     );
     // filtered: tool_result-only u2, tool_use-only a2, thinking-only a3, meta u4, sidechain u5
