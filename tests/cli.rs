@@ -1601,16 +1601,14 @@ fn ingest_dir_missing_path_is_exit_2() {
         .stderr(predicate::str::contains("path not found"));
 }
 
-/// Run `search --scope <scope> [--scope-exact] cargo --json` and return the
-/// `hits[].id` values from the JSON output.
-fn scoped_search_hit_ids(db_s: &str, scope: &str, exact: bool) -> Vec<String> {
-    let mut args = vec!["--store", db_s, "search", "--scope", scope];
-    if exact {
-        args.push("--scope-exact");
-    }
-    args.extend(["cargo", "--json"]);
+/// Run `search --scope <scope> cargo --json` and return the `hits[].id`
+/// values from the JSON output.
+fn scoped_search_hit_ids(db_s: &str, scope: &str) -> Vec<String> {
+    let args = [
+        "--store", db_s, "search", "--scope", scope, "cargo", "--json",
+    ];
     let out = singularmem()
-        .args(&args)
+        .args(args)
         .assert()
         .success()
         .get_output()
@@ -1685,11 +1683,11 @@ fn bulk_verbs_apply_default_scopes_and_filters_work() {
         .success()
         .stdout("");
 
-    let claude_code_ids = scoped_search_hit_ids(db_s, "claude-code", false);
+    let claude_code_ids = scoped_search_hit_ids(db_s, "claude-code");
     assert!(!claude_code_ids.is_empty());
 
     // Descendant-style filter (no --scope-exact) also finds the file hit.
-    let files_ids = scoped_search_hit_ids(db_s, "files", false);
+    let files_ids = scoped_search_hit_ids(db_s, "files");
     assert!(!files_ids.is_empty());
 
     // The two scoped searches must return disjoint sets of ids.

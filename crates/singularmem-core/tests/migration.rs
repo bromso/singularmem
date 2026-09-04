@@ -242,6 +242,24 @@ fn v2_store_migrates_to_v3_on_open() {
     scoped.scope = Some("loader/check".into());
     let scoped = store.ingest(scoped).unwrap();
     assert_eq!(scoped.scope.as_deref(), Some("loader/check"));
+
+    // A true descendant, plus two near-misses a correct descendant-inclusive
+    // query must exclude: a hyphenated sibling ("loader-check") and an
+    // underscore near-miss ("loader_check") that would only slip in if `_`
+    // — a legal scope byte and a SQL LIKE wildcard — were left unescaped in
+    // the bound pattern.
+    let mut child = singularmem_core::NewItem::text("descendant item");
+    child.scope = Some("loader/check/sub".into());
+    let child = store.ingest(child).unwrap();
+
+    let mut hyphen_sibling = singularmem_core::NewItem::text("hyphen sibling");
+    hyphen_sibling.scope = Some("loader-check".into());
+    store.ingest(hyphen_sibling).unwrap();
+
+    let mut underscore_sibling = singularmem_core::NewItem::text("underscore sibling");
+    underscore_sibling.scope = Some("loader_check".into());
+    store.ingest(underscore_sibling).unwrap();
+
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
@@ -282,15 +300,28 @@ fn v2_store_migrates_to_v3_on_open() {
     assert_eq!(format_version, "3");
 
     // Descendant-inclusive query from docs/formats/store-v3.md, using the
-    // escaped-LIKE form the reference implementation actually binds.
+    // escaped-LIKE form the reference implementation actually binds: `?2`
+    // is the path with `\`, `%`, and `_` backslash-escaped, then `/%`
+    // appended. None of those bytes appear in "loader/check", so escaping
+    // is a no-op here and `?2` is simply "loader/check/%".
     let ids: Vec<String> = conn
-        .prepare("SELECT id FROM items WHERE scope = ?1 OR scope LIKE ?2 ESCAPE '\\'")
+        .prepare(
+            "SELECT id FROM items WHERE scope = ?1 OR scope LIKE ?2 ESCAPE '\\' \
+             ORDER BY created_at",
+        )
         .unwrap()
-        .query_map(rusqlite::params!["loader/check", "loader/%"], |r| r.get(0))
+        .query_map(rusqlite::params!["loader/check", "loader/check/%"], |r| {
+            r.get(0)
+        })
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(ids, vec![scoped.id.to_string()]);
+    assert_eq!(
+        ids,
+        vec![scoped.id.to_string(), child.id.to_string()],
+        "must match the exact scope and its descendant, in created_at \
+         order, and exclude both near-miss siblings"
+    );
 }
 
 #[test]

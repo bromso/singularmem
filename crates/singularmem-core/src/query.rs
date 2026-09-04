@@ -156,6 +156,10 @@ impl Store {
     ///
     /// # Errors
     /// Same as [`Store::list`].
+    ///
+    /// # Panics
+    /// Panics if the internal connection `Mutex` is poisoned (i.e. another
+    /// thread panicked while holding the lock).
     pub fn list_scoped(&self, filter: Option<&ScopeFilter>) -> Result<ItemIter<'_>> {
         self.list_by_tags_scoped(&[], filter)
     }
