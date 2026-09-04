@@ -59,6 +59,35 @@ Two known limitations of the bulk verbs, both tracked for a follow-up
   changes too (`file:<path>` vs `file:<path>#n`), so the old item is
   orphaned rather than superseded.
 
+## Editor integration
+
+Wire Singularmem into your editor's lifecycle hooks so every session is
+ingested automatically and every new session opens with the project's
+recent context already loaded — no manual `ingest-*` or `wake-up` calls.
+
+```bash
+singularmem hooks install claude-code   # ~/.claude/settings.json
+singularmem hooks install codex         # ~/.codex/hooks.json
+singularmem hooks install cursor        # ~/.cursor/hooks.json
+```
+
+Each installs a `session-start` hook that prints the project's wake-up
+context in the editor's expected envelope, and `stop`/`pre-compact`/
+`session-end` hooks (Cursor: `stop`/`preCompact`/`sessionEnd`) that ingest
+the session's transcript in the background. Installing is idempotent and
+additive — it replaces only Singularmem's own entries, leaving the rest of
+your config untouched. `singularmem hooks status` reports what's installed;
+`singularmem hooks uninstall <editor>` removes it cleanly.
+
+This is the same context `wake-up` prints on demand:
+
+```bash
+singularmem wake-up --project .
+```
+
+See [docs/hooks.md](docs/hooks.md) for the full per-editor event table,
+config paths, and troubleshooting.
+
 ## Installing the CLI
 
 The `singularmem` CLI and `singularmem-mcp` server ship as prebuilt binaries for:

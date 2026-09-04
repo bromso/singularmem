@@ -15,6 +15,9 @@ use singularmem_core::{Error, ItemId, NewItem, ScopeFilter, Store, StoreOptions}
 )]
 struct Cli {
     /// Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
+    /// Also settable via the `SINGULARMEM_STORE` environment variable (see
+    /// `run`) — the only way to point a hook (which runs with a fixed,
+    /// flag-less command line) at a non-default store.
     #[arg(long, global = true, value_name = "PATH")]
     store: Option<PathBuf>,
 
@@ -64,6 +67,52 @@ enum Command {
     /// Print the newest items across a project's editor scopes.
     #[command(name = "wake-up")]
     WakeUp(WakeUpArgs),
+    /// Run an editor hook event on stdin (never fails the calling editor).
+    Hook(HookArgs),
+    /// Install, uninstall, or inspect editor hook wiring.
+    Hooks(HooksCommand),
+}
+
+#[derive(Args, Debug)]
+struct HookArgs {
+    /// The editor invoking the hook: `claude-code`, `codex`, or `cursor`.
+    editor: String,
+    /// The hook event: `session-start`, `stop`, `pre-compact`, or `session-end`.
+    event: String,
+}
+
+#[derive(Args, Debug)]
+struct HooksCommand {
+    #[command(subcommand)]
+    action: HooksAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum HooksAction {
+    /// Wire this editor's hooks to the current binary.
+    Install {
+        /// The editor: `claude-code`, `codex`, or `cursor`.
+        editor: String,
+        /// Write to the project-local config instead of the user's home directory.
+        #[arg(long)]
+        project: bool,
+        /// Print the merged config to stdout instead of writing it.
+        #[arg(long)]
+        print: bool,
+    },
+    /// Remove this editor's hooks, leaving everything else untouched.
+    Uninstall {
+        /// The editor: `claude-code`, `codex`, or `cursor`.
+        editor: String,
+        /// Remove from the project-local config instead of the user's home directory.
+        #[arg(long)]
+        project: bool,
+    },
+    /// Show whether hooks are installed for one editor, or all three.
+    Status {
+        /// The editor to check; every editor when omitted.
+        editor: Option<String>,
+    },
 }
 
 /// Shared `--scope`/`--scope-exact` flags, flattened into `ListArgs`,
@@ -524,10 +573,27 @@ enum CliError {
     StoreReadOnly,
     #[error("{failed} item(s) failed during bulk ingest; see warnings above")]
     IngestPartial { failed: usize },
+    #[error("{0}")]
+    Hooks(#[from] singularmem_hooks::Error),
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
-    let store_path = cli.store.clone().unwrap_or_else(default_store_path);
+    // `hooks install|uninstall|status` never touches the store: dispatch
+    // before `Store::open_with_options` so it works even when no store
+    // exists yet (a common first-run scenario) and never contends for its
+    // lock.
+    if let Command::Hooks(cmd) = &cli.command {
+        return cmd_hooks(cmd);
+    }
+
+    // `--store` wins; then `SINGULARMEM_STORE` (the only way to point a
+    // hook — a fixed, flag-less command line — at a non-default store);
+    // then the per-user XDG default.
+    let store_path = cli
+        .store
+        .clone()
+        .or_else(|| std::env::var_os("SINGULARMEM_STORE").map(PathBuf::from))
+        .unwrap_or_else(default_store_path);
     let opts = StoreOptions {
         read_only: cli.read_only,
     };
@@ -559,6 +625,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             | Command::IngestCodex(_)
             | Command::IngestCursor(_)
             | Command::IngestDir(_)
+            | Command::Hook(_)
     );
     if needs_hook && !cli.no_index {
         let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
@@ -667,6 +734,8 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::SemanticSearch(args) => cmd_semantic_search(store, store_path, &args),
         Command::Scope(cmd) => cmd_scope(store, &cmd),
         Command::WakeUp(args) => cmd_wake_up(store, &args),
+        Command::Hook(args) => cmd_hook(store, &args),
+        Command::Hooks(_) => unreachable!("Command::Hooks is dispatched before the store opens"),
     }
 }
 
@@ -1256,6 +1325,243 @@ fn write_hook_envelope(
         &singularmem_hooks::session_start_envelope(editor, text),
     )?;
     writeln!(out)?;
+    Ok(())
+}
+
+/// Run one editor hook event on stdin. Never propagates an error to the
+/// caller — a hook must never fail the editor invoking it — so any failure
+/// from [`run_hook`] is logged as a warning and swallowed.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "signature matches every other cmd_* dispatched from run_command"
+)]
+fn cmd_hook(store: &Store, args: &HookArgs) -> Result<(), CliError> {
+    if let Err(e) = run_hook(store, args) {
+        tracing::warn!(error = %e, editor = %args.editor, event = %args.event, "hook failed; editor continues");
+    }
+    Ok(())
+}
+
+fn run_hook(store: &Store, args: &HookArgs) -> Result<(), CliError> {
+    use singularmem_hooks::{parse_input, Editor, Event};
+
+    let editor: Editor = args
+        .editor
+        .parse()
+        .map_err(|_| CliError::Usage(format!("unknown editor '{}'", args.editor)))?;
+    let event: Event = args
+        .event
+        .parse()
+        .map_err(|_| CliError::Usage(format!("unknown event '{}'", args.event)))?;
+
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw)?;
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not parse hook input JSON; proceeding with empty input");
+        serde_json::Value::Null
+    });
+    let input = parse_input(editor, &json);
+
+    match event {
+        Event::SessionStart => hook_session_start(store, editor, &input),
+        Event::Stop | Event::PreCompact | Event::SessionEnd => {
+            hook_save_event(store, editor, &input)
+        }
+    }
+}
+
+/// The `SessionStart` hook: build the project's wake-up context (scoped to
+/// `input.cwd`, or the current directory when the editor sends none) and
+/// print it wrapped in the editor's session-start envelope.
+fn hook_session_start(
+    store: &Store,
+    editor: singularmem_hooks::Editor,
+    input: &singularmem_hooks::HookInput,
+) -> Result<(), CliError> {
+    use singularmem_hooks::session_start_envelope;
+    use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
+
+    let dir = match &input.cwd {
+        Some(p) => p.clone(),
+        None => std::env::current_dir()?,
+    };
+    let set = ScopeSet::for_project(&dir, false);
+    let opts = WakeupOptions::default();
+    let text = match build(store, &set, &opts) {
+        Ok(w) => render(&w, &singularmem_retrieve::PlainAdapter, opts.max_bytes),
+        Err(e) => {
+            tracing::warn!(error = %e, "wake-up failed; emitting empty context");
+            String::new()
+        }
+    };
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, &session_start_envelope(editor, &text))?;
+    writeln!(out)?;
+    Ok(())
+}
+
+/// The `Stop`/`PreCompact`/`SessionEnd` hooks: ingest whatever transcript(s)
+/// the event identifies, per editor.
+fn hook_save_event(
+    store: &Store,
+    editor: singularmem_hooks::Editor,
+    input: &singularmem_hooks::HookInput,
+) -> Result<(), CliError> {
+    use singularmem_hooks::Editor;
+
+    let report = match editor {
+        Editor::ClaudeCode => hook_ingest_claude(store, input)?,
+        Editor::Codex => hook_ingest_codex(store, input)?,
+        Editor::Cursor => hook_ingest_cursor(store, input)?,
+    };
+    tracing::info!(
+        ingested = report.ingested,
+        skipped = report.skipped_existing,
+        failed = report.failed,
+        "hook ingest complete"
+    );
+    Ok(())
+}
+
+/// Claude Code always sends `transcript_path` on `Stop`/`PreCompact`/
+/// `SessionEnd`; without it there is nothing to ingest.
+fn hook_ingest_claude(
+    store: &Store,
+    input: &singularmem_hooks::HookInput,
+) -> Result<singularmem_ingest::Report, CliError> {
+    use singularmem_ingest::{ingest_source, ClaudeTranscript};
+
+    let Some(p) = &input.transcript_path else {
+        return Err(CliError::Usage("hook input has no transcript_path".into()));
+    };
+    let src = ClaudeTranscript::open(p)?;
+    Ok(ingest_source(store, &src, false)?)
+}
+
+/// Codex sends `transcript_path` when it has one; otherwise scan the default
+/// Codex root for rollout files whose filename contains `session_id`. Zero
+/// matches ingests nothing (the caller logs the resulting zero counts).
+fn hook_ingest_codex(
+    store: &Store,
+    input: &singularmem_hooks::HookInput,
+) -> Result<singularmem_ingest::Report, CliError> {
+    use singularmem_ingest::{
+        default_codex_root, discover_codex_sessions, ingest_source, CodexRollout, Report,
+    };
+
+    let files: Vec<PathBuf> = if let Some(p) = &input.transcript_path {
+        vec![p.clone()]
+    } else {
+        let root = default_codex_root()
+            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?;
+        let want = input.session_id.clone().unwrap_or_default();
+        discover_codex_sessions(&root)?
+            .into_iter()
+            .filter(|f| f.to_string_lossy().contains(&want))
+            .collect()
+    };
+
+    let mut total = Report::default();
+    for f in files {
+        let src = CodexRollout::open(&f)?;
+        accumulate(&mut total, ingest_source(store, &src, false)?);
+    }
+    Ok(total)
+}
+
+/// Cursor identifies the conversation to ingest by `conversation_id` when
+/// present; otherwise fall back to filtering by `cwd` as the project.
+/// `SINGULARMEM_CURSOR_DIR` overrides the default per-OS Cursor user
+/// directory (documented in `docs/hooks.md`; used by tests to point at a
+/// fixture).
+fn hook_ingest_cursor(
+    store: &Store,
+    input: &singularmem_hooks::HookInput,
+) -> Result<singularmem_ingest::Report, CliError> {
+    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats};
+
+    let user = std::env::var_os("SINGULARMEM_CURSOR_DIR")
+        .map(PathBuf::from)
+        .or_else(default_cursor_user_dir)
+        .ok_or_else(|| CliError::Usage("cannot determine Cursor user directory".into()))?;
+    let mut src = CursorChats::open(&user)?;
+    src.conversation_filter.clone_from(&input.conversation_id);
+    if src.conversation_filter.is_none() {
+        src.project_filter.clone_from(&input.cwd);
+    }
+    Ok(ingest_source(store, &src, false)?)
+}
+
+/// `hooks install|uninstall|status`. Never opens the store — see the
+/// dispatch in [`run`].
+fn cmd_hooks(cmd: &HooksCommand) -> Result<(), CliError> {
+    use singularmem_hooks::{
+        config_path, merge, read_config, remove, status, write_config, Editor,
+    };
+
+    let bin = std::env::current_exe()?;
+    let project_dir = std::env::current_dir()?;
+    let parse = |s: &str| {
+        s.parse::<Editor>().map_err(|_| {
+            CliError::Usage(format!(
+                "unknown editor '{s}'; expected claude-code, codex, or cursor"
+            ))
+        })
+    };
+    let mut out = io::stdout().lock();
+
+    match &cmd.action {
+        HooksAction::Install {
+            editor,
+            project,
+            print,
+        } => {
+            let editor = parse(editor)?;
+            let path = config_path(editor, project.then_some(project_dir.as_path()))?;
+            let existing = read_config(&path)?;
+            let merged = merge(editor, &existing, &bin);
+            if *print {
+                serde_json::to_writer_pretty(&mut out, &merged)?;
+                writeln!(out)?;
+            } else {
+                write_config(&path, &merged)?;
+                writeln!(out, "{}", path.display())?;
+            }
+        }
+        HooksAction::Uninstall { editor, project } => {
+            let editor = parse(editor)?;
+            let path = config_path(editor, project.then_some(project_dir.as_path()))?;
+            let existing = read_config(&path)?;
+            if path.exists() {
+                write_config(&path, &remove(editor, &existing))?;
+            }
+            writeln!(out, "{}", path.display())?;
+        }
+        HooksAction::Status { editor } => {
+            let editors: Vec<Editor> = match editor {
+                Some(e) => vec![parse(e)?],
+                None => vec![Editor::ClaudeCode, Editor::Codex, Editor::Cursor],
+            };
+            for e in editors {
+                let path = config_path(e, None)?;
+                let cfg = read_config(&path).unwrap_or(serde_json::Value::Null);
+                let s = status(e, &cfg);
+                writeln!(
+                    out,
+                    "{e}\t{}\t{}\t{}",
+                    if s.installed { "installed" } else { "absent" },
+                    path.display(),
+                    if s.installed && s.bin_exists {
+                        "bin ok"
+                    } else if s.installed {
+                        "bin missing"
+                    } else {
+                        "-"
+                    }
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 
