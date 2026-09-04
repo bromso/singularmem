@@ -1314,3 +1314,194 @@ fn retrieve_with_gemini_adapter_emits_source_headers() {
         .stdout(predicate::str::contains("Source 1"))
         .stdout(predicate::str::contains("the quick brown fox"));
 }
+
+fn fixture_transcripts() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts")
+}
+
+#[test]
+fn ingest_transcript_is_idempotent_and_searchable() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+
+    // The fixture's malformed line 14 makes failed=1 → exit 1 (see the
+    // dry-run test below, which documents the same reasoning).
+    singularmem()
+        .args(["--store", db_s, "ingest-transcript", fx.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "ingested 4, skipped 0 existing, 5 filtered, 1 failed across 1 files",
+        ));
+
+    // Re-parsing the fixture always fails on the same malformed line, so
+    // this idempotent re-run also exits 1 despite ingesting nothing new.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 0, skipped 4 existing"));
+
+    singularmem()
+        .args(["--store", db_s, "search", "cargo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cargo")); // snippet may wrap the term in <mark>
+
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "list",
+            "--tag",
+            "role:user",
+            "--format",
+            "ids",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 2));
+}
+
+#[test]
+fn ingest_transcript_exit_code_reflects_failures_and_dry_run_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+
+    // The fixture contains one malformed line → failed=1 → exit 1.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 4"));
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn ingest_transcript_project_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--project",
+            "/home/me/proj",
+        ])
+        .assert()
+        .code(1) // malformed line still counts
+        .stderr(predicate::str::contains("ingested 3"));
+}
+
+#[test]
+fn ingest_transcript_missing_path_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-transcript",
+            "/definitely/missing",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("path not found"));
+}
+
+#[test]
+fn ingest_dir_tracks_changes_via_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    std::fs::write(tree.join("src/a.rs"), "fn a() {}").unwrap();
+    std::fs::write(tree.join("b.md"), "# b").unwrap();
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 2, skipped 0 existing"));
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+
+    std::fs::write(tree.join("src/a.rs"), "fn a() { changed() }").unwrap();
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 1, skipped 1 existing"));
+
+    let ids = singularmem()
+        .args([
+            "--store", db_s, "list", "--tag", "ext:rs", "--format", "ids",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ids = String::from_utf8(ids).unwrap();
+    let newest = ids.lines().last().unwrap().to_string();
+    singularmem()
+        .args(["--store", db_s, "revisions", &newest, "--format", "ids"])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 2));
+}
+
+#[test]
+fn ingest_dir_read_only_store_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args(["--store", db_s, "ingest", "--content", "seed"])
+        .assert()
+        .success();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("x.txt"), "x").unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "--read-only",
+            "ingest-dir",
+            tree.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("read-only"));
+}

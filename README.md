@@ -6,9 +6,9 @@ or agent accumulates over time — conversations, files, decisions,
 embeddings, provenance — and bridges them to any LLM provider through
 a stable, vendor-neutral interface.
 
-> **Status:** Pre-v0.1 · bootstrap phase · constitution v0.2.0
-> ratified 2026-05-15. No usable functionality yet beyond a version
-> probe.
+> **Status:** v0.17.0 — memory store, hybrid search (Tantivy + USearch),
+> provider adapters, MCP server, TypeScript SDK, and bulk transcript
+> ingestion. Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 
@@ -27,16 +27,21 @@ not a product-management one. The constitution's Principle III.a is a
 **one-way ratchet**: features may move from proprietary to open, never
 the reverse.
 
-## Build
-
-This repository currently builds a do-nothing CLI binary that exists
-only to verify the build pipeline.
+## Quickstart
 
 ```bash
-cargo build
-./target/debug/singularmem
-# → singularmem 0.0.0
+# Make every past Claude Code session searchable
+singularmem ingest-transcript            # defaults to ~/.claude/projects
+singularmem ingest-transcript --project "$PWD"   # only sessions from this repo
+
+# Index a source tree (honours .gitignore; re-runs only pick up changes)
+singularmem ingest-dir .
+
+singularmem search "why did we pick tantivy"
+singularmem retrieve --adapter claude "release process"
 ```
+
+Both bulk verbs are idempotent: re-running ingests nothing already present.
 
 ## Installing the CLI
 

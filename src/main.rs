@@ -35,6 +35,10 @@ struct Cli {
 enum Command {
     /// Add a new item to the store.
     Ingest(IngestArgs),
+    /// Bulk-ingest Claude Code JSONL transcripts (idempotent).
+    IngestTranscript(IngestTranscriptArgs),
+    /// Bulk-ingest a source tree, honouring .gitignore (idempotent).
+    IngestDir(IngestDirArgs),
     /// Fetch one item by ID.
     Get(GetArgs),
     /// Enumerate items, optionally filtered by tag.
@@ -85,6 +89,40 @@ struct IngestArgs {
 enum IngestFormat {
     Id,
     Json,
+}
+
+#[derive(Args, Debug)]
+struct IngestTranscriptArgs {
+    /// Transcript files or directories (searched recursively for *.jsonl).
+    /// Defaults to ~/.claude/projects.
+    paths: Vec<PathBuf>,
+    /// Keep only messages whose working directory equals DIR.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Keep subagent (sidechain) messages.
+    #[arg(long)]
+    include_sidechains: bool,
+    /// Parse and report; write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Suppress per-file progress lines.
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Args, Debug)]
+struct IngestDirArgs {
+    /// Root directory to walk.
+    path: PathBuf,
+    /// Skip files larger than this many bytes.
+    #[arg(long, default_value_t = singularmem_ingest::DEFAULT_MAX_FILE_BYTES)]
+    max_file_bytes: u64,
+    /// Parse and report; write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Suppress per-file progress lines.
+    #[arg(long)]
+    quiet: bool,
 }
 
 #[derive(Args, Debug)]
@@ -289,6 +327,15 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(code)
         }
+        Err(CliError::StoreReadOnly) => {
+            eprintln!("singularmem: store is opened read-only; bulk ingest requires write access");
+            ExitCode::from(2)
+        }
+        Err(CliError::Ingest(singularmem_ingest::Error::NotFound { ref path })) => {
+            eprintln!("singularmem: path not found: {}", path.display());
+            ExitCode::from(2)
+        }
+        Err(CliError::IngestPartial { .. }) => ExitCode::from(1),
         Err(e) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(1)
@@ -314,6 +361,12 @@ enum CliError {
     Search(#[from] singularmem_search::Error),
     #[error("{0}")]
     Retrieve(#[from] singularmem_retrieve::Error),
+    #[error("{0}")]
+    Ingest(#[from] singularmem_ingest::Error),
+    #[error("store is opened read-only; bulk ingest requires write access")]
+    StoreReadOnly,
+    #[error("{failed} item(s) failed during bulk ingest; see warnings above")]
+    IngestPartial { failed: usize },
 }
 
 fn run(cli: Cli) -> Result<(), CliError> {
@@ -323,11 +376,23 @@ fn run(cli: Cli) -> Result<(), CliError> {
     };
     let mut store = Store::open_with_options(&store_path, opts)?;
 
+    if cli.read_only
+        && matches!(
+            cli.command,
+            Command::IngestTranscript(_) | Command::IngestDir(_)
+        )
+    {
+        return Err(CliError::StoreReadOnly);
+    }
+
     // Auto-wire hooks for write commands so live ingest populates the indices.
     // Read/search commands open their own Index instances; if we auto-wired here
     // AND those commands opened again, Tantivy's writer lock would conflict
     // (single-writer-per-Directory).
-    let needs_hook = matches!(cli.command, Command::Ingest(_));
+    let needs_hook = matches!(
+        cli.command,
+        Command::Ingest(_) | Command::IngestTranscript(_) | Command::IngestDir(_)
+    );
     if needs_hook && !cli.no_index {
         let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
 
@@ -402,6 +467,8 @@ fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
 fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(), CliError> {
     match command {
         Command::Ingest(args) => cmd_ingest(store, args),
+        Command::IngestTranscript(args) => cmd_ingest_transcript(store, &args),
+        Command::IngestDir(args) => cmd_ingest_dir(store, &args),
         Command::Get(args) => cmd_get(store, &args),
         Command::List(args) => cmd_list(store, &args),
         Command::Revisions(args) => cmd_revisions(store, &args),
@@ -557,6 +624,101 @@ fn cmd_ingest(store: &Store, args: IngestArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(), CliError> {
+    use singularmem_ingest::{discover_transcripts, ingest_source, ClaudeTranscript, Report};
+
+    let roots: Vec<PathBuf> = if args.paths.is_empty() {
+        vec![dirs::home_dir()
+            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?
+            .join(".claude")
+            .join("projects")]
+    } else {
+        args.paths.clone()
+    };
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        if root.is_dir() {
+            files.extend(discover_transcripts(root)?);
+        } else if root.is_file() {
+            files.push(root.clone());
+        } else {
+            return Err(singularmem_ingest::Error::NotFound { path: root.clone() }.into());
+        }
+    }
+
+    let project = args
+        .project
+        .as_ref()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()));
+    let mut total = Report::default();
+    let mut failed_files = 0usize;
+    for file in &files {
+        let mut src = match ClaudeTranscript::open(file) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path = %file.display(), error = %e, "cannot open transcript");
+                failed_files += 1;
+                continue;
+            }
+        };
+        src.include_sidechains = args.include_sidechains;
+        src.project_filter.clone_from(&project);
+        let r = ingest_source(store, &src, args.dry_run)?;
+        if !args.quiet {
+            eprintln!(
+                "{}: +{} ingested, {} skipped",
+                file.display(),
+                r.ingested,
+                r.skipped_existing + r.skipped_filtered
+            );
+        }
+        accumulate(&mut total, r);
+    }
+    print_summary(&total, files.len());
+    if total.failed > 0 || failed_files > 0 {
+        return Err(CliError::IngestPartial {
+            failed: total.failed + failed_files,
+        });
+    }
+    Ok(())
+}
+
+fn cmd_ingest_dir(store: &Store, args: &IngestDirArgs) -> Result<(), CliError> {
+    use singularmem_ingest::{ingest_source, DirectoryWalker};
+
+    let mut src = DirectoryWalker::new(&args.path)?;
+    src.max_file_bytes = args.max_file_bytes;
+    let r = ingest_source(store, &src, args.dry_run)?;
+    if !args.quiet {
+        eprintln!(
+            "{}: +{} ingested, {} skipped",
+            src.root.display(),
+            r.ingested,
+            r.skipped_existing + r.skipped_filtered
+        );
+    }
+    print_summary(&r, 1);
+    if r.failed > 0 {
+        return Err(CliError::IngestPartial { failed: r.failed });
+    }
+    Ok(())
+}
+
+fn accumulate(total: &mut singularmem_ingest::Report, r: singularmem_ingest::Report) {
+    total.ingested += r.ingested;
+    total.skipped_existing += r.skipped_existing;
+    total.skipped_filtered += r.skipped_filtered;
+    total.failed += r.failed;
+}
+
+fn print_summary(r: &singularmem_ingest::Report, files: usize) {
+    eprintln!(
+        "ingested {}, skipped {} existing, {} filtered, {} failed across {} files",
+        r.ingested, r.skipped_existing, r.skipped_filtered, r.failed, files
+    );
 }
 
 fn cmd_get(store: &Store, args: &GetArgs) -> Result<(), CliError> {
