@@ -195,6 +195,19 @@ fn discover_finds_jsonl_recursively_sorted() {
 }
 
 #[test]
+fn discover_ignores_dot_ignore_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join(".ignore"), "*.jsonl\n").unwrap();
+    std::fs::write(dir.path().join("a.jsonl"), "").unwrap();
+    let found = discover_transcripts(dir.path()).unwrap();
+    assert_eq!(
+        found,
+        vec![dir.path().join("a.jsonl")],
+        "a .ignore file must not hide transcripts"
+    );
+}
+
+#[test]
 fn open_missing_path_is_not_found() {
     assert!(matches!(
         ClaudeTranscript::open("/definitely/missing.jsonl"),

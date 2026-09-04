@@ -343,13 +343,15 @@ pub fn discover_transcripts(root: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
         });
     }
     // A transcript tree is not a source tree: take every `*.jsonl`, hidden
-    // or not, ignoring any `.gitignore` that happens to sit nearby, and
-    // never follow a symlink out of the tree.
+    // or not; no ignore files of any kind, in the tree or its ancestors, are
+    // consulted; and never follow a symlink out of the tree.
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(false)
         .git_global(false)
         .git_exclude(false)
+        .ignore(false)
+        .parents(false)
         .follow_links(false)
         .sort_by_file_path(std::cmp::Ord::cmp)
         .build();
@@ -366,6 +368,13 @@ pub fn discover_transcripts(root: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
             out.push(entry.into_path());
         }
     }
+    // `sort_by_file_path` only orders siblings within each directory before
+    // recursing, not the fully-recursed path lexicographically — e.g. a
+    // sibling directory `b` (containing `inner.jsonl`) and a file
+    // `b-file.jsonl` sort as `b < b-file.jsonl` at that level (name-prefix
+    // rule) and so are visited in that order, but `"b-file.jsonl"` sorts
+    // before `"b/inner.jsonl"` as full path strings (`-` < `/`). So the walk
+    // order is not guaranteed to match a global path sort; keep this.
     out.sort();
     Ok(out)
 }

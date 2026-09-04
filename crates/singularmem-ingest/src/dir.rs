@@ -22,6 +22,11 @@ const MAX_EXTERNAL_ID_BYTES: usize = 512;
 const MAX_TAG_BYTES: usize = 64;
 
 /// Walks a directory and yields one item per readable UTF-8 text file.
+///
+/// Only `.gitignore`/`.ignore` files found inside the walked root are
+/// honoured; ignore files in parent directories, and global or per-repo
+/// `.git/info/exclude` rules, are never consulted (Principle VI: a walk's
+/// result must not depend on the machine it runs on).
 #[derive(Debug)]
 pub struct DirectoryWalker {
     /// Canonicalised root.
@@ -60,10 +65,10 @@ impl DirectoryWalker {
         })
     }
 
-    /// Number of files the last walk handed to the item builder — items
-    /// produced, filtered, and errored alike. Valid after the iterator from
-    /// [`Source::items`] has been exhausted; the CLI reports it as the
-    /// "across N files" figure.
+    /// Files handed to the content pipeline this run (items produced,
+    /// filtered, or rejected). Walk-level errors on directories are not
+    /// counted. Valid after the iterator from [`Source::items`] has been
+    /// exhausted; the CLI reports it as the "across N files" figure.
     #[must_use]
     pub fn visited_files(&self) -> usize {
         self.visited.get()
@@ -177,6 +182,11 @@ impl Source for DirectoryWalker {
             .git_global(false)
             .git_exclude(false)
             .require_git(false)
+            // Only `.gitignore`/`.ignore` files inside the walked root
+            // apply; do not climb into parent directories for more rules
+            // (also Principle VI — a walk of a subdirectory must not depend
+            // on files outside it).
+            .parents(false)
             .sort_by_file_path(std::cmp::Ord::cmp)
             .build();
         Box::new(walker.flat_map(move |entry| match entry {

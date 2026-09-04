@@ -170,6 +170,26 @@ fn over_long_path_is_an_error_not_a_dropped_run() {
 }
 
 #[test]
+fn parent_gitignore_is_not_consulted() {
+    let d = TempDir::new().unwrap();
+    fs::write(d.path().join(".gitignore"), "sub/keep.txt\n").unwrap();
+    fs::create_dir_all(d.path().join("sub")).unwrap();
+    fs::write(d.path().join("sub/keep.txt"), "kept").unwrap();
+
+    let w = DirectoryWalker::new(d.path().join("sub")).unwrap();
+    let items: Vec<_> = w.items().map(Result::unwrap).collect();
+    let rels: Vec<String> = items
+        .iter()
+        .map(|i| i.metadata["rel_path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        rels,
+        vec!["keep.txt"],
+        "a .gitignore in the parent of the walked root must not apply"
+    );
+}
+
+#[test]
 fn over_long_extension_drops_the_ext_tag_only() {
     let d = TempDir::new().unwrap();
     let name = format!("x.{}", "e".repeat(80));
