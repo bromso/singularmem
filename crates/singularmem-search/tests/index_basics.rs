@@ -48,6 +48,7 @@ fn on_ingest_then_commit_increments_doc_count() {
         tags: vec!["greeting".to_string()],
         source: None,
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        external_id: None,
     };
 
     index.on_ingest(&item).unwrap();

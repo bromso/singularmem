@@ -141,6 +141,13 @@ export interface Item {
    * ingest time.
    */
   metadata: any
+  /**
+   * Caller-supplied stable identity used for idempotent bulk ingest
+   * (e.g. `"claude-code:<session>:<uuid>"`), unique across the store.
+   * `undefined` for items ingested without one. Read-only: `NewItem` has no
+   * counterpart, so the JS API cannot set it.
+   */
+  externalId?: string
 }
 /** One result from `Store.search`. The full `Item` is always populated. */
 export interface SearchHit {

@@ -51,6 +51,26 @@ pub enum Error {
         max_supported: &'static str,
     },
 
+    /// An in-place format migration failed or was refused. The store is left
+    /// at the `from` version; nothing was partially applied.
+    #[error("migrating store format {from} -> {to} failed: {reason}; store left at {from}")]
+    Migration {
+        /// Version found on disk.
+        from: String,
+        /// Version the binary tried to reach.
+        to: &'static str,
+        /// Why the migration could not complete.
+        reason: String,
+    },
+
+    /// A `NewItem.external_id` collides with an existing item's. The new
+    /// item was not persisted.
+    #[error("external_id {external_id:?} already exists in store; new item was not persisted")]
+    ExternalIdConflict {
+        /// The colliding external id.
+        external_id: String,
+    },
+
     /// A write was attempted against a read-only store.
     #[error("store is opened read-only; the {operation} operation requires write access")]
     ReadOnly {

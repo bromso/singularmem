@@ -16,9 +16,10 @@ impl Store {
     ///
     /// Returns `Error::Validation` if the item fails any rule (empty or
     /// oversized content, oversized source, non-object metadata, oversized or
-    /// NUL-bearing tags); `Error::SupersedesNotFound` if `supersedes`
-    /// is set to an unknown ID; `Error::Sqlite` on database error;
-    /// `Error::ReadOnly` if the store was opened read-only.
+    /// NUL-bearing tags, invalid `external_id`); `Error::SupersedesNotFound`
+    /// if `supersedes` is set to an unknown ID; `Error::ExternalIdConflict`
+    /// if `external_id` collides with an existing item's; `Error::Sqlite` on
+    /// database error; `Error::ReadOnly` if the store was opened read-only.
     ///
     /// # Panics
     ///
@@ -66,83 +67,15 @@ impl Store {
             }
         }
 
-        // Serialise metadata once.
-        let metadata_text = serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
-            context: "serialising item metadata",
-            source: e,
-        })?;
-        let created_at_text = now.to_string();
-        let id_text = id.to_string();
-
-        tx.execute(
-            "INSERT INTO items (id, content, created_at, supersedes, source, metadata) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                id_text,
-                item.content,
-                created_at_text,
-                item.supersedes.map(|i| i.to_string()),
-                item.source,
-                metadata_text,
-            ],
-        )
-        .map_err(|e| Error::Sqlite {
-            context: "inserting item row",
-            source: e,
-        })?;
-
-        for tag in &normalised_tags {
-            tx.execute(
-                "INSERT INTO item_tags (item_id, tag) VALUES (?1, ?2)",
-                params![id_text, tag],
-            )
-            .map_err(|e| Error::Sqlite {
-                context: "inserting item tag",
-                source: e,
-            })?;
-        }
+        insert_item_row(&tx, id, now, &item, &normalised_tags)?;
 
         tx.commit().map_err(|e| Error::Sqlite {
             context: "committing ingest transaction",
             source: e,
         })?;
+        drop(conn);
 
-        // Invoke the IndexHook if one is attached. Per Principle VII,
-        // hook failures DO NOT roll back the SQLite write — the item is
-        // durably stored, and the hook implementation is expected to log
-        // a warning naming the item ID so the user can recover via
-        // `singularmem reindex`.
-        if let Some(hook) = self
-            .hook
-            .lock()
-            .expect("store hook mutex poisoned")
-            .as_ref()
-        {
-            let item_for_hook = Item {
-                id,
-                content: item.content.clone(),
-                created_at: now,
-                supersedes: item.supersedes,
-                tags: normalised_tags.clone(),
-                source: item.source.clone(),
-                metadata: item.metadata.clone(),
-            };
-            if let Err(e) = hook.on_ingest(&item_for_hook) {
-                tracing::warn!(
-                    item_id = %id,
-                    error = %e,
-                    "IndexHook::on_ingest failed; item is durably stored in SQLite but un-searchable. Run `singularmem reindex` to recover."
-                );
-            } else if let Err(e) = hook.commit() {
-                tracing::warn!(
-                    item_id = %id,
-                    error = %e,
-                    "IndexHook::commit failed after on_ingest; item may or may not be searchable until next commit succeeds. Run `singularmem reindex` to be sure."
-                );
-            }
-        }
-
-        Ok(Item {
+        let stored = Item {
             id,
             content: item.content,
             created_at: now,
@@ -150,7 +83,10 @@ impl Store {
             tags: normalised_tags,
             source: item.source,
             metadata: item.metadata,
-        })
+            external_id: item.external_id,
+        };
+        self.fire_hook(&stored);
+        Ok(stored)
     }
 
     /// Bulk variant of `ingest`. All items persist or none do.
@@ -209,40 +145,7 @@ impl Store {
             // Generate a new ULID per item; all share the wall-clock instant
             // captured at the start of the batch but differ in random bytes.
             let id = mint_ulid(self, now)?;
-            let id_text = id.to_string();
-            let metadata_text = serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
-                context: "serialising metadata in bulk",
-                source: e,
-            })?;
-            let created_at_text = now.to_string();
-
-            tx.execute(
-                "INSERT INTO items (id, content, created_at, supersedes, source, metadata) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    id_text,
-                    item.content,
-                    created_at_text,
-                    item.supersedes.map(|i| i.to_string()),
-                    item.source,
-                    metadata_text,
-                ],
-            )
-            .map_err(|e| Error::Sqlite {
-                context: "inserting bulk item row",
-                source: e,
-            })?;
-
-            for tag in &normalised_tags {
-                tx.execute(
-                    "INSERT INTO item_tags (item_id, tag) VALUES (?1, ?2)",
-                    params![id_text, tag],
-                )
-                .map_err(|e| Error::Sqlite {
-                    context: "inserting bulk item tag",
-                    source: e,
-                })?;
-            }
+            insert_item_row(&tx, id, now, &item, &normalised_tags)?;
 
             out.push(Item {
                 id,
@@ -252,6 +155,7 @@ impl Store {
                 tags: normalised_tags,
                 source: item.source,
                 metadata: item.metadata,
+                external_id: item.external_id,
             });
         }
 
@@ -286,6 +190,157 @@ impl Store {
 
         Ok(out)
     }
+
+    /// Ingest `item` as the successor of `replaces`, transferring
+    /// `item.external_id` from the old item to the new one in the same
+    /// transaction. This is the only in-place mutation the store performs
+    /// (`items.external_id` on the old row is set to NULL); see
+    /// `docs/formats/store-v2.md`.
+    ///
+    /// `item.supersedes` is overwritten with `replaces`.
+    ///
+    /// The replaced row's `external_id` is cleared unconditionally — even
+    /// when `item` carries none — so an id never survives on a superseded
+    /// row.
+    ///
+    /// # Errors
+    /// `Error::ReadOnly`, `Error::Validation`, `Error::SupersedesNotFound`
+    /// if `replaces` is unknown, `Error::ExternalIdConflict` if the id is
+    /// held by a third item, `Error::Sqlite` otherwise. On any error
+    /// nothing changes.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn ingest_replacing(&self, mut item: NewItem, replaces: ItemId) -> Result<Item> {
+        self.assert_writable("ingest_replacing")?;
+        item.supersedes = Some(replaces);
+        let normalised_tags = validate(&item)?;
+        let now = self.clock.now();
+        let id = mint_ulid(self, now)?;
+
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction().map_err(|e| Error::Sqlite {
+            context: "starting ingest_replacing transaction",
+            source: e,
+        })?;
+
+        let freed = tx
+            .execute(
+                "UPDATE items SET external_id = NULL WHERE id = ?1",
+                params![replaces.to_string()],
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "clearing external_id on replaced item",
+                source: e,
+            })?;
+        if freed == 0 {
+            return Err(Error::SupersedesNotFound { id: replaces });
+        }
+
+        insert_item_row(&tx, id, now, &item, &normalised_tags)?;
+
+        tx.commit().map_err(|e| Error::Sqlite {
+            context: "committing ingest_replacing transaction",
+            source: e,
+        })?;
+        drop(conn);
+
+        let stored = Item {
+            id,
+            content: item.content,
+            created_at: now,
+            supersedes: Some(replaces),
+            tags: normalised_tags,
+            source: item.source,
+            metadata: item.metadata,
+            external_id: item.external_id,
+        };
+        self.fire_hook(&stored);
+        Ok(stored)
+    }
+
+    /// Run `on_ingest` + `commit` on the attached hook, warning on failure
+    /// (the `SQLite` write is already durable; Principle VII).
+    fn fire_hook(&self, item: &Item) {
+        if let Some(hook) = self
+            .hook
+            .lock()
+            .expect("store hook mutex poisoned")
+            .as_ref()
+        {
+            if let Err(e) = hook.on_ingest(item) {
+                tracing::warn!(item_id = %item.id, error = %e,
+                    "IndexHook::on_ingest failed; item is durably stored in SQLite but un-searchable. Run `singularmem reindex` to recover.");
+            } else if let Err(e) = hook.commit() {
+                tracing::warn!(item_id = %item.id, error = %e,
+                    "IndexHook::commit failed after on_ingest; item may or may not be searchable until next commit succeeds. Run `singularmem reindex` to be sure.");
+            }
+        }
+    }
+}
+
+/// Insert one item row and its tags inside `tx`. Shared by `ingest`,
+/// `ingest_many`, and `ingest_replacing`; behaviour (columns, error mapping)
+/// is identical across all three call sites.
+///
+/// # Errors
+/// `Error::Json` if metadata serialisation fails; `Error::ExternalIdConflict`
+/// if `item.external_id` collides with an existing row; `Error::Sqlite`
+/// otherwise.
+fn insert_item_row(
+    tx: &rusqlite::Transaction<'_>,
+    id: ItemId,
+    now: Timestamp,
+    item: &NewItem,
+    tags: &[String],
+) -> Result<()> {
+    let metadata_text = serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
+        context: "serialising item metadata",
+        source: e,
+    })?;
+    let id_text = id.to_string();
+    tx.execute(
+        "INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id_text,
+            item.content,
+            now.to_string(),
+            item.supersedes.map(|i| i.to_string()),
+            item.source,
+            metadata_text,
+            item.external_id,
+        ],
+    )
+    .map_err(|e| map_insert_err(e, item.external_id.as_deref(), "inserting item row"))?;
+
+    for tag in tags {
+        tx.execute(
+            "INSERT INTO item_tags (item_id, tag) VALUES (?1, ?2)",
+            params![id_text, tag],
+        )
+        .map_err(|e| Error::Sqlite {
+            context: "inserting item tag",
+            source: e,
+        })?;
+    }
+    Ok(())
+}
+
+/// Map an INSERT error: a unique violation on `external_id` becomes
+/// `ExternalIdConflict`; anything else is `Sqlite`.
+fn map_insert_err(e: rusqlite::Error, external_id: Option<&str>, context: &'static str) -> Error {
+    if let rusqlite::Error::SqliteFailure(ffi, Some(ref msg)) = e {
+        if ffi.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            && msg.contains("items.external_id")
+        {
+            return Error::ExternalIdConflict {
+                external_id: external_id.unwrap_or_default().to_string(),
+            };
+        }
+    }
+    Error::Sqlite { context, source: e }
 }
 
 /// Mint a fresh ULID using the store's injected rng and the given timestamp.

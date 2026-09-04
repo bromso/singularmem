@@ -68,7 +68,10 @@ fn unsupported_format_version_rejected() {
     let err = Store::open(&path).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("999"), "error mentions found version: {msg}");
-    assert!(msg.contains('1'), "error mentions max supported: {msg}");
+    assert!(
+        msg.contains(&format!("maximum {FORMAT_VERSION}")),
+        "error mentions max supported: {msg}"
+    );
 }
 
 #[test]
@@ -261,7 +264,7 @@ fn export_emits_meta_line_and_items_in_order() {
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(meta["_singularmem_format"], "export-v1");
     assert_eq!(meta["_kind"], "meta");
-    assert_eq!(meta["store_format_version"], "1");
+    assert_eq!(meta["store_format_version"], FORMAT_VERSION);
 
     let first: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
     assert_eq!(first["_kind"], "item");

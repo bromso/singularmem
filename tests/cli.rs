@@ -1314,3 +1314,289 @@ fn retrieve_with_gemini_adapter_emits_source_headers() {
         .stdout(predicate::str::contains("Source 1"))
         .stdout(predicate::str::contains("the quick brown fox"));
 }
+
+fn fixture_transcripts() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/transcripts")
+}
+
+#[test]
+fn ingest_transcript_is_idempotent_and_searchable() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+
+    // The fixture's malformed line 15 makes failed=1 → exit 1 (see the
+    // dry-run test below, which documents the same reasoning).
+    singularmem()
+        .args(["--store", db_s, "ingest-transcript", fx.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "ingested 4, skipped 0 existing, 5 filtered, 1 failed across 1 files",
+        ));
+
+    // Re-parsing the fixture always fails on the same malformed line, so
+    // this idempotent re-run also exits 1 despite ingesting nothing new.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 0, skipped 4 existing"));
+
+    singularmem()
+        .args(["--store", db_s, "search", "cargo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cargo")); // snippet may wrap the term in <mark>
+
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "list",
+            "--tag",
+            "role:user",
+            "--format",
+            "ids",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 2));
+}
+
+#[test]
+fn ingest_transcript_exit_code_reflects_failures_and_dry_run_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+
+    // The fixture contains one malformed line → failed=1 → exit 1.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 4"));
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn ingest_transcript_project_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fx = fixture_transcripts();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+            "--project",
+            "/home/me/proj",
+        ])
+        .assert()
+        .code(1) // malformed line still counts
+        .stderr(predicate::str::contains("ingested 3"));
+}
+
+#[test]
+fn ingest_transcript_missing_path_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-transcript",
+            "/definitely/missing",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("path not found"));
+}
+
+#[test]
+fn ingest_dir_tracks_changes_via_supersedes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    std::fs::write(tree.join("src/a.rs"), "fn a() {}").unwrap();
+    std::fs::write(tree.join("b.md"), "# b").unwrap();
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 2, skipped 0 existing"));
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+
+    std::fs::write(tree.join("src/a.rs"), "fn a() { changed() }").unwrap();
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 1, skipped 1 existing"));
+
+    let ids = singularmem()
+        .args([
+            "--store", db_s, "list", "--tag", "ext:rs", "--format", "ids",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ids = String::from_utf8(ids).unwrap();
+    let newest = ids.lines().last().unwrap().to_string();
+    singularmem()
+        .args(["--store", db_s, "revisions", &newest, "--format", "ids"])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 2));
+}
+
+#[test]
+fn ingest_dir_read_only_store_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args(["--store", db_s, "ingest", "--content", "seed"])
+        .assert()
+        .success();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("x.txt"), "x").unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "--read-only",
+            "ingest-dir",
+            tree.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("read-only"));
+}
+
+#[test]
+fn ingest_dir_long_path_is_counted_not_fatal() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let tree = dir.path().join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("ok.txt"), "fine").unwrap();
+
+    // Nest 100-char directories until the leaf file's absolute path is
+    // longer than the store's 512-byte external_id cap.
+    let mut deep = tree.clone();
+    while deep.join("f.txt").as_os_str().len() <= 520 {
+        deep = deep.join("a".repeat(100));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("f.txt"), "too deep").unwrap();
+
+    singularmem()
+        .args(["--store", db_s, "ingest-dir", tree.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 1"))
+        .stderr(predicate::str::contains("1 failed"));
+
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 1));
+}
+
+#[cfg(unix)]
+#[test]
+fn ingest_transcript_project_filter_matches_symlinked_cwd() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+
+    // A directory reachable by two names. On macOS the TempDir already sits
+    // under /var -> /private/var; elsewhere make the symlink explicitly.
+    let raw = dir.path().to_path_buf();
+    let canon = raw.canonicalize().unwrap();
+    let (raw, _canon) = if canon == raw {
+        let target = raw.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = raw.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        (link, target)
+    } else {
+        (raw, canon)
+    };
+
+    let tx = dir.path().join("s.jsonl");
+    let line = serde_json::json!({
+        "type": "user",
+        "uuid": "u",
+        "sessionId": "s",
+        "cwd": raw.display().to_string(),
+        "message": {"role": "user", "content": "symlinked project message"},
+    });
+    std::fs::write(&tx, format!("{line}\n")).unwrap();
+
+    // The CLI canonicalises --project; the transcript's cwd is the
+    // non-canonical spelling of the same directory.
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            tx.to_str().unwrap(),
+            "--project",
+            raw.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 1"));
+}
+
+#[test]
+fn ingest_dir_missing_path_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-dir",
+            "/definitely/missing",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("path not found"));
+}

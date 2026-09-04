@@ -79,6 +79,11 @@ pub struct Item {
     /// Arbitrary user-defined metadata. Always a JSON object (possibly empty).
     #[serde(default = "default_metadata", skip_serializing_if = "is_empty_object")]
     pub metadata: serde_json::Value,
+    /// Caller-supplied stable identity for idempotent bulk ingest
+    /// (e.g. `claude-code:<session>:<uuid>`). Unique across the store when
+    /// present. `None` for items ingested without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
 }
 
 /// The "to be ingested" form of an item. The store assigns `id` and
@@ -95,6 +100,8 @@ pub struct NewItem {
     pub source: Option<String>,
     /// Arbitrary user-defined JSON object. Defaults to `{}`.
     pub metadata: serde_json::Value,
+    /// Optional stable identity, ≤ 512 bytes, unique across the store.
+    pub external_id: Option<String>,
 }
 
 impl NewItem {
@@ -107,6 +114,7 @@ impl NewItem {
             tags: Vec::new(),
             source: None,
             metadata: default_metadata(),
+            external_id: None,
         }
     }
 }
@@ -131,6 +139,9 @@ pub(crate) const MAX_TAG_BYTES: usize = 64;
 /// Maximum source length in bytes.
 #[allow(dead_code)]
 pub(crate) const MAX_SOURCE_BYTES: usize = 256;
+
+/// Maximum `external_id` length in bytes.
+pub(crate) const MAX_EXTERNAL_ID_BYTES: usize = 512;
 
 /// Soft warning threshold for metadata size — emits a `tracing::warn!` if a
 /// single item's metadata exceeds this. Ingest still succeeds.
@@ -168,6 +179,30 @@ pub(crate) fn validate(item: &NewItem) -> crate::Result<Vec<String>> {
                     "exceeds {MAX_SOURCE_BYTES}-byte cap (got {} bytes)",
                     src.len()
                 ),
+            });
+        }
+    }
+
+    if let Some(ext) = &item.external_id {
+        if ext.is_empty() {
+            return Err(Error::Validation {
+                field: "external_id",
+                reason: "must be non-empty when present".to_string(),
+            });
+        }
+        if ext.len() > MAX_EXTERNAL_ID_BYTES {
+            return Err(Error::Validation {
+                field: "external_id",
+                reason: format!(
+                    "exceeds {MAX_EXTERNAL_ID_BYTES}-byte cap (got {} bytes)",
+                    ext.len()
+                ),
+            });
+        }
+        if ext.contains('\0') {
+            return Err(Error::Validation {
+                field: "external_id",
+                reason: "must not contain NUL bytes".to_string(),
             });
         }
     }
@@ -325,6 +360,45 @@ mod tests {
         item.metadata = serde_json::json!({"k": "v"});
         let normalised = validate(&item).expect("valid");
         assert_eq!(normalised, vec!["bar", "foo"]); // sorted
+    }
+
+    #[test]
+    fn empty_external_id_rejected() {
+        let mut item = NewItem::text("hello");
+        item.external_id = Some(String::new());
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "external_id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn long_external_id_rejected() {
+        let mut item = NewItem::text("hello");
+        item.external_id = Some("e".repeat(MAX_EXTERNAL_ID_BYTES + 1));
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "external_id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nul_in_external_id_rejected() {
+        let mut item = NewItem::text("hello");
+        item.external_id = Some("a\0b".into());
+        assert!(matches!(
+            validate(&item),
+            Err(Error::Validation {
+                field: "external_id",
+                ..
+            })
+        ));
     }
 
     #[test]

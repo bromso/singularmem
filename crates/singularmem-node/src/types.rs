@@ -57,6 +57,11 @@ pub struct Item {
     /// Defaults to an empty object `{}` when no metadata was provided at
     /// ingest time.
     pub metadata: serde_json::Value,
+    /// Caller-supplied stable identity used for idempotent bulk ingest
+    /// (e.g. `"claude-code:<session>:<uuid>"`), unique across the store.
+    /// `undefined` for items ingested without one. Read-only: `NewItem`
+    /// has no counterpart, so the JS API cannot set it.
+    pub external_id: Option<String>,
 }
 
 impl From<singularmem_core::Item> for Item {
@@ -70,6 +75,7 @@ impl From<singularmem_core::Item> for Item {
             tags: core.tags,
             source: core.source,
             metadata: core.metadata,
+            external_id: core.external_id,
         }
     }
 }
@@ -227,6 +233,7 @@ pub fn js_new_item_to_core(
         tags: item.tags.unwrap_or_default(),
         source: item.source,
         metadata: item.metadata.unwrap_or_else(|| serde_json::json!({})),
+        external_id: None,
     })
 }
 
@@ -245,6 +252,7 @@ mod tests {
             tags: vec!["a".to_string(), "b".to_string()],
             source: Some("test".to_string()),
             metadata: serde_json::json!({"k": "v"}),
+            external_id: Some("k".to_string()),
         }
     }
 
@@ -284,6 +292,35 @@ mod tests {
     fn item_metadata_preserved() {
         let item: Item = sample_core_item().into();
         assert_eq!(item.metadata, serde_json::json!({"k": "v"}));
+    }
+
+    #[test]
+    fn item_external_id_round_trips() {
+        let item: Item = sample_core_item().into();
+        assert_eq!(item.external_id.as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn item_external_id_none_becomes_none() {
+        let core = singularmem_core::Item {
+            external_id: None,
+            ..sample_core_item()
+        };
+        let item: Item = core.into();
+        assert!(item.external_id.is_none());
+    }
+
+    #[test]
+    fn js_new_item_never_sets_external_id() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: None,
+            tags: None,
+            source: None,
+            metadata: None,
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert!(core.external_id.is_none(), "write path stays read-only");
     }
 
     #[test]

@@ -57,6 +57,14 @@ impl From<NodeError> for NapiError<&'static str> {
                     "store format version {found} is newer than supported maximum {max_supported}"
                 ),
             ),
+            CoreError::Migration { from, to, reason } => (
+                "Migration",
+                format!("migrating store format {from} -> {to} failed: {reason}; store left at {from}"),
+            ),
+            CoreError::ExternalIdConflict { external_id } => (
+                "ExternalIdConflict",
+                format!("external_id {external_id:?} already exists in store; new item was not persisted"),
+            ),
             CoreError::ReadOnly { operation } => (
                 "ReadOnly",
                 format!("store is read-only; {operation} requires write access"),
@@ -301,6 +309,28 @@ mod tests {
         };
         let napi_err: NapiError<&'static str> = NodeError::from(core_err).into();
         assert_eq!(napi_err.status, "UnsupportedFormatVersion");
+    }
+
+    #[test]
+    fn migration_maps_to_code() {
+        let core_err = CoreError::Migration {
+            from: "1".to_string(),
+            to: "2",
+            reason: "boom".to_string(),
+        };
+        let napi_err: NapiError<&'static str> = NodeError::from(core_err).into();
+        assert_eq!(napi_err.status, "Migration");
+        assert!(napi_err.reason.contains("boom"));
+    }
+
+    #[test]
+    fn external_id_conflict_maps_to_code() {
+        let core_err = CoreError::ExternalIdConflict {
+            external_id: "test:1".to_string(),
+        };
+        let napi_err: NapiError<&'static str> = NodeError::from(core_err).into();
+        assert_eq!(napi_err.status, "ExternalIdConflict");
+        assert!(napi_err.reason.contains("test:1"));
     }
 
     #[test]
