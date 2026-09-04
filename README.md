@@ -40,6 +40,11 @@ singularmem ingest-dir .
 
 singularmem search "why did we pick tantivy"
 singularmem retrieve --adapter claude "release process"
+
+# Every item gets a default scope (claude-code/<project> or files/<dirname>);
+# use it to narrow a search or see what's in the store
+singularmem search --scope claude-code/singularmem "why tantivy"
+singularmem scope list
 ```
 
 Both bulk verbs are idempotent: re-running ingests nothing already present.
