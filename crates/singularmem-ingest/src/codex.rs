@@ -308,9 +308,15 @@ impl Source for CodexRollout {
 }
 
 /// `$HOME/.codex/sessions`, if a home directory is known.
+///
+/// Falls back to `%USERPROFILE%` when `HOME` is unset, so the default
+/// resolves on Windows too — the same fallback [`crate::default_cursor_user_dir`]
+/// and the hooks crate's `config_path` use.
 #[must_use]
 pub fn default_codex_root() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex").join("sessions"))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| PathBuf::from(h).join(".codex").join("sessions"))
 }
 
 /// Recursively find `rollout-*.jsonl` files under `root`, sorted.

@@ -225,6 +225,16 @@ impl CursorChats {
                     bubbles,
                 });
             }
+            // A conversation filter names exactly one composer, and its
+            // headers and bubbles live in the *global* DB keyed by composer
+            // id — so once some workspace has yielded it there is nothing
+            // left to find. Stopping here both avoids emitting the same
+            // bubbles once per workspace that lists the conversation and
+            // saves opening every remaining `state.vscdb` (a real install
+            // has hundreds).
+            if self.conversation_filter.is_some() && !out.is_empty() {
+                break;
+            }
         }
         out
     }
@@ -468,7 +478,7 @@ pub fn write_fixture(user_dir: &Path, workspaces: &[FixtureWorkspace]) {
                 .collect();
             global
                 .execute(
-                    "INSERT INTO cursorDiskKV VALUES (?1, ?2)",
+                    "INSERT OR REPLACE INTO cursorDiskKV VALUES (?1, ?2)",
                     [
                         format!("composerData:{id}"),
                         serde_json::json!({
@@ -482,7 +492,7 @@ pub fn write_fixture(user_dir: &Path, workspaces: &[FixtureWorkspace]) {
             for b in bubbles {
                 global
                     .execute(
-                        "INSERT INTO cursorDiskKV VALUES (?1, ?2)",
+                        "INSERT OR REPLACE INTO cursorDiskKV VALUES (?1, ?2)",
                         [
                             format!("bubbleId:{id}:{}", b.id),
                             serde_json::json!({"bubbleId": b.id, "type": b.kind, "text": b.text})

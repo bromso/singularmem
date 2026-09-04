@@ -1950,6 +1950,58 @@ fn ingest_cursor_reads_a_fixture_user_dir() {
         ])
         .assert()
         .code(2);
+
+    // Without --cursor-dir, SINGULARMEM_CURSOR_DIR supplies the default —
+    // the same override the `hook` verb honours (docs/hooks.md).
+    let db2 = dir.path().join("store2.db");
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db2.to_str().unwrap(), "ingest-cursor", "--quiet"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 0 filtered, 0 failed across 1 files",
+        ));
+    // An explicit --cursor-dir still wins over the environment variable.
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args([
+            "--store",
+            db2.to_str().unwrap(),
+            "ingest-cursor",
+            "--cursor-dir",
+            dir.path().join("nope").to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+}
+
+/// The Codex hook's fallback scan: no `transcript_path` in the payload, so
+/// it searches `SINGULARMEM_CODEX_ROOT` for a rollout whose filename
+/// carries the payload's `session_id`.
+#[test]
+fn hook_codex_stop_scans_the_env_root_for_the_session() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CODEX_ROOT", fixture_codex().to_str().unwrap())
+        .args(["--store", db_s, "hook", "codex", "stop"])
+        .write_stdin(r#"{"session_id":"sess1","cwd":"/home/me/proj"}"#)
+        .assert()
+        .success();
+    // The fixture rollout holds one user and one assistant message.
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("codex/proj\t2\n");
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("How do I run the tests?"))
+        .stdout(predicate::str::contains("Run cargo test."));
 }
 
 /// Build a store with items across `claude-code/proj`, `codex/proj`,

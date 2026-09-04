@@ -112,10 +112,15 @@ for that event) and either:
     contains the payload's `session_id`. A payload with neither
     `transcript_path` nor a non-empty `session_id` is a warning and
     ingests nothing — it never scans the whole root unfiltered.
-  - **Cursor** filters by `conversation_id` when the payload has one;
-    otherwise it filters by `cwd` as the project. A payload with
-    neither is a warning and ingests nothing, for the same reason. See
-    `SINGULARMEM_CURSOR_DIR` below for where it looks.
+  - **Cursor** filters by `conversation_id` when the payload has one,
+    and by `cwd` as the project whenever the payload has one — both
+    together when both are present, since a conversation open in more
+    than one window is listed by each of those workspaces and the id
+    alone doesn't say which one fired the hook (without the project
+    filter the scan also has to open every workspace database to find
+    out). A payload with neither is a warning and ingests nothing, for
+    the same reason as Codex. See `SINGULARMEM_CURSOR_DIR` below for
+    where it looks.
 
 ## Environment variables
 
@@ -128,10 +133,9 @@ for that event) and either:
 - **`SINGULARMEM_CURSOR_DIR`** — overrides Cursor's per-user directory
   (which normally defaults per OS: `~/Library/Application
   Support/Cursor/User` on macOS, `%APPDATA%\Cursor\User` on Windows,
-  `~/.config/Cursor/User` on Linux). This applies to the `hook` command
-  only. `ingest-cursor` has no environment-variable equivalent; pass
-  `--cursor-dir` instead to point it at a non-standard install or a
-  test fixture.
+  `~/.config/Cursor/User` on Linux). Read by the `hook` command and by
+  `ingest-cursor`'s `--cursor-dir` default; an explicit `--cursor-dir`
+  still wins over it.
 - **`SINGULARMEM_CODEX_ROOT`** — overrides the default Codex sessions
   root (`~/.codex/sessions`). Read by the `hook` command's fallback
   scan (used when the payload has no `transcript_path`) and by

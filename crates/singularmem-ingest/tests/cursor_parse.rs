@@ -159,6 +159,79 @@ fn filters_by_project_and_conversation() {
     assert_eq!(src.items().filter_map(Result::ok).count(), 2);
 }
 
+/// The same composer id listed in two workspaces. Cursor keys the
+/// conversation's headers and bubbles by composer id in the *global* DB, so
+/// a conversation that has been open in more than one window shows up in
+/// both workspaces' `composer.composerData`.
+fn fixture_shared_composer() -> (TempDir, PathBuf) {
+    let d = TempDir::new().unwrap();
+    let user = d.path().join("User");
+    let composer = || {
+        vec![(
+            "shared",
+            "Shared",
+            1_700_000_000_000_i64,
+            vec![FixtureBubble {
+                id: "b1",
+                kind: 1,
+                text: "shared question",
+            }],
+        )]
+    };
+    write_fixture(
+        &user,
+        &[
+            FixtureWorkspace {
+                hash: "wa",
+                folder: Some("/w/a"),
+                composers: composer(),
+            },
+            FixtureWorkspace {
+                hash: "wb",
+                folder: Some("/w/b"),
+                composers: composer(),
+            },
+        ],
+    );
+    (d, user)
+}
+
+/// A conversation filter alone does not say *which* workspace the hook was
+/// fired from, so the hook also passes `cwd` as a project filter. With both
+/// set, the item's `workspace` (and hence its derived scope) must be the
+/// workspace the hook actually came from.
+#[test]
+fn conversation_and_project_filter_pick_the_right_workspace() {
+    let (_d, user) = fixture_shared_composer();
+    let mut src = CursorChats::open(&user).unwrap();
+    src.conversation_filter = Some("shared".into());
+    src.project_filter = Some(PathBuf::from("/w/b"));
+    let items: Vec<_> = src.items().map(Result::unwrap).collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].metadata["workspace"], "/w/b");
+    assert_eq!(src.default_scope(&items[0]).as_deref(), Some("cursor/b"));
+}
+
+/// With only a conversation filter, the scan stops at the first workspace
+/// that matches instead of re-emitting the same bubbles once per workspace
+/// listing the conversation.
+#[test]
+fn conversation_filter_stops_at_the_first_matching_workspace() {
+    let (_d, user) = fixture_shared_composer();
+    let mut src = CursorChats::open(&user).unwrap();
+    src.conversation_filter = Some("shared".into());
+    let items: Vec<_> = src.items().map(Result::unwrap).collect();
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|i| i.external_id.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["cursor:shared:b1"],
+        "one set of items, not one per workspace listing the conversation"
+    );
+}
+
 #[test]
 fn missing_global_db_is_not_found() {
     let d = TempDir::new().unwrap();

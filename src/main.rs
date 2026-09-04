@@ -241,7 +241,8 @@ struct IngestCodexArgs {
 #[derive(Args, Debug)]
 struct IngestCursorArgs {
     /// Cursor's per-user directory (contains `globalStorage/` and
-    /// `workspaceStorage/`). Defaults to the per-OS Cursor `User` dir.
+    /// `workspaceStorage/`). Defaults to `SINGULARMEM_CURSOR_DIR`, then to
+    /// the per-OS Cursor `User` dir.
     #[arg(long, value_name = "DIR")]
     cursor_dir: Option<PathBuf>,
     /// Keep only conversations whose workspace folder equals DIR.
@@ -1150,7 +1151,7 @@ fn cmd_ingest_codex(store: &Store, args: &IngestCodexArgs) -> Result<(), CliErro
 }
 
 fn cmd_ingest_cursor(store: &Store, args: &IngestCursorArgs) -> Result<(), CliError> {
-    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats};
+    use singularmem_ingest::{ingest_source, CursorChats};
 
     // Validate --scope up front so a typo is a usage error before any
     // parsing or filesystem work happens.
@@ -1162,7 +1163,7 @@ fn cmd_ingest_cursor(store: &Store, args: &IngestCursorArgs) -> Result<(), CliEr
 
     let dir = match &args.cursor_dir {
         Some(d) => d.clone(),
-        None => default_cursor_user_dir()
+        None => cursor_user_dir()
             .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?,
     };
 
@@ -1636,32 +1637,45 @@ fn hook_ingest_codex(
     Ok(total)
 }
 
+/// Resolve Cursor's per-user directory: the `SINGULARMEM_CURSOR_DIR`
+/// environment variable when set, otherwise `default_cursor_user_dir()`
+/// (the per-OS Cursor `User` directory). Read by both the `hook`'s Cursor
+/// ingest and `ingest-cursor`'s `--cursor-dir` default, mirroring how
+/// `SINGULARMEM_CODEX_ROOT` overrides Codex's sessions root. Documented in
+/// `docs/hooks.md`.
+fn cursor_user_dir() -> Option<PathBuf> {
+    std::env::var_os("SINGULARMEM_CURSOR_DIR")
+        .map(PathBuf::from)
+        .or_else(singularmem_ingest::default_cursor_user_dir)
+}
+
 /// Cursor identifies the conversation to ingest by `conversation_id` when
-/// present; otherwise fall back to filtering by `cwd` as the project.
+/// present; without one it falls back to filtering by `cwd` as the project.
 /// Without either, there is nothing to scope the ingest to, so nothing is
-/// ingested rather than pulling in every conversation. `SINGULARMEM_CURSOR_DIR`
-/// overrides the default per-OS Cursor user directory (documented in
-/// `docs/hooks.md`; used by tests to point at a fixture).
+/// ingested rather than pulling in every conversation.
+///
+/// `cwd` is applied as a project filter **whenever it is present**, even
+/// alongside a `conversation_id`: a conversation open in more than one
+/// window is listed by every one of those workspaces, so the id alone does
+/// not say which workspace this hook fired from — and without a project
+/// filter the scan has to open every workspace database (hundreds, on a
+/// real install) to find out.
 fn hook_ingest_cursor(
     store: &Store,
     input: &singularmem_hooks::HookInput,
 ) -> Result<singularmem_ingest::Report, CliError> {
-    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats, Report};
+    use singularmem_ingest::{ingest_source, CursorChats, Report};
 
     if input.conversation_id.is_none() && input.cwd.is_none() {
         tracing::warn!("cursor hook payload has no conversation_id or cwd; nothing ingested");
         return Ok(Report::default());
     }
 
-    let user = std::env::var_os("SINGULARMEM_CURSOR_DIR")
-        .map(PathBuf::from)
-        .or_else(default_cursor_user_dir)
+    let user = cursor_user_dir()
         .ok_or_else(|| CliError::Usage("cannot determine Cursor user directory".into()))?;
     let mut src = CursorChats::open(&user)?;
     src.conversation_filter.clone_from(&input.conversation_id);
-    if src.conversation_filter.is_none() {
-        src.project_filter.clone_from(&input.cwd);
-    }
+    src.project_filter.clone_from(&input.cwd);
     Ok(ingest_source(store, &src, false)?)
 }
 
