@@ -3,6 +3,7 @@
 //! install and the parser tolerates missing fields.
 
 use std::cell::{Cell, RefCell};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -39,6 +40,22 @@ struct Composer {
     bubbles: Vec<(String, u8)>, // (bubbleId, type)
 }
 
+/// A `SQLite` connection, optionally backed by a temporary copy of the
+/// original file. The temp file (if any) lives exactly as long as this
+/// value and is deleted on drop.
+struct Db {
+    conn: Connection,
+    _keep: Option<tempfile::NamedTempFile>,
+}
+
+impl Deref for Db {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
 impl CursorChats {
     /// Open the store rooted at `user_dir`.
     ///
@@ -62,40 +79,53 @@ impl CursorChats {
     }
 
     /// Open a `state.vscdb` read-only without taking `SQLite` locks
-    /// (`immutable=1`), falling back to a temporary copy.
-    fn open_db(path: &Path) -> Result<Connection> {
+    /// (`immutable=1`), falling back to a unique temporary copy that is
+    /// deleted once the returned `Db` is dropped.
+    fn open_db(path: &Path) -> Result<Db> {
         let uri = format!("file:{}?immutable=1", path.display());
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         match Connection::open_with_flags(&uri, flags) {
-            Ok(c) => Ok(c),
+            Ok(conn) => Ok(Db { conn, _keep: None }),
             Err(first) => {
-                let tmp = std::env::temp_dir()
-                    .join(format!("singularmem-cursor-{}.vscdb", std::process::id()));
-                std::fs::copy(path, &tmp).map_err(|source| Error::Io {
+                let tmp = tempfile::NamedTempFile::new().map_err(|source| Error::Io {
                     path: path.to_path_buf(),
                     source,
                 })?;
-                Connection::open_with_flags(
-                    &tmp,
+                std::fs::copy(path, tmp.path()).map_err(|source| Error::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                let conn = Connection::open_with_flags(
+                    tmp.path(),
                     OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
                 )
                 .map_err(|e| Error::Io {
                     path: path.to_path_buf(),
                     source: std::io::Error::other(format!("{first}; copy fallback: {e}")),
+                })?;
+                Ok(Db {
+                    conn,
+                    _keep: Some(tmp),
                 })
             }
         }
     }
 
     /// Enumerate workspaces → composers, using the workspace DBs for the
-    /// composer list and the global DB for headers.
-    fn composers(&self, global: &Connection) -> Result<Vec<Composer>> {
+    /// composer list and the global DB for headers. A workspace whose
+    /// `state.vscdb` cannot be opened or read is skipped (warned, counted
+    /// as filtered) rather than aborting the whole scan.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear per-field extraction across two DBs; splitting would obscure the single control flow"
+    )]
+    fn composers(&self, global: &Connection) -> Vec<Composer> {
         let ws_root = self.user_dir.join("workspaceStorage");
         let mut out = Vec::new();
         let Ok(entries) = std::fs::read_dir(&ws_root) else {
-            return Ok(out);
+            return out;
         };
         let mut dirs: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -117,14 +147,27 @@ impl CursorChats {
             if !db_path.is_file() {
                 continue;
             }
-            let ws = Self::open_db(&db_path)?;
-            let raw: Option<String> = ws
-                .query_row(
-                    "SELECT value FROM ItemTable WHERE key = 'composer.composerData'",
-                    [],
-                    |r| r.get(0),
-                )
-                .ok();
+            let ws = match Self::open_db(&db_path) {
+                Ok(ws) => ws,
+                Err(error) => {
+                    tracing::warn!(path = %db_path.display(), %error, "skipping workspace: could not open state.vscdb");
+                    self.filtered.set(self.filtered.get() + 1);
+                    continue;
+                }
+            };
+            let raw: Option<String> = match ws.query_row(
+                "SELECT value FROM ItemTable WHERE key = 'composer.composerData'",
+                [],
+                |r| r.get(0),
+            ) {
+                Ok(v) => Some(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => {
+                    tracing::warn!(path = %db_path.display(), %error, "skipping workspace: could not read state.vscdb");
+                    self.filtered.set(self.filtered.get() + 1);
+                    continue;
+                }
+            };
             let Some(raw) = raw else { continue };
             let data: serde_json::Value =
                 serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
@@ -145,11 +188,10 @@ impl CursorChats {
                     continue;
                 }
                 let head: Option<String> = global
-                    .query_row(
-                        "SELECT value FROM cursorDiskKV WHERE key = ?1",
-                        [format!("composerData:{id}")],
-                        |r| r.get(0),
-                    )
+                    .prepare_cached("SELECT value FROM cursorDiskKV WHERE key = ?1")
+                    .and_then(|mut stmt| {
+                        stmt.query_row([format!("composerData:{id}")], |r| r.get(0))
+                    })
                     .ok();
                 let Some(head) = head else { continue };
                 let h: serde_json::Value =
@@ -171,8 +213,8 @@ impl CursorChats {
                     .unwrap_or_default();
                 let created_ms = h
                     .get("createdAt")
-                    .and_then(serde_json::Value::as_i64)
-                    .or_else(|| c.get("createdAt").and_then(|v| v.as_str()?.parse().ok()));
+                    .and_then(ms_from)
+                    .or_else(|| c.get("createdAt").and_then(ms_from));
                 out.push(Composer {
                     id: id.to_string(),
                     title: h.get("name").and_then(|v| v.as_str()).map(str::to_string),
@@ -184,7 +226,7 @@ impl CursorChats {
                 });
             }
         }
-        Ok(out)
+        out
     }
 
     fn bubble_items(&self, global: &Connection, c: &Composer) -> Vec<Result<NewItem>> {
@@ -199,11 +241,10 @@ impl CursorChats {
                 }
             };
             let raw: Option<String> = global
-                .query_row(
-                    "SELECT value FROM cursorDiskKV WHERE key = ?1",
-                    [format!("bubbleId:{}:{bubble_id}", c.id)],
-                    |r| r.get(0),
-                )
+                .prepare_cached("SELECT value FROM cursorDiskKV WHERE key = ?1")
+                .and_then(|mut stmt| {
+                    stmt.query_row([format!("bubbleId:{}:{bubble_id}", c.id)], |r| r.get(0))
+                })
                 .ok();
             let text = raw
                 .and_then(|r| serde_json::from_str::<serde_json::Value>(&r).ok())
@@ -247,16 +288,55 @@ impl CursorChats {
 }
 
 /// `folder` from `<workspace dir>/workspace.json`, as a filesystem path.
+///
+/// Cursor stores `folder` as a URI (`file:///Users/me/My%20Repo`, or on
+/// Windows `file:///c%3A/Users/...`): strip the scheme, percent-decode, and
+/// (Windows only) drop the leading `/` in front of a drive letter.
 fn read_workspace_folder(dir: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(dir.join("workspace.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let folder = v.get("folder")?.as_str()?;
-    Some(
-        folder
-            .strip_prefix("file://")
-            .map_or(folder, |p| p)
-            .to_string(),
-    )
+    let stripped = folder.strip_prefix("file://").map_or(folder, |p| p);
+    let decoded = percent_decode(stripped);
+    let bytes = decoded.as_bytes();
+    if cfg!(windows)
+        && bytes.first() == Some(&b'/')
+        && bytes.get(1).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(2) == Some(&b':')
+    {
+        return Some(decoded[1..].to_string());
+    }
+    Some(decoded)
+}
+
+/// Percent-decode `%XX` escape sequences in `s`. A `%` not followed by two
+/// hex digits (an invalid escape, or a trailing `%`) is passed through
+/// literally. Decoding happens byte-wise; the result is lossily converted
+/// back to UTF-8.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if let Some(hex) = s.get(i + 1..i + 3) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `createdAt` as milliseconds since the epoch, accepting either a JSON
+/// number or a numeric string (Cursor uses both shapes across versions).
+fn ms_from(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64().or_else(|| v.as_str()?.parse().ok())
 }
 
 impl Source for CursorChats {
@@ -271,10 +351,7 @@ impl Source for CursorChats {
             Ok(c) => c,
             Err(e) => return Box::new(std::iter::once(Err(e))),
         };
-        let composers = match self.composers(&global) {
-            Ok(c) => c,
-            Err(e) => return Box::new(std::iter::once(Err(e))),
-        };
+        let composers = self.composers(&global);
         let mut all = Vec::new();
         for c in &composers {
             all.extend(self.bubble_items(&global, c));
@@ -415,5 +492,58 @@ pub fn write_fixture(user_dir: &Path, workspaces: &[FixtureWorkspace]) {
                     .unwrap();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_escapes_and_literals() {
+        assert_eq!(percent_decode("My%20Repo"), "My Repo");
+        assert_eq!(percent_decode("c%3A"), "c:");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("abc%"), "abc%");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    /// A path containing `?` breaks the `file:...?immutable=1` URI form
+    /// (`SQLite` parses everything after the first `?` as query parameters),
+    /// but not a plain-path open. This proves `open_db` falls back to a
+    /// temporary copy, and that the copy is cleaned up when the returned
+    /// `Db` is dropped.
+    #[test]
+    fn open_db_falls_back_to_a_cleaned_up_temp_copy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("state?.vscdb");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE t (k TEXT PRIMARY KEY, v TEXT);")
+                .unwrap();
+            conn.execute("INSERT INTO t VALUES ('a', 'b')", []).unwrap();
+        }
+        let before: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+
+        {
+            let db = CursorChats::open_db(&db_path).unwrap();
+            let v: String = db
+                .query_row("SELECT v FROM t WHERE k = 'a'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, "b");
+        }
+
+        let after: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "temp copy must be removed once the Db is dropped: before={before:?} after={after:?}"
+        );
     }
 }

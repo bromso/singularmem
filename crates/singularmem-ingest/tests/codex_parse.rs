@@ -38,6 +38,7 @@ fn keeps_only_user_and_assistant_messages() {
     assert_eq!(src.default_scope(&ok[0]).as_deref(), Some("codex/proj"));
     // function_call, function_call_output count as filtered; turn_context/event_msg are structural.
     assert_eq!(src.filtered_count(), 2);
+    assert!(src.session_meta_seen());
 }
 
 #[test]
@@ -106,6 +107,8 @@ fn warns_once_when_first_parsed_line_is_blank_then_no_session_meta() {
         Some("codex:rollout-blank-first:2")
     );
     assert_eq!(items[0].metadata["cwd"], serde_json::Value::Null);
+    // No session_meta line was ever parsed for this file.
+    assert!(!src.session_meta_seen());
 }
 
 #[test]

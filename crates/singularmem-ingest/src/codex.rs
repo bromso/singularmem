@@ -33,6 +33,9 @@ pub struct CodexRollout {
     /// lines share one `cwd` only warns once on an invalid basename, rather
     /// than once per item.
     derived_memo: RefCell<Option<(String, Option<String>)>>,
+    /// Set when a `session_meta` line was parsed during the most recent
+    /// `items()` call; reset at the top of `items()`.
+    session_meta_seen: Cell<bool>,
 }
 
 #[derive(Deserialize)]
@@ -66,7 +69,16 @@ impl CodexRollout {
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             filtered: Cell::new(0),
             derived_memo: RefCell::new(None),
+            session_meta_seen: Cell::new(false),
         })
+    }
+
+    /// Whether a `session_meta` line was parsed during the most recent
+    /// [`Source::items`] call. `false` for legacy rollouts (or any rollout
+    /// whose `session_meta` line, if present, was never reached).
+    #[must_use]
+    pub fn session_meta_seen(&self) -> bool {
+        self.session_meta_seen.get()
     }
 
     fn file_stem(&self) -> String {
@@ -198,6 +210,7 @@ impl Source for CodexRollout {
 
     fn items(&self) -> Box<dyn Iterator<Item = Result<NewItem>> + '_> {
         self.filtered.set(0);
+        self.session_meta_seen.set(false);
         let file = match File::open(&self.path) {
             Ok(f) => f,
             Err(source) => {
@@ -247,6 +260,7 @@ impl Source for CodexRollout {
                 let is_first_parsed_line = !first_parsed_line_seen;
                 first_parsed_line_seen = true;
                 if parsed.kind == "session_meta" {
+                    self.session_meta_seen.set(true);
                     if let Some(p) = &parsed.payload {
                         if let Some(id) = p.get("id").and_then(|v| v.as_str()) {
                             session.id = id.to_string();

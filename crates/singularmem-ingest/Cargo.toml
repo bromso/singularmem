@@ -22,6 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 jiff = { workspace = true }
 rusqlite = { workspace = true }
+tempfile = { workspace = true }
 ignore = "0.4"
 sha2 = "0.10"
 
