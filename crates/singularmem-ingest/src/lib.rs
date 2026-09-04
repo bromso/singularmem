@@ -9,6 +9,7 @@
 pub mod chunk;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod dir;
 pub mod driver;
 pub mod error;
@@ -17,6 +18,7 @@ pub(crate) mod project_filter;
 pub use chunk::{chunk_text, DEFAULT_CHUNK_BYTES};
 pub use claude::{discover_transcripts, strip_system_reminders, ClaudeTranscript};
 pub use codex::{default_codex_root, discover_codex_sessions, CodexRollout};
+pub use cursor::{default_cursor_user_dir, CursorChats};
 pub use dir::{DirectoryWalker, DEFAULT_MAX_FILE_BYTES};
 pub use driver::{ingest_source, Report, BATCH_SIZE};
 pub use error::{Error, Result};
