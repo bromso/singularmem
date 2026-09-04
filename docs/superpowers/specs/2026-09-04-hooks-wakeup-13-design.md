@@ -343,7 +343,7 @@ add a `wake-up` MCP prompt with that behaviour.
    check) and `scope list` grows after the session's first stop.
 3. `singularmem hooks install codex` / `cursor` write valid config that
    the respective editor accepts (manual check on this machine for
-   Cursor; Codex config validated against its documented schema).
+   Cursor; Codex config validated by a manual smoke on an install).
 4. `singularmem ingest-cursor --dry-run` on this machine reports items for
    the ~188 workspaces with `0 failed`.
 5. `singularmem wake-up --project .` prints a header and the most recent
@@ -351,6 +351,78 @@ add a `wake-up` MCP prompt with that behaviour.
 6. `hooks uninstall` leaves a foreign hook entry byte-identical.
 7. The constitution is at v0.3.0 with the Sync Impact Report entry and
    the Open/Closed Split changes; the Constitution Check below passes.
+
+## Deviations recorded during implementation
+
+Recorded against the design above; each is implemented and covered by a
+test unless noted.
+
+1. **Structural `parse_ours`, not a substring marker.** The design
+   detected our hook entries by looking for a marker substring in the
+   command. Implementation instead parses the command structurally
+   (`"<bin>" hook <editor> <event>`, with `<editor>` and `<event>`
+   required to parse as the enums), so neither a binary path that
+   happens to contain `singularmem` nor an unrelated command mentioning
+   `hook` can be mistaken for ours. `MARKER` remains exported as a
+   sanity-check constant only.
+
+2. **`ScopeSet::for_project` takes the basename from the raw path.** The
+   save side scopes items by the basename of the `cwd` the editor
+   reported, so canonicalising on the read side made a symlinked project
+   directory (`~/dev/current -> ~/dev/project-v2`) save under `current`
+   and wake up under `project-v2`. The basename now comes from the path
+   as given; canonicalisation is a fallback for `.`/`..` (whose
+   `file_name()` is `None`) and empty basenames. `wake-up --project` is
+   likewise passed through raw.
+
+3. **`hook` opens the store itself and never exits non-zero.** The verb
+   is dispatched before the shared store-opening path in `run`, so a
+   store that cannot be opened is a warning rather than a CLI error;
+   `session-start` still prints a valid envelope with an empty context
+   in that case. Every `hook` invocation exits 0.
+
+4. **`write_config` always writes two-space JSON.** Existing
+   indentation, key quoting, and trailing whitespace in the editor's
+   config file are not preserved — the file is reserialised. Key
+   *order* is preserved (`serde_json`'s `preserve_order`); formatting is
+   not.
+
+5. **Cursor multi-root union.** `hook cursor session-start` builds the
+   wake-up scope set as the union over every entry in `workspace_roots`
+   (deduped), not just the first one via `cwd`.
+
+6. **Cursor save events filter by conversation *and* project.** A
+   conversation open in more than one window is listed by each of those
+   workspaces, so `conversation_id` alone neither identifies the
+   workspace the hook fired from nor bounds the scan. `cwd` is applied
+   as a project filter whenever present, and the workspace scan stops at
+   the first match for a conversation filter.
+
+7. **Tantivy writer-lock retry.** Tantivy allows one writer per
+   directory, so concurrent hooks contend for `.tantivy-writer.lock`.
+   `wire_index_hooks` retries the open five times with 50/100/200/400 ms
+   backoff, and only for a lock error. A long enough burst can still
+   skip indexing for one session; the store write always lands, and
+   `singularmem reindex` repairs the sidecar (documented in
+   `docs/hooks.md`).
+
+8. **Fresh-store bootstrap is transactional.** Concurrent first opens of
+   a non-existent store all took the bootstrap branch and the losers
+   failed with "table already exists". `schema::apply_current` now runs
+   under `BEGIN IMMEDIATE` and re-checks `format_version` inside the
+   transaction, and the WAL pragma is retried (it reports SQLITE_BUSY
+   without going through the busy handler).
+
+9. **`preserve_order` is declared at the workspace.** It was on
+   `singularmem-hooks` alone while the whole workspace received it
+   through feature unification. It is now an explicit workspace feature.
+   Consequence for consumers, recorded in `docs/formats/store-v3.md`:
+   object key order in an exported item's `metadata` follows insertion
+   order rather than being sorted alphabetically.
+
+10. **`SINGULARMEM_CURSOR_DIR` also backs `ingest-cursor`.** The design
+    scoped it to the `hook` verb; it is now the default for
+    `ingest-cursor --cursor-dir` too, mirroring `SINGULARMEM_CODEX_ROOT`.
 
 ## Constitution Check
 
