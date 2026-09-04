@@ -39,6 +39,16 @@ export interface SearchOptions {
    * of high-ranked documents. Default: `60`.
    */
   rrfK?: number
+  /**
+   * Restrict results to this scope path and (unless `scopeExact` is
+   * `true`) everything beneath it. `undefined` means no scope filtering.
+   */
+  scope?: string
+  /**
+   * When `true`, `scope` matches only that exact path, not descendants.
+   * Ignored if `scope` is omitted. Default: `false`.
+   */
+  scopeExact?: boolean
 }
 /** Options for `Store.retrieve`. */
 export interface RetrieveOptions {
@@ -65,6 +75,16 @@ export interface RetrieveOptions {
    * passing to an adapter.
    */
   minScore?: number
+  /**
+   * Restrict results to this scope path and (unless `scopeExact` is
+   * `true`) everything beneath it. `undefined` means no scope filtering.
+   */
+  scope?: string
+  /**
+   * When `true`, `scope` matches only that exact path, not descendants.
+   * Ignored if `scope` is omitted. Default: `false`.
+   */
+  scopeExact?: boolean
 }
 /** Options passed to `Store.list`. */
 export interface ListOptions {
@@ -83,6 +103,16 @@ export interface ListOptions {
    * result set. Omit or pass `undefined` to return all matching items.
    */
   limit?: number
+  /**
+   * Restrict results to this scope path and (unless `scopeExact` is
+   * `true`) everything beneath it. `undefined` means no scope filtering.
+   */
+  scope?: string
+  /**
+   * When `true`, `scope` matches only that exact path, not descendants.
+   * Ignored if `scope` is omitted. Default: `false`.
+   */
+  scopeExact?: boolean
 }
 /**
  * An item retrieved from the store.
@@ -144,10 +174,15 @@ export interface Item {
   /**
    * Caller-supplied stable identity used for idempotent bulk ingest
    * (e.g. `"claude-code:<session>:<uuid>"`), unique across the store.
-   * `undefined` for items ingested without one. Read-only: `NewItem` has no
-   * counterpart, so the JS API cannot set it.
+   * `undefined` for items ingested without one. Read-only: `NewItem`
+   * has no counterpart, so the JS API cannot set it.
    */
   externalId?: string
+  /**
+   * Hierarchical scope path (e.g. `"team/backend"`), already lowercased
+   * and normalised by the store. `undefined` for unscoped items.
+   */
+  scope?: string
 }
 /** One result from `Store.search`. The full `Item` is always populated. */
 export interface SearchHit {
@@ -203,6 +238,11 @@ export interface MemoryBlock {
    * crossing the native boundary (same behaviour as `Item.createdAt`).
    */
   createdAt: Date
+  /**
+   * Hierarchical scope path from the matched item, if any. `undefined`
+   * for unscoped items.
+   */
+  scope?: string
 }
 /** Structured retrieval context returned by `Store.retrieve`. */
 export interface RetrievedContext {
@@ -232,6 +272,21 @@ export interface NewItem {
    * scalar). Default: `{}` when omitted.
    */
   metadata?: any
+  /**
+   * Optional: hierarchical scope path (e.g. `"Team/X"`). Validated and
+   * normalised (lowercased) by the store at ingest time.
+   */
+  scope?: string
+}
+/**
+ * One entry in `Store.scopes()`: a distinct scope path and how many items
+ * carry it.
+ */
+export interface ScopeCount {
+  /** Normalised scope path. */
+  path: string
+  /** Number of items whose `scope` equals `path`. */
+  count: number
 }
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
@@ -334,9 +389,15 @@ export declare class Store {
    * **Limit:** when `options.limit` is provided, the result array is
    * truncated to at most that many items after tag filtering is applied.
    *
+   * **Scope filtering:** when `options.scope` is provided, only items
+   * whose scope equals it (or, unless `options.scopeExact` is `true`,
+   * falls beneath it) are returned. Rejects with `{ code: "Validation" }`
+   * before the task runs if `scope` is malformed.
+   *
    * @param options Optional filtering and pagination options (see `ListOptions`).
    * @returns Array of matching `Item` objects, oldest first.
    * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   * @throws `{ code: "Validation" }` — `options.scope` is malformed.
    */
   list(options?: ListOptions | undefined | null): Promise<Array<Item>>
   /**
@@ -463,6 +524,31 @@ export declare class Store {
    * @throws `{ code: "Io" }` — I/O error writing to the internal buffer.
    */
   export(): Promise<string>
+  /**
+   * List every distinct scope path in the store, with how many items
+   * carry it, sorted by path.
+   *
+   * @returns Array of `{ path, count }`, one per distinct scope.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  scopes(): Promise<Array<ScopeCount>>
+  /**
+   * Move an item to `scope` (or clear it by passing `null`/`undefined`),
+   * without creating a new revision.
+   *
+   * Index hooks are NOT notified: the Tantivy document keeps its old
+   * scope until `singularmem reindex` rebuilds it.
+   *
+   * @param id A 26-character Crockford base32 ULID string identifying the item.
+   * @param scope The new scope path, or `null`/`undefined` to clear it.
+   * @returns The updated `Item`.
+   * @throws `{ code: "InvalidId" }` — `id` is not a valid 26-character ULID string.
+   * @throws `{ code: "NotFound" }` — no item with that ID exists in the store.
+   * @throws `{ code: "Validation" }` — `scope` is malformed.
+   * @throws `{ code: "ReadOnly" }` — the store was opened with `{ readOnly: true }`.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  setScope(id: string, scope?: string | undefined | null): Promise<Item>
 }
 
 /**

@@ -1,6 +1,6 @@
 //! Result types returned from `Index::search`.
 
-use singularmem_core::ItemId;
+use singularmem_core::{ItemId, ScopeFilter};
 use std::time::Duration;
 
 /// One ranked search hit. Carries only what the caller needs to look up the
@@ -33,7 +33,7 @@ pub struct SearchResults {
 }
 
 /// Options controlling search behaviour.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SearchOptions {
     /// Max number of hits to return. Default 20.
     pub limit: usize,
@@ -41,6 +41,9 @@ pub struct SearchOptions {
     pub offset: usize,
     /// Include snippet highlights. Default true.
     pub include_snippets: bool,
+    /// Restrict hits to a scope subtree (or an exact scope). Default `None`
+    /// — every item, scoped or not, is eligible.
+    pub scope: Option<ScopeFilter>,
 }
 
 impl Default for SearchOptions {
@@ -49,6 +52,7 @@ impl Default for SearchOptions {
             limit: 20,
             offset: 0,
             include_snippets: true,
+            scope: None,
         }
     }
 }

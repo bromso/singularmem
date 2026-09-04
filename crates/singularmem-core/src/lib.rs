@@ -1,7 +1,7 @@
 //! Singularmem memory store — local-first, SQLite-backed, immutable text items
 //! with supersedes-chained revisions.
 //!
-//! See `docs/formats/store-v2.md` in the repository root for the on-disk format
+//! See `docs/formats/store-v3.md` in the repository root for the on-disk format
 //! specification and `docs/superpowers/specs/2026-05-16-memory-store-v0-design.md`
 //! for the design rationale.
 
@@ -13,6 +13,7 @@ pub mod format;
 pub mod hook;
 pub mod item;
 pub mod rng;
+pub mod scope;
 pub mod store;
 
 mod export;
@@ -27,4 +28,5 @@ pub use crate::hook::IndexHook;
 pub use crate::item::{Item, ItemId, NewItem};
 pub use crate::query::ItemIter;
 pub use crate::rng::{OsRng, Rng};
+pub use crate::scope::ScopeFilter;
 pub use crate::store::{Store, StoreOptions};

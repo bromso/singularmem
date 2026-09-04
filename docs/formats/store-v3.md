@@ -1,9 +1,7 @@
-# Singularmem Store Format — v2
-
-> Superseded by [store-v3.md](store-v3.md) (first shipped in v0.18.0).
+# Singularmem Store Format — v3
 
 This document specifies the on-disk format of a Singularmem memory store
-at `format_version = 2`. **A third-party tool that reads this document and
+at `format_version = 3`. **A third-party tool that reads this document and
 has access to a SQLite library can write a complete loader without
 referencing any Singularmem source code.** That property is a
 constitutional requirement (Principle III.b).
@@ -37,6 +35,7 @@ CREATE TABLE items (
     source       TEXT,
     metadata     TEXT NOT NULL DEFAULT '{}',
     external_id  TEXT,
+    scope        TEXT,
     FOREIGN KEY (supersedes) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
     CHECK (length(content) > 0),
     CHECK (length(content) <= 1048576),
@@ -54,6 +53,7 @@ CREATE INDEX idx_items_created_at ON items(created_at);
 CREATE INDEX idx_items_supersedes ON items(supersedes) WHERE supersedes IS NOT NULL;
 CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
 ```
 
 ### Column semantics
@@ -99,11 +99,41 @@ established by the reference implementation:
 stored case-sensitively. The `(item_id, tag)` primary key dedupes within
 an item.
 
+**`items.scope`** — Nullable. Optional hierarchical scope path, e.g.
+`claude-code/singularmem` or `files/repo`. `NULL` for unscoped items.
+
+Validation and normalisation (`singularmem_core::scope::validate`):
+
+- Leading/trailing `/` are stripped; segments are lowercased.
+- At least one segment, at most 8 segments (`/`-separated).
+- Each segment is 1–64 bytes, matching `[a-z0-9._-]` after lowercasing;
+  `.` and `..` segments are rejected (no directory-traversal-style
+  paths), as are empty segments (`a//b`).
+- The normalised path (segments joined by a single `/`, no
+  leading/trailing slash) is at most 512 bytes total.
+- Any violation returns `Error::Validation { field: "scope", .. }`
+  describing the first rule broken; the item is not persisted.
+
+A **descendant-inclusive** scope filter over `path` matches any row whose
+`scope` equals `path` or begins with `path` followed by `/`. As SQL
+against a bound parameter `?1` (already normalised):
+
+```sql
+scope = ?1 OR scope LIKE ?1 || '/%'
+```
+
+Because `_` is both a legal scope byte and a SQL `LIKE` wildcard, the
+reference implementation binds the `LIKE` pattern with `_` (and `%` and
+`\`) backslash-escaped and appends `ESCAPE '\'` to the clause, rather than
+interpolating `?1` directly into the pattern as shown above (which is
+illustrative only). An **exact-match** filter instead compares
+`scope = ?1` with no `LIKE` at all.
+
 ### `singularmem_meta` key registry
 
 | Key | Type | Required? | Purpose |
 |---|---|---|---|
-| `format_version` | string (`"2"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
+| `format_version` | string (`"3"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
 | `created_at` | RFC 3339 | yes | Wall-clock time the store file was first created. |
 
 Future format versions may add keys; readers MUST ignore unknown keys
@@ -116,12 +146,13 @@ maximum version `M`:
 
 - `N == M` → open succeeds, no migration.
 - `N < M` → loader runs migrators `N → N+1 → ... → M` in a single
-  transaction; failure rolls back and surfaces the original `N`.
+  transaction per step; failure rolls back that step and surfaces the
+  version it started from.
 - `N > M` → loader MUST refuse with an "unsupported format version"
   error. It MUST NOT attempt to operate on a newer format.
 
 The Singularmem reference implementation in `crates/singularmem-core`
-supports maximum version `2` from v0.17.0 onward.
+supports maximum version `3` from v0.18.0 onward.
 
 ## Migration 1 → 2
 
@@ -137,40 +168,79 @@ UPDATE singularmem_meta SET value = '2' WHERE key = 'format_version';
 The reference implementation opens this transaction with `BEGIN
 IMMEDIATE` (taking the write lock up front, rather than deferring it to
 the first write) and re-reads `format_version` immediately after
-acquiring the lock: if a concurrent writer already completed the
-migration while this connection was waiting for the lock, the migration
-is a no-op — the transaction is rolled back (there is nothing left to
-commit) and `Ok(())` is returned. Otherwise the three statements above
-run and commit together. Any failure rolls the whole transaction back,
-leaving the store at `format_version = 1`.
+acquiring the lock: if a concurrent writer already moved the store past
+`1` while this connection was waiting for the lock, the migration is a
+no-op — the transaction is rolled back (there is nothing left to commit)
+and `Ok(())` is returned. Otherwise the three statements above run and
+commit together. Any failure rolls the whole transaction back, leaving
+the store at `format_version = 1`.
 
-A **read-only** open of a store still at `format_version = 1` MUST NOT
-migrate (a read-only connection cannot take a write lock) — it fails with
-a migration-required error. The store must be opened writable at least
-once to migrate; after that, subsequent read-only opens succeed against
-the now-`2` store.
+## Migration 2 → 3
 
-## In-place mutation: replacing an externally-keyed item
-
-Every other row in `items` is append-only once inserted — this format's
-one deliberate exception is the transfer of an `external_id` from a
-superseded item to its successor, performed by `Store::ingest_replacing`.
-Inside a single transaction:
+A store opened writable at `format_version = 2` is migrated in place to
+`3` by executing exactly these statements in a single transaction:
 
 ```sql
-UPDATE items SET external_id = NULL WHERE id = <old>;
--- then, in the same transaction:
-INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id)
-VALUES (<new>, ..., <old>, ..., ..., <external_id>);
+ALTER TABLE items ADD COLUMN scope TEXT;
+CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+UPDATE singularmem_meta SET value = '3' WHERE key = 'format_version';
 ```
 
-The successor row carries `supersedes = <old>` and the `external_id` the
-old row just gave up. This is the only `UPDATE` statement the reference
-implementation ever issues against `items`; every other write is an
-`INSERT`. A third-party loader that only ever reads should treat this as
-part of the normal supersedes chain — `get_by_external_id` always
-resolves to the current holder of an id, and the old item remains in the
-store (readable by its own `id`, just with `external_id = NULL`).
+Transactional shape is identical to Migration 1 → 2: `BEGIN IMMEDIATE`,
+re-check `format_version` after acquiring the lock (no-op if the store
+already moved past `2`), apply the statements, commit; any failure rolls
+back and leaves the store at `format_version = 2`.
+
+A store found at `format_version = 1` is migrated through the full chain
+— `1 → 2`, then `2 → 3` — as two migrations run back to back by the
+loader, not a single combined transaction.
+
+A **read-only** open of a store still at `format_version = 1` or `2` MUST
+NOT migrate (a read-only connection cannot take a write lock) — it fails
+with a migration-required error. The store must be opened writable at
+least once to migrate; after that, subsequent read-only opens succeed
+against the now-`3` store.
+
+## In-place mutation: the two sanctioned `UPDATE`s
+
+Every other row in `items` is append-only once inserted — this format
+allows exactly two deliberate exceptions, both performed by the reference
+implementation:
+
+1. **`external_id` transfer** — `Store::ingest_replacing` moves an
+   `external_id` from a superseded item to its successor. Inside a single
+   transaction:
+
+   ```sql
+   UPDATE items SET external_id = NULL WHERE id = <old>;
+   -- then, in the same transaction:
+   INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id, scope)
+   VALUES (<new>, ..., <old>, ..., ..., <external_id>, ...);
+   ```
+
+   The successor row carries `supersedes = <old>` and the `external_id`
+   the old row just gave up.
+
+2. **`set_scope`** — available from v0.18.0 (this format version).
+   `Store::set_scope` reassigns an item's scope after ingest:
+
+   ```sql
+   UPDATE items SET scope = ? WHERE id = ?;
+   ```
+
+   `set_scope` updates only the SQLite row; it does not touch the Tantivy
+   sidecar. The lexical index keeps indexing the item under its old scope
+   until `singularmem reindex` runs, so between a `set_scope` call and the
+   next reindex a hybrid search may rank the item under its old scope on
+   the lexical side while the semantic side (post-filtered against the
+   store) already sees the new one.
+
+A third-party loader that only ever reads should treat both as part of
+the normal supersedes chain and column semantics respectively —
+`get_by_external_id` always resolves to the current holder of an id, and
+the old item remains in the store (readable by its own `id`, just with
+`external_id = NULL`); a scope change is simply the row's current value
+of `items.scope`.
 
 ## Export format — `export-v1`
 
@@ -178,9 +248,9 @@ The `singularmem export` CLI verb (and `Store::export` library method)
 emit JSONL on stdout. Format:
 
 ```jsonl
-{"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"2","exported_at":"2026-05-16T12:34:56.000000000Z"}
+{"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"3","exported_at":"2026-05-16T12:34:56.000000000Z"}
 {"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","tags":["work","decision"],"metadata":{"project":"alpha"}}
-{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","external_id":"file:/a.rs"}
+{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","external_id":"file:/a.rs","scope":"claude-code/singularmem"}
 ```
 
 Rules:
@@ -188,26 +258,26 @@ Rules:
 - The first line is always a meta record naming the format
   (`"_singularmem_format":"export-v1"`); the export format itself is
   unversioned by the store's `format_version` — only `store_format_version`
-  inside the meta line changes, and it is now `"2"`.
+  inside the meta line changes, and it is now `"3"`.
 - Each subsequent line is one item, encoded as a single-line JSON object.
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
 - Items are emitted in `created_at` ascending order. Given a
   deterministic store, the export is byte-identical across runs.
 - Only `_kind`, `id`, `content` and `created_at` are always present.
-- `supersedes`, `source`, `tags`, `metadata` and `external_id` are
-  **omitted** when they carry no information: `supersedes`, `source` and
-  `external_id` when null, `tags` when the item has no tags, `metadata`
-  when it is the empty object. A reader MUST treat an absent field as
-  that empty value (`null`, `[]`, `{}`) rather than as an error — the
-  first item line above has no `supersedes` and no `source`, the second
-  has no `tags` and no `metadata`.
-- `external_id` is therefore present only on items that have one;
-  readers of `export-v1` written by a v1 store simply never see the
-  field, so this is a backward-compatible addition.
+- `supersedes`, `source`, `tags`, `metadata`, `external_id`, and `scope`
+  are **omitted** when they carry no information: `supersedes`, `source`,
+  `external_id` and `scope` when null, `tags` when the item has no tags,
+  `metadata` when it is the empty object. A reader MUST treat an absent
+  field as that empty value (`null`, `[]`, `{}`) rather than as an error
+  — the first item line above has no `supersedes` and no `source`, the
+  second has no `tags` and no `metadata`.
+- `external_id` and `scope` are therefore present only on items that have
+  one; readers of `export-v1` written by a v1 or v2 store simply never
+  see those fields, so these are backward-compatible additions.
 
 ## Known limitations
 
-Two gaps in the v2 bulk-ingest path are documented here rather than
+Two gaps in the bulk-ingest path are documented here rather than
 papered over. Both are tracked for sub-project 12.
 
 1. **Superseded items stay in the search indexes until `reindex`.**
@@ -230,13 +300,15 @@ papered over. Both are tracked for sub-project 12.
 
 1. Open the SQLite file.
 2. Read `singularmem_meta.format_version`. If not present, the file is
-   not a Singularmem store. Accept `"1"` or `"2"`; refuse anything else
-   — see the migration ratchet above. When the value is `"2"`, the
-   `items.external_id` column exists (and the associated partial unique
-   index); when `"1"`, it does not.
+   not a Singularmem store. Accept `"1"`, `"2"`, or `"3"`; refuse anything
+   else — see the migration ratchet above. When the value is `"2"` or
+   `"3"`, the `items.external_id` column exists (and the associated
+   partial unique index); when `"3"`, `items.scope` also exists (and its
+   partial index); when `"1"`, neither exists.
 3. To list items, `SELECT id, content, created_at, supersedes, source,
    metadata FROM items ORDER BY created_at ASC` (add `external_id` to the
-   column list at `format_version = 2`).
+   column list at `format_version = 2` or higher; add `scope` at
+   `format_version = 3`).
 4. For each item, fetch its tags: `SELECT tag FROM item_tags WHERE item_id
    = ? ORDER BY tag ASC`.
 5. To follow a supersedes chain, recursively `SELECT supersedes FROM
@@ -245,7 +317,8 @@ papered over. Both are tracked for sub-project 12.
    `CHECK` constraint.
 
 A loader that follows these steps interoperates with any Singularmem
-store at `format_version = 1` or `2` regardless of which binary wrote it.
+store at `format_version = 1`, `2`, or `3` regardless of which binary
+wrote it.
 
 ## Tantivy sidecar index (optional, format unstable across Tantivy versions)
 
@@ -261,18 +334,33 @@ Configurable via `StoreOptions.index_path` in the Rust library; the CLI's
 `--store PATH` flag implies `PATH.tantivy/` and there is no separate
 override at v0.2.0.
 
-### Schema (Tantivy 0.22.1)
+### Schema (Tantivy 0.22.1), sidecar schema v0.3.0
 
-| Field name   | Type     | Options                       | Purpose |
-|--------------|----------|-------------------------------|---------|
-| `content`    | text     | TEXT + STORED                 | Searchable item text; default-search field. |
-| `tags`       | text     | STRING + STORED               | Exact-match tag queries via `tags:value`. |
-| `source`     | text     | TEXT + STORED                 | Tokenized provenance label; default-search field. |
-| `id`         | text     | STRING + STORED               | ULID for hit→Item lookup. |
-| `created_at` | date     | INDEXED + STORED + FAST       | Range filtering (reserved for v0.3+). |
-| `supersedes` | text     | STRING + STORED               | Revision pointer (reserved for v0.3+). |
+| Field name        | Type     | Options                  | Purpose |
+|-------------------|----------|--------------------------|---------|
+| `content`         | text     | TEXT + STORED            | Searchable item text; default-search field. |
+| `tags`            | text     | STRING + STORED          | Exact-match tag queries via `tags:value`. |
+| `source`          | text     | TEXT + STORED            | Tokenized provenance label; default-search field. |
+| `id`              | text     | STRING + STORED          | ULID for hit→Item lookup. |
+| `created_at`      | date     | INDEXED + STORED + FAST  | Range filtering (reserved for v0.3+). |
+| `supersedes`      | text     | STRING + STORED          | Revision pointer (reserved for v0.3+). |
+| `scope`           | text     | STRING + STORED          | The item's own scope path; backs an exact scope filter. |
+| `scope_ancestors` | text     | STRING                   | Multi-valued: one value per prefix of `scope` (`a`, `a/b`, `a/b/c` for scope `a/b/c`); backs a descendant-inclusive scope filter as a single term lookup. Not stored — derivable from `scope`. |
 
-`metadata` is intentionally NOT indexed in v0.2.0.
+Unscoped items carry neither field. A scope filter is therefore also an
+"is scoped" filter: an item with no scope never matches one.
+
+`metadata` is intentionally NOT indexed.
+
+### Schema version and pre-v0.18.0 sidecars
+
+The `scope` and `scope_ancestors` fields were added in v0.18.0 (sidecar
+schema v0.3.0). Tantivy refuses to open a directory whose stored schema
+differs from the one supplied, so a sidecar written by an earlier release
+fails to open with `Error::IndexSchemaMismatch { path }`; the message
+directs the user to `singularmem reindex`, which rebuilds the sidecar from
+`SQLite`. There is no in-place migration — the sidecar is a derived
+artefact and rebuilding is always safe.
 
 ### Rebuild from SQLite
 

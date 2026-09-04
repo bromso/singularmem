@@ -82,12 +82,14 @@ See `index.d.ts` for the full TypeScript surface. The current public API is:
 
 - `Store.open(path, options?)` — async static factory
 - `store.get(id)` — async point lookup
-- `store.list(options?)` — async list with optional `{ tags?, limit? }`
+- `store.list(options?)` — async list with optional `{ tags?, limit?, scope?, scopeExact? }`
 - `store.revisions(id)` — async revision chain (oldest → newest)
-- `store.search(query, options?)` — hybrid search over Tantivy + USearch indexes
-- `store.retrieve(query, options?)` — search + context assembly, ready for adapters
+- `store.search(query, options?)` — hybrid search over Tantivy + USearch indexes (options include `scope?`, `scopeExact?`)
+- `store.retrieve(query, options?)` — search + context assembly, ready for adapters (options include `scope?`, `scopeExact?`)
 - `store.formatVersion()` — on-disk format version string
 - `store.export()` — full JSONL dump
+- `store.scopes()` — distinct scope paths with item counts, sorted by path
+- `store.setScope(id, scope)` — move an item to `scope` (or clear it with `null`/`undefined`), no new revision
 
 ## Search
 
@@ -150,6 +152,7 @@ const item = await store.ingest({
   tags: ['recipes', 'cats'],
   source: 'morning-notes',
   metadata: { authorId: 42 },
+  scope: 'Team/Pets', // normalised (lowercased) to 'team/pets'
 });
 
 console.log(item.id, item.createdAt);
@@ -176,6 +179,42 @@ const v2 = await store.ingest({ content: 'new version', supersedes: v1.id });
 
 Opening a store with `{ readOnly: true }` causes `ingest()` to reject
 with `code: 'ReadOnly'`.
+
+## Scoping
+
+Items can carry a hierarchical scope path (e.g. `"team/backend"`), set via
+`NewItem.scope` at ingest time. Paths are validated and lowercased; a
+malformed path (double slash, `.`/`..` segment, disallowed character, etc.)
+rejects with `code: 'Validation'`.
+
+`list()`, `search()`, and `retrieve()` all accept `{ scope?, scopeExact? }`:
+by default `scope` matches that path and everything beneath it; pass
+`scopeExact: true` to match only the exact path.
+
+```javascript
+await store.ingest({ content: 'backend runbook', scope: 'team/backend' });
+
+// Matches 'team/backend' and any deeper scope, e.g. 'team/backend/oncall'.
+const items = await store.list({ scope: 'team' });
+
+// Matches only the exact scope.
+const exact = await store.list({ scope: 'team/backend', scopeExact: true });
+```
+
+`store.scopes()` lists every distinct scope with its item count:
+
+```javascript
+const counts = await store.scopes(); // [{ path: 'team/backend', count: 3 }, ...]
+```
+
+`store.setScope(id, scope)` moves an item to a new scope (or clears it with
+`null`/`undefined`) without creating a new revision. Tantivy's copy of the
+scope is not updated until the next `singularmem reindex`.
+
+```javascript
+await store.setScope(item.id, 'team/frontend');
+await store.setScope(item.id, null); // clears the scope
+```
 
 ## Adapters
 

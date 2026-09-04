@@ -43,6 +43,23 @@ pub enum Error {
         reason: String,
     },
 
+    /// The Tantivy sidecar was built with a different schema version.
+    #[error(
+        "Tantivy index at {path} was built with an older schema; \
+         run `singularmem reindex` to rebuild it"
+    )]
+    IndexSchemaMismatch {
+        /// The sidecar directory.
+        path: PathBuf,
+    },
+
+    /// A scope filter was requested on a semantic search but no
+    /// `ScopeLookup` was attached to the searcher.
+    #[error(
+        "scope filter requires a ScopeLookup (attach one with HybridSearcher::with_scope_lookup)"
+    )]
+    ScopeLookupMissing,
+
     /// Filesystem or I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

@@ -3149,6 +3149,7 @@ dependencies = [
  "singularmem-ingest",
  "singularmem-retrieve",
  "singularmem-search",
+ "tantivy",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",

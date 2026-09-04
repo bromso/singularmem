@@ -62,6 +62,9 @@ pub struct Item {
     /// `undefined` for items ingested without one. Read-only: `NewItem`
     /// has no counterpart, so the JS API cannot set it.
     pub external_id: Option<String>,
+    /// Hierarchical scope path (e.g. `"team/backend"`), already lowercased
+    /// and normalised by the store. `undefined` for unscoped items.
+    pub scope: Option<String>,
 }
 
 impl From<singularmem_core::Item> for Item {
@@ -76,6 +79,7 @@ impl From<singularmem_core::Item> for Item {
             source: core.source,
             metadata: core.metadata,
             external_id: core.external_id,
+            scope: core.scope,
         }
     }
 }
@@ -147,6 +151,9 @@ pub struct MemoryBlock {
     /// crossing the native boundary (same behaviour as `Item.createdAt`).
     #[napi(ts_type = "Date")]
     pub created_at: f64,
+    /// Hierarchical scope path from the matched item, if any. `undefined`
+    /// for unscoped items.
+    pub scope: Option<String>,
 }
 
 impl From<singularmem_retrieve::MemoryBlock> for MemoryBlock {
@@ -160,6 +167,7 @@ impl From<singularmem_retrieve::MemoryBlock> for MemoryBlock {
             source: b.source,
             tags: b.tags,
             created_at: b.created_at.as_millisecond() as f64,
+            scope: b.scope,
         }
     }
 }
@@ -198,6 +206,19 @@ pub struct NewItem {
     /// Optional: arbitrary JSON object (must be an object, not an array or
     /// scalar). Default: `{}` when omitted.
     pub metadata: Option<serde_json::Value>,
+    /// Optional: hierarchical scope path (e.g. `"Team/X"`). Validated and
+    /// normalised (lowercased) by the store at ingest time.
+    pub scope: Option<String>,
+}
+
+/// One entry in `Store.scopes()`: a distinct scope path and how many items
+/// carry it.
+#[napi(object)]
+pub struct ScopeCount {
+    /// Normalised scope path.
+    pub path: String,
+    /// Number of items whose `scope` equals `path`.
+    pub count: u32,
 }
 
 /// Convert a JS-sent `NewItem` into the core's `NewItem`. Performs early
@@ -234,6 +255,7 @@ pub fn js_new_item_to_core(
         source: item.source,
         metadata: item.metadata.unwrap_or_else(|| serde_json::json!({})),
         external_id: None,
+        scope: item.scope,
     })
 }
 
@@ -253,6 +275,7 @@ mod tests {
             source: Some("test".to_string()),
             metadata: serde_json::json!({"k": "v"}),
             external_id: Some("k".to_string()),
+            scope: None,
         }
     }
 
@@ -301,6 +324,16 @@ mod tests {
     }
 
     #[test]
+    fn item_scope_round_trips() {
+        let core = singularmem_core::Item {
+            scope: Some("a/b".to_string()),
+            ..sample_core_item()
+        };
+        let item: Item = core.into();
+        assert_eq!(item.scope.as_deref(), Some("a/b"));
+    }
+
+    #[test]
     fn item_external_id_none_becomes_none() {
         let core = singularmem_core::Item {
             external_id: None,
@@ -318,6 +351,7 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert!(core.external_id.is_none(), "write path stays read-only");
@@ -422,6 +456,7 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert_eq!(core.content, "hello");
@@ -439,6 +474,7 @@ mod tests {
             tags: Some(vec!["a".to_string(), "b".to_string()]),
             source: Some("test".to_string()),
             metadata: Some(serde_json::json!({"k": "v"})),
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert_eq!(core.tags, vec!["a".to_string(), "b".to_string()]);
@@ -455,6 +491,7 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert_eq!(
@@ -471,6 +508,7 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let napi_err = js_new_item_to_core(js).unwrap_err();
         assert_eq!(napi_err.status, "InvalidId");
@@ -484,6 +522,7 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert!(core.supersedes.is_none());
@@ -497,8 +536,23 @@ mod tests {
             tags: None,
             source: None,
             metadata: None,
+            scope: None,
         };
         let core = js_new_item_to_core(js).unwrap();
         assert_eq!(core.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn new_item_scope_passes_through() {
+        let js = NewItem {
+            content: "c".to_string(),
+            supersedes: None,
+            tags: None,
+            source: None,
+            metadata: None,
+            scope: Some("Team/X".to_string()),
+        };
+        let core = js_new_item_to_core(js).unwrap();
+        assert_eq!(core.scope.as_deref(), Some("Team/X"));
     }
 }

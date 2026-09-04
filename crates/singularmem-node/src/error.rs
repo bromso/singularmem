@@ -107,6 +107,20 @@ pub fn map_search_error(e: singularmem_search::Error) -> (&'static str, String) 
                 path.display()
             ),
         ),
+        SE::IndexSchemaMismatch { path } => (
+            "IndexSchemaMismatch",
+            format!(
+                "Tantivy index at {} was built with an older schema; \
+                 run `singularmem reindex` to rebuild it",
+                path.display()
+            ),
+        ),
+        SE::ScopeLookupMissing => (
+            "ScopeLookupMissing",
+            "scope filter requires a ScopeLookup (attach one with \
+             HybridSearcher::with_scope_lookup)"
+                .to_string(),
+        ),
         SE::Io(e) => ("Io", format!("I/O error: {e}")),
         SE::Embedding { context, reason } => (
             "Embedding",

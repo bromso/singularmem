@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::{Deserialize, Serialize};
 
-use crate::tools::util::open_store_for_reading;
+use crate::tools::util::{open_store_for_reading, scope_filter};
 use crate::{Config, Result};
 
 /// JSON-deserialised arguments for the `memory_list` tool.
@@ -19,6 +19,14 @@ pub struct MemoryListArgs {
     /// Default: 50.
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Restrict to this scope path and its descendants (or, with
+    /// `scope_exact`, only this exact scope).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// When `true`, match only the exact scope given in `scope`
+    /// (rather than including descendants). Default: `false`.
+    #[serde(default)]
+    pub scope_exact: Option<bool>,
 }
 
 /// Handler output: a single text block with one line per item.
@@ -49,6 +57,15 @@ pub fn tool_descriptor() -> Tool {
                 "maximum": 100,
                 "default": 50,
                 "description": "Maximum number of items to return."
+            },
+            "scope": {
+                "type": "string",
+                "description": "Restrict to this scope path and its descendants, e.g. \"claude-code/myproj\"."
+            },
+            "scope_exact": {
+                "type": "boolean",
+                "default": false,
+                "description": "Match only the exact scope."
             }
         },
         "required": []
@@ -70,15 +87,16 @@ pub fn tool_descriptor() -> Tool {
 pub fn handle_memory_list(args: &MemoryListArgs, config: &Config) -> Result<MemoryListOutput> {
     let limit = args.limit.unwrap_or(50).clamp(1, 100);
     let store = open_store_for_reading(config)?;
+    let filter = scope_filter(args.scope.as_deref(), args.scope_exact)?;
 
-    let iter: Box<dyn Iterator<Item = singularmem_core::Result<singularmem_core::Item>>> =
-        match &args.tags {
-            Some(tags) if !tags.is_empty() => {
-                let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-                Box::new(store.list_by_tags(&tag_refs)?)
-            }
-            _ => Box::new(store.list()?),
-        };
+    let tag_refs: Vec<&str> = args
+        .tags
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let iter = store.list_by_tags_scoped(&tag_refs, filter.as_ref())?;
 
     let items: Vec<singularmem_core::Item> = iter
         .take(limit)
@@ -134,6 +152,8 @@ mod tests {
         let args = MemoryListArgs {
             tags: None,
             limit: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_list(&args, &config).expect("ok");
         assert!(
@@ -150,6 +170,8 @@ mod tests {
         let args = MemoryListArgs {
             tags: Some(vec!["even".to_string()]),
             limit: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_list(&args, &config).expect("ok");
         assert!(
@@ -165,6 +187,8 @@ mod tests {
         let args = MemoryListArgs {
             tags: None,
             limit: Some(500),
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_list(&args, &config).expect("ok");
         assert!(
@@ -180,12 +204,79 @@ mod tests {
         let args = MemoryListArgs {
             tags: None,
             limit: None,
+            scope: None,
+            scope_exact: None,
         };
         let out = handle_memory_list(&args, &config).expect("ok");
         assert!(
             out.text.contains("Found 50"),
             "expected default limit 50, got: {}",
             out.text
+        );
+    }
+
+    /// Seed items each carrying the given scope (or none).
+    #[allow(clippy::missing_panics_doc)]
+    fn seeded_with_scopes(scopes: &[Option<&str>]) -> (TempDir, Config) {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let store = Store::open(&store_path).unwrap();
+        for (i, scope) in scopes.iter().enumerate() {
+            let mut item = NewItem::text(format!("seed memory number {i}"));
+            item.scope = scope.map(str::to_string);
+            store.ingest(item).unwrap();
+        }
+        drop(store);
+        let config = Config::new(store_path, "plain".to_string(), false);
+        (dir, config)
+    }
+
+    #[test]
+    fn list_respects_scope_filter() {
+        let (_dir, config) = seeded_with_scopes(&[Some("a"), Some("a/b"), Some("x"), None]);
+
+        let args = MemoryListArgs {
+            tags: None,
+            limit: None,
+            scope: Some("a".to_string()),
+            scope_exact: None,
+        };
+        let out = handle_memory_list(&args, &config).expect("ok");
+        assert!(
+            out.text.contains("Found 2"),
+            "expected 2 items under scope 'a' (descendants), got: {}",
+            out.text
+        );
+
+        let args = MemoryListArgs {
+            tags: None,
+            limit: None,
+            scope: Some("a".to_string()),
+            scope_exact: Some(true),
+        };
+        let out = handle_memory_list(&args, &config).expect("ok");
+        assert!(
+            out.text.contains("Found 1"),
+            "expected 1 item at exact scope 'a', got: {}",
+            out.text
+        );
+
+        let args = MemoryListArgs {
+            tags: None,
+            limit: None,
+            scope: Some("a//b".to_string()),
+            scope_exact: None,
+        };
+        let r = handle_memory_list(&args, &config);
+        assert!(
+            matches!(
+                r,
+                Err(crate::Error::Core(singularmem_core::Error::Validation {
+                    field: "scope",
+                    ..
+                }))
+            ),
+            "expected Core(Validation{{field: 'scope'}}), got {r:?}"
         );
     }
 }

@@ -1,6 +1,6 @@
 //! Shared helpers used by tool handlers.
 
-use singularmem_core::{Store, StoreOptions};
+use singularmem_core::{ScopeFilter, Store, StoreOptions};
 
 use crate::{Config, Result};
 
@@ -20,5 +20,64 @@ pub fn open_store_for_reading(config: &Config) -> Result<Store> {
         )?)
     } else {
         Ok(Store::open(&config.store_path)?)
+    }
+}
+
+/// Build a [`ScopeFilter`] from a tool's `scope` / `scope_exact` arguments.
+///
+/// `scope: None` means "no scope restriction" regardless of `exact`.
+/// `exact: Some(true)` restricts to an exact scope match; otherwise the
+/// filter includes descendants.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::Core`] wrapping [`singularmem_core::Error::Validation`]
+/// (`field: "scope"`) when `scope` fails validation (empty segment, illegal
+/// characters, too many segments, etc.).
+pub fn scope_filter(scope: Option<&str>, exact: Option<bool>) -> Result<Option<ScopeFilter>> {
+    match scope {
+        None => Ok(None),
+        Some(p) if exact.unwrap_or(false) => Ok(Some(ScopeFilter::exact(p)?)),
+        Some(p) => Ok(Some(ScopeFilter::descendants(p)?)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scope_filter_none_when_scope_absent() {
+        assert_eq!(scope_filter(None, None).unwrap(), None);
+        assert_eq!(scope_filter(None, Some(true)).unwrap(), None);
+    }
+
+    #[test]
+    fn scope_filter_descendants_by_default() {
+        let f = scope_filter(Some("a/b"), None).unwrap().unwrap();
+        assert_eq!(f.path, "a/b");
+        assert!(!f.exact);
+    }
+
+    #[test]
+    fn scope_filter_exact_when_requested() {
+        let f = scope_filter(Some("a/b"), Some(true)).unwrap().unwrap();
+        assert_eq!(f.path, "a/b");
+        assert!(f.exact);
+    }
+
+    #[test]
+    fn scope_filter_rejects_invalid_scope() {
+        let r = scope_filter(Some("a//b"), None);
+        assert!(
+            matches!(
+                r,
+                Err(crate::Error::Core(singularmem_core::Error::Validation {
+                    field: "scope",
+                    ..
+                }))
+            ),
+            "expected Core(Validation{{field: 'scope'}}), got {r:?}"
+        );
     }
 }

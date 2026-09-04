@@ -21,6 +21,7 @@ fn on_ingest_then_commit_increments_doc_count() {
         source: None,
         metadata: serde_json::Value::Object(serde_json::Map::new()),
         external_id: None,
+        scope: None,
     };
     idx.on_ingest(&item).unwrap();
     idx.commit().unwrap();

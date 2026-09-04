@@ -4,8 +4,10 @@
 //! for the design rationale.
 
 use serde::Serialize;
-use singularmem_core::ItemId;
+use singularmem_core::{ItemId, ScopeFilter};
 use std::time::Duration;
+
+use crate::scope_lookup::ScopeLookup;
 
 /// Options controlling a hybrid search query.
 #[derive(Debug, Clone)]
@@ -20,6 +22,13 @@ pub struct HybridSearchOptions {
     pub rrf_k: usize,
     /// Include lexical snippet highlights (if available). Default: true.
     pub include_snippets: bool,
+    /// Restrict hits to a scope subtree (or an exact scope). Default `None`.
+    ///
+    /// The lexical side filters inside Tantivy; the semantic side is
+    /// post-filtered through the [`ScopeLookup`] attached with
+    /// [`HybridSearcher::with_scope_lookup`], which is therefore required
+    /// whenever this is `Some` and the semantic ranker runs.
+    pub scope: Option<ScopeFilter>,
 }
 
 impl Default for HybridSearchOptions {
@@ -29,6 +38,7 @@ impl Default for HybridSearchOptions {
             fetch_multiplier: 3,
             rrf_k: 60,
             include_snippets: true,
+            scope: None,
         }
     }
 }
@@ -95,11 +105,15 @@ use crate::vector_index::EmbedderIndex;
 /// [`HybridSearcher::semantic_only`] depending on what's available at the call
 /// site. The CLI's `cmd_search` chooses based on directory probes when
 /// `--mode auto`; explicit modes pick directly.
+#[derive(Clone, Copy)]
 pub struct HybridSearcher<'a> {
     /// Lexical (Tantivy) index, when available.
     pub lexical: Option<&'a Index>,
     /// Semantic (`USearch` + embedder) index, when available.
     pub semantic: Option<&'a EmbedderIndex>,
+    /// Resolves scopes for semantic hits; see
+    /// [`HybridSearcher::with_scope_lookup`].
+    scope_lookup: Option<&'a dyn ScopeLookup>,
 }
 
 impl<'a> HybridSearcher<'a> {
@@ -109,6 +123,7 @@ impl<'a> HybridSearcher<'a> {
         Self {
             lexical: Some(lexical),
             semantic: Some(semantic),
+            scope_lookup: None,
         }
     }
 
@@ -119,6 +134,7 @@ impl<'a> HybridSearcher<'a> {
         Self {
             lexical: Some(lexical),
             semantic: None,
+            scope_lookup: None,
         }
     }
 
@@ -129,7 +145,24 @@ impl<'a> HybridSearcher<'a> {
         Self {
             lexical: None,
             semantic: Some(semantic),
+            scope_lookup: None,
         }
+    }
+
+    /// Attach the lookup used to post-filter semantic hits when
+    /// [`HybridSearchOptions::scope`] is set.
+    #[must_use]
+    pub const fn with_scope_lookup(mut self, lookup: &'a dyn ScopeLookup) -> Self {
+        self.scope_lookup = Some(lookup);
+        self
+    }
+
+    /// True when a [`ScopeLookup`] has been attached via
+    /// [`Self::with_scope_lookup`]. Lets callers (e.g. `singularmem-retrieve`)
+    /// decide whether to supply their own lookup without exposing the field.
+    #[must_use]
+    pub const fn has_scope_lookup(&self) -> bool {
+        self.scope_lookup.is_some()
     }
 }
 
@@ -175,7 +208,32 @@ pub fn rrf_fuse(lexical: &[ItemId], semantic: &[ItemId], k: usize) -> Vec<(ItemI
 
 use crate::error::{Error, Result};
 use crate::result::SearchOptions;
-use crate::semantic_query::SemanticSearchOptions;
+use crate::semantic_query::{SemanticHit, SemanticSearchOptions};
+
+/// Drop semantic hits whose scope does not satisfy `filter`.
+///
+/// `USearch` cannot filter during the ANN walk, so this runs over the
+/// overfetched candidate list. With no filter, the hits pass through
+/// untouched. `(Some(_), None)` — a filter with no lookup attached — returns
+/// [`Error::ScopeLookupMissing`]: both current callers (`search_semantic_only`,
+/// `search_hybrid`) already check for and return this same error *before*
+/// calling this function, so this arm is redundant defense-in-depth rather
+/// than a reachable path today, but a future caller that skips that
+/// pre-check now gets an honest error instead of a panic.
+fn scope_filter_hits(
+    hits: Vec<SemanticHit>,
+    filter: Option<&ScopeFilter>,
+    lookup: Option<&dyn ScopeLookup>,
+) -> Result<Vec<SemanticHit>> {
+    match (filter, lookup) {
+        (None, _) => Ok(hits),
+        (Some(_), None) => Err(Error::ScopeLookupMissing),
+        (Some(f), Some(l)) => Ok(hits
+            .into_iter()
+            .filter(|h| f.matches(l.scope_of(h.id).as_deref()))
+            .collect()),
+    }
+}
 
 impl HybridSearcher<'_> {
     /// Run a search against whichever rankers this `HybridSearcher` holds.
@@ -186,17 +244,25 @@ impl HybridSearcher<'_> {
     ///
     /// # Errors
     ///
-    /// Returns whatever error the underlying ranker raises
+    /// Returns [`Error::ScopeLookupMissing`] if `opts.scope` is set, the
+    /// semantic ranker is in play, and no [`ScopeLookup`] was attached — the
+    /// alternative would be silently returning out-of-scope hits. Otherwise
+    /// returns whatever error the underlying ranker raises
     /// ([`Error::QueryParse`], [`Error::Tantivy`], [`Error::Embedding`],
     /// [`Error::Usearch`], etc.).
     pub fn search(&self, query: &str, opts: &HybridSearchOptions) -> Result<HybridSearchResults> {
         let start = std::time::Instant::now();
         let fetch_n = opts.limit.saturating_mul(opts.fetch_multiplier).max(1);
 
+        let lookup = self.scope_lookup;
         match (self.lexical, self.semantic) {
             (Some(lex), None) => Self::search_lexical_only(lex, query, opts, fetch_n, start),
-            (None, Some(sem)) => Self::search_semantic_only(sem, query, opts, fetch_n, start),
-            (Some(lex), Some(sem)) => Self::search_hybrid(lex, sem, query, opts, fetch_n, start),
+            (None, Some(sem)) => {
+                Self::search_semantic_only(sem, lookup, query, opts, fetch_n, start)
+            }
+            (Some(lex), Some(sem)) => {
+                Self::search_hybrid(lex, sem, lookup, query, opts, fetch_n, start)
+            }
             (None, None) => Err(Error::NoIndexes),
         }
     }
@@ -213,6 +279,7 @@ impl HybridSearcher<'_> {
             limit: opts.limit,
             offset: 0,
             include_snippets: opts.include_snippets,
+            scope: opts.scope.clone(),
         };
         let _ = fetch_n; // unused in lexical-only (we ask for `limit` directly)
         let res = lex.search(&parsed, lex_opts)?;
@@ -242,20 +309,30 @@ impl HybridSearcher<'_> {
 
     fn search_semantic_only(
         sem: &EmbedderIndex,
+        lookup: Option<&dyn ScopeLookup>,
         query: &str,
         opts: &HybridSearchOptions,
         fetch_n: usize,
         start: std::time::Instant,
     ) -> Result<HybridSearchResults> {
+        let scope = opts.scope.as_ref();
+        if scope.is_some() && lookup.is_none() {
+            return Err(Error::ScopeLookupMissing);
+        }
+        // Overfetch when filtering: the post-filter can drop most candidates.
         let sem_opts = SemanticSearchOptions {
-            limit: opts.limit,
+            limit: if scope.is_some() {
+                fetch_n.saturating_mul(2)
+            } else {
+                opts.limit
+            },
             min_score: 0.0,
         };
-        let _ = fetch_n; // unused in semantic-only
         let res = sem.semantic_search(query, &sem_opts)?;
         let semantic_hits = Some(res.total_indexed);
-        let hits: Vec<HybridHit> = res
-            .hits
+        let mut kept = scope_filter_hits(res.hits, scope, lookup)?;
+        kept.truncate(opts.limit);
+        let hits: Vec<HybridHit> = kept
             .into_iter()
             .enumerate()
             .map(|(rank0, h)| HybridHit {
@@ -280,11 +357,17 @@ impl HybridSearcher<'_> {
     fn search_hybrid(
         lex: &Index,
         sem: &EmbedderIndex,
+        lookup: Option<&dyn ScopeLookup>,
         query: &str,
         opts: &HybridSearchOptions,
         fetch_n: usize,
         start: std::time::Instant,
     ) -> Result<HybridSearchResults> {
+        let scope = opts.scope.as_ref();
+        if scope.is_some() && lookup.is_none() {
+            return Err(Error::ScopeLookupMissing);
+        }
+
         // Lexical sub-search: overfetch by fetch_multiplier; snippets only if
         // requested (we still need the lex `Hit`s for snippet provenance below).
         let parsed = crate::Query::parse(query)?;
@@ -292,22 +375,30 @@ impl HybridSearcher<'_> {
             limit: fetch_n,
             offset: 0,
             include_snippets: opts.include_snippets,
+            scope: opts.scope.clone(),
         };
         let lex_res = lex.search(&parsed, lex_opts)?;
         let lexical_hits = Some(lex_res.total_matched);
 
-        // Semantic sub-search: overfetch likewise.
+        // Semantic sub-search: overfetch likewise, doubly so when the
+        // post-filter is going to discard out-of-scope candidates.
         let sem_opts = SemanticSearchOptions {
-            limit: fetch_n,
+            limit: if scope.is_some() {
+                fetch_n.saturating_mul(2)
+            } else {
+                fetch_n
+            },
             min_score: 0.0,
         };
         let sem_res = sem.semantic_search(query, &sem_opts)?;
         let semantic_hits = Some(sem_res.total_indexed);
+        let mut sem_kept = scope_filter_hits(sem_res.hits, scope, lookup)?;
+        sem_kept.truncate(fetch_n);
 
         // Build ItemId-keyed lookups so we can re-attach ranks + snippets after
         // fusion.
         let lex_ids: Vec<ItemId> = lex_res.hits.iter().map(|h| h.id).collect();
-        let sem_ids: Vec<ItemId> = sem_res.hits.iter().map(|h| h.id).collect();
+        let sem_ids: Vec<ItemId> = sem_kept.iter().map(|h| h.id).collect();
         let lex_rank: HashMap<ItemId, usize> = lex_ids
             .iter()
             .enumerate()

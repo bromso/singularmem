@@ -6,10 +6,10 @@ or agent accumulates over time — conversations, files, decisions,
 embeddings, provenance — and bridges them to any LLM provider through
 a stable, vendor-neutral interface.
 
-> **Status:** v0.16.0, plus unreleased transcript ingestion (ships in
-> v0.17.0) — memory store, hybrid search (Tantivy + USearch), provider
-> adapters, MCP server, TypeScript SDK, and bulk transcript ingestion.
-> Constitution v0.2.0 ratified 2026-05-15.
+> **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0) and
+> scoping (v0.18.0) — memory store, hybrid search (Tantivy + USearch),
+> provider adapters, MCP server, TypeScript SDK, bulk transcript ingestion,
+> and hierarchical item scoping. Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 
@@ -40,6 +40,11 @@ singularmem ingest-dir .
 
 singularmem search "why did we pick tantivy"
 singularmem retrieve --adapter claude "release process"
+
+# Every item gets a default scope (claude-code/<project> or files/<dirname>);
+# use it to narrow a search or see what's in the store
+singularmem search --scope claude-code/singularmem "why tantivy"
+singularmem scope list
 ```
 
 Both bulk verbs are idempotent: re-running ingests nothing already present.

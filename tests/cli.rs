@@ -1600,3 +1600,217 @@ fn ingest_dir_missing_path_is_exit_2() {
         .code(2)
         .stderr(predicate::str::contains("path not found"));
 }
+
+/// Run `search --scope <scope> cargo --json` and return the `hits[].id`
+/// values from the JSON output.
+fn scoped_search_hit_ids(db_s: &str, scope: &str) -> Vec<String> {
+    let args = [
+        "--store", db_s, "search", "--scope", scope, "cargo", "--json",
+    ];
+    let out = singularmem()
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("\"id\""), "expected JSON hits: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+    parsed["hits"]
+        .as_array()
+        .expect("hits array")
+        .iter()
+        .map(|h| h["id"].as_str().expect("id string").to_string())
+        .collect()
+}
+
+#[test]
+fn bulk_verbs_apply_default_scopes_and_filters_work() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let tree = dir.path().join("myrepo");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("notes.md"), "cargo notes in a file").unwrap();
+
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-transcript",
+            fixture_transcripts().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1);
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-dir",
+            tree.to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("claude-code/other\t1\nclaude-code/proj\t3\nfiles/myrepo\t1\n");
+
+    singularmem()
+        .args([
+            "--store", db_s, "list", "--scope", "files", "--format", "ids",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::function(|s: &str| s.lines().count() == 1));
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "list",
+            "--scope",
+            "files",
+            "--scope-exact",
+            "--format",
+            "ids",
+        ])
+        .assert()
+        .success()
+        .stdout("");
+
+    let claude_code_ids = scoped_search_hit_ids(db_s, "claude-code");
+    assert!(!claude_code_ids.is_empty());
+
+    // Descendant-style filter (no --scope-exact) also finds the file hit.
+    let files_ids = scoped_search_hit_ids(db_s, "files");
+    assert!(!files_ids.is_empty());
+
+    // The two scoped searches must return disjoint sets of ids.
+    assert!(
+        claude_code_ids.iter().all(|id| !files_ids.contains(id)),
+        "expected disjoint ids: claude-code={claude_code_ids:?} files={files_ids:?}"
+    );
+
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "search",
+            "--scope",
+            "files",
+            "--scope-exact",
+            "cargo",
+        ])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn scope_flag_validation_and_move() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let id = String::from_utf8(
+        singularmem()
+            .args([
+                "--store",
+                db_s,
+                "ingest",
+                "--content",
+                "x",
+                "--scope",
+                "Team/One",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    singularmem()
+        .args(["--store", db_s, "get", &id, "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"scope\":\"team/one\""));
+    singularmem()
+        .args(["--store", db_s, "list", "--scope-exact"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--scope-exact requires --scope"));
+    singularmem()
+        .args(["--store", db_s, "list", "--scope", "a//b"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("scope"));
+
+    singularmem()
+        .args(["--store", db_s, "scope", "move", &id, "team/two"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("singularmem reindex"));
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("team/two\t1\n");
+    singularmem()
+        .args(["--store", db_s, "scope", "move", &id, "-"])
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn stale_tantivy_sidecar_exits_2_and_reindex_recovers() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args(["--store", db_s, "ingest", "--content", "zebra"])
+        .assert()
+        .success();
+    // Replace the sidecar with one built on the previous schema.
+    let sidecar = dir.path().join("store.db.tantivy");
+    std::fs::remove_dir_all(&sidecar).unwrap();
+    {
+        use tantivy::schema::{SchemaBuilder, FAST, INDEXED, STORED, STRING, TEXT};
+        let mut b = SchemaBuilder::new();
+        b.add_text_field("content", TEXT | STORED);
+        b.add_text_field("tags", STRING | STORED);
+        b.add_text_field("source", TEXT | STORED);
+        b.add_text_field("id", STRING | STORED);
+        b.add_date_field("created_at", INDEXED | STORED | FAST);
+        b.add_text_field("supersedes", STRING | STORED);
+        std::fs::create_dir_all(&sidecar).unwrap();
+        let mmap = tantivy::directory::MmapDirectory::open(&sidecar).unwrap();
+        tantivy::Index::open_or_create(mmap, b.build()).unwrap();
+    }
+    singularmem()
+        .args(["--store", db_s, "search", "zebra"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("singularmem reindex"));
+    singularmem()
+        .args(["--store", db_s, "reindex", "--quiet"])
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "search", "zebra"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("zebra"));
+}

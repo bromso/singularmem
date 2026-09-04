@@ -70,6 +70,7 @@ thiserror = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
+tantivy = { workspace = true }
 
 [[bin]]
 name = "singularmem"

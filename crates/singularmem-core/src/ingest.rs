@@ -5,7 +5,7 @@ use rusqlite::params;
 use ulid::Ulid;
 
 use crate::error::{Error, Result};
-use crate::item::{validate, Item, ItemId, NewItem};
+use crate::item::{validate, Item, ItemId, NewItem, Validated};
 use crate::store::Store;
 
 impl Store {
@@ -30,7 +30,10 @@ impl Store {
         self.assert_writable("ingest")?;
 
         // Validate up front (no SQL touched if invalid).
-        let normalised_tags = validate(&item)?;
+        let Validated {
+            tags: normalised_tags,
+            scope,
+        } = validate(&item)?;
 
         // Generate ID + timestamp using injected clock+rng.
         let now = self.clock.now();
@@ -67,7 +70,7 @@ impl Store {
             }
         }
 
-        insert_item_row(&tx, id, now, &item, &normalised_tags)?;
+        insert_item_row(&tx, id, now, &item, &normalised_tags, scope.as_deref())?;
 
         tx.commit().map_err(|e| Error::Sqlite {
             context: "committing ingest transaction",
@@ -84,6 +87,7 @@ impl Store {
             source: item.source,
             metadata: item.metadata,
             external_id: item.external_id,
+            scope,
         };
         self.fire_hook(&stored);
         Ok(stored)
@@ -106,9 +110,9 @@ impl Store {
 
         // Materialise + validate up front so we can fail before touching SQL.
         let items: Vec<NewItem> = items.into_iter().collect();
-        let mut normalised_tag_lists = Vec::with_capacity(items.len());
+        let mut validated = Vec::with_capacity(items.len());
         for item in &items {
-            normalised_tag_lists.push(validate(item)?);
+            validated.push(validate(item)?);
         }
 
         let now = self.clock.now();
@@ -120,7 +124,14 @@ impl Store {
 
         let mut out = Vec::with_capacity(items.len());
 
-        for (item, normalised_tags) in items.into_iter().zip(normalised_tag_lists) {
+        for (
+            item,
+            Validated {
+                tags: normalised_tags,
+                scope,
+            },
+        ) in items.into_iter().zip(validated)
+        {
             // Verify supersedes target inside the same tx (so concurrent ingests
             // can be referenced by later items in the batch).
             if let Some(target) = item.supersedes {
@@ -145,7 +156,7 @@ impl Store {
             // Generate a new ULID per item; all share the wall-clock instant
             // captured at the start of the batch but differ in random bytes.
             let id = mint_ulid(self, now)?;
-            insert_item_row(&tx, id, now, &item, &normalised_tags)?;
+            insert_item_row(&tx, id, now, &item, &normalised_tags, scope.as_deref())?;
 
             out.push(Item {
                 id,
@@ -156,6 +167,7 @@ impl Store {
                 source: item.source,
                 metadata: item.metadata,
                 external_id: item.external_id,
+                scope,
             });
         }
 
@@ -215,7 +227,10 @@ impl Store {
     pub fn ingest_replacing(&self, mut item: NewItem, replaces: ItemId) -> Result<Item> {
         self.assert_writable("ingest_replacing")?;
         item.supersedes = Some(replaces);
-        let normalised_tags = validate(&item)?;
+        let Validated {
+            tags: normalised_tags,
+            scope,
+        } = validate(&item)?;
         let now = self.clock.now();
         let id = mint_ulid(self, now)?;
 
@@ -238,7 +253,7 @@ impl Store {
             return Err(Error::SupersedesNotFound { id: replaces });
         }
 
-        insert_item_row(&tx, id, now, &item, &normalised_tags)?;
+        insert_item_row(&tx, id, now, &item, &normalised_tags, scope.as_deref())?;
 
         tx.commit().map_err(|e| Error::Sqlite {
             context: "committing ingest_replacing transaction",
@@ -255,9 +270,42 @@ impl Store {
             source: item.source,
             metadata: item.metadata,
             external_id: item.external_id,
+            scope,
         };
         self.fire_hook(&stored);
         Ok(stored)
+    }
+
+    /// Move an item to `scope` (or clear it with `None`) without creating a
+    /// revision. This is the store's second sanctioned in-place mutation
+    /// (`docs/formats/store-v3.md`). Index hooks are NOT notified: the Tantivy
+    /// document keeps its old scope until `singularmem reindex`, which the
+    /// CLI `scope move` verb documents.
+    ///
+    /// # Errors
+    /// `Error::ReadOnly`, `Error::Validation { field: "scope" }`,
+    /// `Error::NotFound`, `Error::Sqlite`.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn set_scope(&self, id: ItemId, scope: Option<&str>) -> Result<Item> {
+        self.assert_writable("set_scope")?;
+        let normalised = scope.map(crate::scope::validate).transpose()?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let changed = conn
+            .execute(
+                "UPDATE items SET scope = ?1 WHERE id = ?2",
+                params![normalised, id.to_string()],
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "updating scope",
+                source: e,
+            })?;
+        drop(conn);
+        if changed == 0 {
+            return Err(Error::NotFound { id });
+        }
+        self.get(id)
     }
 
     /// Run `on_ingest` + `commit` on the attached hook, warning on failure
@@ -284,6 +332,10 @@ impl Store {
 /// `ingest_many`, and `ingest_replacing`; behaviour (columns, error mapping)
 /// is identical across all three call sites.
 ///
+/// `scope` is the already-validated, normalised scope path (or `None`) —
+/// callers pass the value produced by [`crate::item::validate`], not
+/// `item.scope` directly.
+///
 /// # Errors
 /// `Error::Json` if metadata serialisation fails; `Error::ExternalIdConflict`
 /// if `item.external_id` collides with an existing row; `Error::Sqlite`
@@ -294,6 +346,7 @@ fn insert_item_row(
     now: Timestamp,
     item: &NewItem,
     tags: &[String],
+    scope: Option<&str>,
 ) -> Result<()> {
     let metadata_text = serde_json::to_string(&item.metadata).map_err(|e| Error::Json {
         context: "serialising item metadata",
@@ -301,8 +354,8 @@ fn insert_item_row(
     })?;
     let id_text = id.to_string();
     tx.execute(
-        "INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO items (id, content, created_at, supersedes, source, metadata, external_id, scope) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             id_text,
             item.content,
@@ -311,6 +364,7 @@ fn insert_item_row(
             item.source,
             metadata_text,
             item.external_id,
+            scope,
         ],
     )
     .map_err(|e| map_insert_err(e, item.external_id.as_deref(), "inserting item row"))?;

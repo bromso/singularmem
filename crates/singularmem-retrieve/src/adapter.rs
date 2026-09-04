@@ -119,6 +119,7 @@ mod tests {
             source: Some("claude-conversation:abc-123".to_string()),
             tags: vec!["fox".to_string(), "animals".to_string()],
             created_at: Timestamp::from_str("2026-05-12T14:30:00Z").unwrap(),
+            scope: None,
         }
     }
 

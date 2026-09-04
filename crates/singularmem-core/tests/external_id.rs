@@ -53,7 +53,7 @@ fn existing_external_ids_returns_only_present() {
     s.ingest(keyed("a", "x:1")).unwrap();
     s.ingest(keyed("b", "x:2")).unwrap();
     let got = s.existing_external_ids(&["x:1", "x:3", "x:2"]).unwrap();
-    let want: HashSet<String> = ["x:1", "x:2"].iter().map(|s| s.to_string()).collect();
+    let want: HashSet<String> = ["x:1", "x:2"].iter().map(|s| (*s).to_string()).collect();
     assert_eq!(got, want);
     assert!(s.existing_external_ids(&[]).unwrap().is_empty());
 }

@@ -53,6 +53,7 @@ mod tests {
             source: None,
             tags: vec![],
             created_at: Timestamp::from_str("2026-05-12T14:30:00Z").unwrap(),
+            scope: None,
         };
         let ctx = RetrievedContext {
             blocks: vec![block],

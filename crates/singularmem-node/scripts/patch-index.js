@@ -16,6 +16,8 @@
  * 5. Implements `Store.retrieve` which lifts `createdAt` on each block
  *    (flat shape — `b.createdAt`, not `b.item.createdAt`).
  * 6. Implements `Store.ingest` which lifts `createdAt` on the returned Item.
+ * 7. Forwards `Store.scopes` directly and implements `Store.setScope` which
+ *    lifts `createdAt` on the returned Item (same as `ingest`).
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -84,6 +86,14 @@ class Store {
 
   export() {
     return this._native.export()
+  }
+
+  scopes() {
+    return this._native.scopes()
+  }
+
+  setScope(id, scope) {
+    return this._native.setScope(id, scope).then(liftItem)
   }
 }
 

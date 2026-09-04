@@ -109,7 +109,7 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     );
 
-    // tools/list should return 4 tools (no memory_ingest).
+    // tools/list should return 5 tools (no memory_ingest).
     send(
         &mut stdin,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
@@ -118,13 +118,17 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        4,
-        "expected 4 tools in read-only mode, got: {tools:?}"
+        5,
+        "expected 5 tools in read-only mode, got: {tools:?}"
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
         !names.contains(&"memory_ingest"),
         "memory_ingest should be omitted: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_scopes"),
+        "memory_scopes should be listed in read-only mode: {names:?}"
     );
 
     // tools/call memory_ingest should be rejected.

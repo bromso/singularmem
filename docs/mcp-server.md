@@ -18,8 +18,9 @@ singularmem-mcp binary
       └── Tool handlers:
               ├── memory_retrieve (read; uses Retriever + adapter)
               ├── memory_get      (read; Store::get)
-              ├── memory_list     (read; Store::list / list_by_tags)
+              ├── memory_list     (read; Store::list_by_tags_scoped)
               ├── memory_revisions (read; Store::revision_history)
+              ├── memory_scopes   (read; Store::scopes)
               └── memory_ingest   (write; Store::ingest + auto-wired hooks)
 
         Retriever (singularmem-retrieve)
@@ -56,12 +57,18 @@ of the existing `singularmem` CLI). Three reasons:
 
 - **`memory_retrieve`** — semantic + lexical hybrid retrieval against
   the local store, returning adapter-formatted prompt-ready blocks.
+  Accepts an optional `scope` (+ `scope_exact`) argument to restrict
+  results to a scope subtree or an exact scope.
 - **`memory_get`** — fetch a single memory by ULID with full metadata.
 - **`memory_list`** — enumerate memories, optionally filtered by
-  tag (AND-semantics).
+  tag (AND-semantics) and/or `scope` (+ `scope_exact`).
 - **`memory_revisions`** — walk the supersedes chain newest-first.
+- **`memory_scopes`** — list every scope path in the store with its
+  item count, sorted by path. Use a returned path as the `scope`
+  argument of `memory_list` or `memory_retrieve`.
 - **`memory_ingest`** — add a new memory. Auto-wires Tantivy +
   USearch hooks so the new memory is immediately retrievable.
+  Accepts an optional `scope` argument (validated, lowercased).
   Disabled when the server is launched with `--read-only`.
 
 See `crates/singularmem-mcp/README.md` for the full input schemas

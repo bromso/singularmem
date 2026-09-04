@@ -81,6 +81,7 @@ fn search_respects_limit() {
         limit: 3,
         offset: 0,
         include_snippets: false,
+        scope: None,
     };
     let results = index.search(&query, opts).unwrap();
 

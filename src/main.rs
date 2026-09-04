@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use singularmem_core::{Error, ItemId, NewItem, Store, StoreOptions};
+use singularmem_core::{Error, ItemId, NewItem, ScopeFilter, Store, StoreOptions};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,6 +55,50 @@ enum Command {
     Retrieve(RetrieveArgs),
     /// \[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`.
     SemanticSearch(SemanticSearchArgs),
+    /// Inspect and change item scopes.
+    Scope(ScopeCommand),
+}
+
+/// Shared `--scope`/`--scope-exact` flags, flattened into `ListArgs`,
+/// `SearchArgs`, and `RetrieveArgs`.
+#[derive(Args, Debug, Clone)]
+struct ScopeArgs {
+    /// Restrict to this scope and its descendants (e.g. `claude-code/myproj`).
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
+    /// With --scope: match only that exact scope, not descendants.
+    #[arg(long)]
+    scope_exact: bool,
+}
+
+impl ScopeArgs {
+    fn to_filter(&self) -> Result<Option<ScopeFilter>, CliError> {
+        match (&self.scope, self.scope_exact) {
+            (None, true) => Err(CliError::Usage("--scope-exact requires --scope".into())),
+            (None, false) => Ok(None),
+            (Some(p), true) => Ok(Some(ScopeFilter::exact(p)?)),
+            (Some(p), false) => Ok(Some(ScopeFilter::descendants(p)?)),
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct ScopeCommand {
+    #[command(subcommand)]
+    action: ScopeAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum ScopeAction {
+    /// List every scope with its item count, sorted by path.
+    List,
+    /// Move one item to PATH (or clear its scope with `-`).
+    Move {
+        /// The item ID (26-char ULID, case-insensitive).
+        id: String,
+        /// Destination scope path, or `-` to clear it.
+        path: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -80,6 +124,9 @@ struct IngestArgs {
     /// Inline JSON object as the metadata payload.
     #[arg(long)]
     metadata: Option<String>,
+    /// Assign this scope path to the item (e.g. `team/backend`).
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
     /// Output format.
     #[arg(long, value_enum, default_value_t = IngestFormat::Id)]
     format: IngestFormat,
@@ -108,6 +155,9 @@ struct IngestTranscriptArgs {
     /// Suppress per-file progress lines.
     #[arg(long)]
     quiet: bool,
+    /// Override the default `claude-code/<project>` scope for every ingested item.
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -123,6 +173,9 @@ struct IngestDirArgs {
     /// Suppress per-file progress lines.
     #[arg(long)]
     quiet: bool,
+    /// Override the default `files/<dirname>` scope for every ingested item.
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -151,6 +204,8 @@ struct ListArgs {
     /// Cap the number of items returned.
     #[arg(long)]
     limit: Option<usize>,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -214,6 +269,8 @@ struct SearchArgs {
     /// Output format. (Legacy; `--json` and `--show-ranks` are preferred.)
     #[arg(long, value_enum, default_value_t = ListFormat::Table)]
     format: ListFormat,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 #[derive(Args, Debug)]
@@ -282,6 +339,8 @@ struct RetrieveArgs {
     /// Print "Retrieved N blocks in Xms" to stderr after the formatted output.
     #[arg(long)]
     show_elapsed: bool,
+    #[command(flatten)]
+    scope: ScopeArgs,
 }
 
 fn main() -> ExitCode {
@@ -307,7 +366,8 @@ fn main() -> ExitCode {
         Err(CliError::Search(
             e @ (singularmem_search::Error::NoIndexes
             | singularmem_search::Error::HybridMissingIndex { .. }
-            | singularmem_search::Error::IndexMissing { .. }),
+            | singularmem_search::Error::IndexMissing { .. }
+            | singularmem_search::Error::IndexSchemaMismatch { .. }),
         )) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
@@ -319,7 +379,8 @@ fn main() -> ExitCode {
                 singularmem_retrieve::Error::Search(
                     singularmem_search::Error::NoIndexes
                     | singularmem_search::Error::HybridMissingIndex { .. }
-                    | singularmem_search::Error::IndexMissing { .. },
+                    | singularmem_search::Error::IndexMissing { .. }
+                    | singularmem_search::Error::IndexSchemaMismatch { .. },
                 )
                 | singularmem_retrieve::Error::Core(singularmem_core::Error::NotFound { .. }) => 2,
                 _ => 1,
@@ -327,8 +388,8 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(code)
         }
-        Err(CliError::StoreReadOnly) => {
-            eprintln!("singularmem: store is opened read-only; bulk ingest requires write access");
+        Err(e @ CliError::StoreReadOnly) => {
+            eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
         Err(CliError::Ingest(singularmem_ingest::Error::NotFound { ref path })) => {
@@ -363,7 +424,7 @@ enum CliError {
     Retrieve(#[from] singularmem_retrieve::Error),
     #[error("{0}")]
     Ingest(#[from] singularmem_ingest::Error),
-    #[error("store is opened read-only; bulk ingest requires write access")]
+    #[error("store is opened read-only; this command requires write access")]
     StoreReadOnly,
     #[error("{failed} item(s) failed during bulk ingest; see warnings above")]
     IngestPartial { failed: usize },
@@ -379,7 +440,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
     if cli.read_only
         && matches!(
             cli.command,
-            Command::IngestTranscript(_) | Command::IngestDir(_)
+            Command::IngestTranscript(_)
+                | Command::IngestDir(_)
+                | Command::Scope(ScopeCommand {
+                    action: ScopeAction::Move { .. }
+                })
         )
     {
         return Err(CliError::StoreReadOnly);
@@ -473,10 +538,11 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::List(args) => cmd_list(store, &args),
         Command::Revisions(args) => cmd_revisions(store, &args),
         Command::Export => cmd_export(store),
-        Command::Search(args) => cmd_search(store_path, &args),
+        Command::Search(args) => cmd_search(store, store_path, &args),
         Command::Reindex(args) => cmd_reindex(store, store_path, &args),
         Command::Retrieve(args) => cmd_retrieve(store, store_path, &args),
-        Command::SemanticSearch(args) => cmd_semantic_search(store_path, &args),
+        Command::SemanticSearch(args) => cmd_semantic_search(store, store_path, &args),
+        Command::Scope(cmd) => cmd_scope(store, &cmd),
     }
 }
 
@@ -607,6 +673,7 @@ fn cmd_ingest(store: &Store, args: IngestArgs) -> Result<(), CliError> {
     let mut item = NewItem::text(content);
     item.tags = args.tags;
     item.source = args.source;
+    item.scope = args.scope;
     if let Some(s) = args.supersedes {
         item.supersedes = Some(s.parse::<ItemId>()?);
     }
@@ -628,6 +695,14 @@ fn cmd_ingest(store: &Store, args: IngestArgs) -> Result<(), CliError> {
 
 fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(), CliError> {
     use singularmem_ingest::{discover_transcripts, Report};
+
+    // Validate --scope up front so a typo is a usage error before any
+    // parsing or filesystem work happens.
+    let scope_override = args
+        .scope
+        .as_deref()
+        .map(singularmem_core::scope::validate)
+        .transpose()?;
 
     let roots: Vec<PathBuf> = if args.paths.is_empty() {
         vec![dirs::home_dir()
@@ -662,6 +737,7 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
         &files,
         args,
         project.as_deref(),
+        scope_override.as_deref(),
         &mut total,
         &mut failed_files,
     );
@@ -684,6 +760,7 @@ fn ingest_each_transcript(
     files: &[PathBuf],
     args: &IngestTranscriptArgs,
     project: Option<&Path>,
+    scope_override: Option<&str>,
     total: &mut singularmem_ingest::Report,
     failed_files: &mut usize,
 ) -> Result<(), CliError> {
@@ -700,6 +777,7 @@ fn ingest_each_transcript(
         };
         src.include_sidechains = args.include_sidechains;
         src.project_filter = project.map(Path::to_path_buf);
+        src.scope_override = scope_override.map(ToString::to_string);
         let r = ingest_source(store, &src, args.dry_run)?;
         if !args.quiet {
             eprintln!(
@@ -717,8 +795,17 @@ fn ingest_each_transcript(
 fn cmd_ingest_dir(store: &Store, args: &IngestDirArgs) -> Result<(), CliError> {
     use singularmem_ingest::{ingest_source, DirectoryWalker};
 
+    // Validate --scope up front so a typo is a usage error before any
+    // filesystem walking happens.
+    let scope_override = args
+        .scope
+        .as_deref()
+        .map(singularmem_core::scope::validate)
+        .transpose()?;
+
     let mut src = DirectoryWalker::new(&args.path)?;
     src.max_file_bytes = args.max_file_bytes;
+    src.scope_override = scope_override;
     let r = ingest_source(store, &src, args.dry_run)?;
     if !args.quiet {
         eprintln!(
@@ -765,12 +852,9 @@ fn cmd_get(store: &Store, args: &GetArgs) -> Result<(), CliError> {
 
 fn cmd_list(store: &Store, args: &ListArgs) -> Result<(), CliError> {
     let tag_refs: Vec<&str> = args.tags.iter().map(String::as_str).collect();
+    let filter = args.scope.to_filter()?;
     let iter: Box<dyn Iterator<Item = singularmem_core::Result<singularmem_core::Item>>> =
-        if tag_refs.is_empty() {
-            Box::new(store.list()?)
-        } else {
-            Box::new(store.list_by_tags(&tag_refs)?)
-        };
+        Box::new(store.list_by_tags_scoped(&tag_refs, filter.as_ref())?);
 
     let iter: Box<dyn Iterator<Item = singularmem_core::Result<singularmem_core::Item>>> =
         if let Some(limit) = args.limit {
@@ -832,9 +916,33 @@ fn cmd_export(store: &Store) -> Result<(), CliError> {
     Ok(())
 }
 
-fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
+fn cmd_scope(store: &Store, cmd: &ScopeCommand) -> Result<(), CliError> {
+    let mut out = io::stdout().lock();
+    match &cmd.action {
+        ScopeAction::List => {
+            for (path, count) in store.scopes()? {
+                writeln!(out, "{path}\t{count}")?;
+            }
+        }
+        ScopeAction::Move { id, path } => {
+            let id = id.parse::<ItemId>()?;
+            let scope = if path == "-" {
+                None
+            } else {
+                Some(path.as_str())
+            };
+            let item = store.set_scope(id, scope)?;
+            writeln!(out, "{}", item.id)?;
+            eprintln!("note: search indexes keep the previous scope until `singularmem reindex`");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_search(store: &Store, store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
+    let filter = args.scope.to_filter()?;
     let resolved = resolve_search_mode(store_path, args.mode)?;
     let ResolvedSearchMode {
         mode: resolved_mode,
@@ -848,6 +956,7 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
         fetch_multiplier: args.fetch_multiplier,
         rrf_k: args.rrf_k,
         include_snippets: !args.no_snippets,
+        scope: filter.clone(),
     };
 
     // Open whichever indexes the resolved mode requires.
@@ -874,6 +983,11 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
         (Some(l), None) => HybridSearcher::lexical_only(l),
         (None, Some(s)) => HybridSearcher::semantic_only(s),
         (None, None) => unreachable!("pre-flight guarantees at least one index"),
+    };
+    let searcher = if filter.is_some() && sem_opt.is_some() {
+        searcher.with_scope_lookup(store)
+    } else {
+        searcher
     };
     let results = searcher.search(&query_str, &opts)?;
 
@@ -944,6 +1058,8 @@ fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result
             ))
         })?;
 
+    let filter = args.scope.to_filter()?;
+
     // Mode resolution + sidecar probing — same helper cmd_search uses.
     let ResolvedSearchMode {
         mode: resolved_mode,
@@ -960,11 +1076,13 @@ fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result
         fetch_multiplier: args.fetch_multiplier,
         rrf_k: args.rrf_k,
         include_snippets: false, // we use full content, not snippets
+        scope: filter.clone(),
     };
     let opts = RetrieveOptions {
         max_blocks: args.limit,
         min_score: args.min_score,
         search: search_opts,
+        scope: filter,
     };
 
     // Open whichever indexes the resolved mode requires.
@@ -1016,7 +1134,11 @@ fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result
     Ok(())
 }
 
-fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(), CliError> {
+fn cmd_semantic_search(
+    store: &Store,
+    store_path: &Path,
+    args: &SemanticSearchArgs,
+) -> Result<(), CliError> {
     use std::sync::OnceLock;
     static DEPRECATION_NOTICE: OnceLock<()> = OnceLock::new();
     DEPRECATION_NOTICE.get_or_init(|| {
@@ -1035,16 +1157,40 @@ fn cmd_semantic_search(store_path: &Path, args: &SemanticSearchArgs) -> Result<(
         show_ranks: false,
         json: matches!(args.format, ListFormat::Jsonl),
         format: args.format,
+        scope: ScopeArgs {
+            scope: None,
+            scope_exact: false,
+        },
     };
-    cmd_search(store_path, &forwarded)
+    cmd_search(store, store_path, &forwarded)
+}
+
+/// Open the Tantivy sidecar at `index_path` for reindexing, recreating it
+/// from scratch when it was built with an older schema.
+fn open_or_rebuild_index(index_path: &Path) -> Result<singularmem_search::Index, CliError> {
+    use singularmem_search::Index;
+
+    match Index::open(index_path) {
+        Ok(index) => Ok(index),
+        Err(singularmem_search::Error::IndexSchemaMismatch { .. }) => {
+            // Destructive action: always announce it, even with --quiet.
+            eprintln!("rebuilding Tantivy sidecar with the current schema");
+            std::fs::remove_dir_all(index_path).map_err(|e| {
+                CliError::IndexOpen(format!(
+                    "removing stale sidecar {}: {e}",
+                    index_path.display()
+                ))
+            })?;
+            Index::open(index_path).map_err(|e| CliError::IndexOpen(e.to_string()))
+        }
+        Err(e) => Err(CliError::IndexOpen(e.to_string())),
+    }
 }
 
 fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {
-    use singularmem_search::Index;
-
     // Phase 1: Tantivy lexical reindex (always).
     let index_path = derive_index_path(store_path);
-    let index = Index::open(&index_path).map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    let index = open_or_rebuild_index(&index_path)?;
     let progress = |n: u64| {
         if !args.quiet {
             tracing::info!("reindex (tantivy): {n} items processed");
