@@ -2426,3 +2426,211 @@ fn hooks_install_status_uninstall_round_trip() {
         "never overwrites invalid JSON"
     );
 }
+
+#[test]
+fn hook_exits_zero_when_store_cannot_be_opened() {
+    let dir = TempDir::new().unwrap();
+    // A directory, not a valid SQLite file: `Store::open_with_options` fails
+    // to open it no matter which command tries to use it.
+    let bad = dir.path().join("not-a-store");
+    std::fs::create_dir_all(&bad).unwrap();
+    let bad_s = bad.to_str().unwrap();
+
+    singularmem()
+        .args(["--store", bad_s, "hook", "claude-code", "stop"])
+        .write_stdin(r#"{"transcript_path":"/does/not/matter.jsonl"}"#)
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains(bad_s));
+
+    let out = singularmem()
+        .args(["--store", bad_s, "hook", "claude-code", "session-start"])
+        .write_stdin(r#"{"cwd":"/x/proj"}"#)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn hook_codex_stop_without_session_id_ingests_nothing() {
+    let dir = TempDir::new().unwrap();
+    let codex_root = dir.path().join("codex_root");
+    std::fs::create_dir_all(&codex_root).unwrap();
+    let rollout = fixture_codex().join("2026/09/01/rollout-2026-09-01T10-00-00-sess1.jsonl");
+    std::fs::copy(
+        &rollout,
+        codex_root.join("rollout-2026-09-01T10-00-00-sess1.jsonl"),
+    )
+    .unwrap();
+
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CODEX_ROOT", codex_root.to_str().unwrap())
+        .args(["--store", db_s, "hook", "codex", "stop"])
+        .write_stdin(r#"{"cwd":"/x"}"#)
+        .assert()
+        .success();
+
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn hook_cursor_stop_without_conversation_or_cwd_ingests_nothing() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/proj"),
+            composers: vec![(
+                "c1",
+                "A",
+                1_700_000_000_000,
+                vec![FixtureBubble {
+                    id: "b1",
+                    kind: 1,
+                    text: "one",
+                }],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .env("SINGULARMEM_CURSOR_DIR", user.to_str().unwrap())
+        .args(["--store", db_s, "hook", "cursor", "stop"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    singularmem()
+        .args(["--store", db_s, "list", "--format", "ids"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn hooks_status_reports_invalid_for_unparsable_config() {
+    let home = TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(&settings, "{ not json").unwrap();
+    let h = home.path().to_str().unwrap();
+
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "status", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tinvalid"))
+        .stderr(predicate::str::contains("settings.json"));
+}
+
+#[test]
+fn hooks_uninstall_does_not_rewrite_foreign_only_config() {
+    let home = TempDir::new().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    // 4-space indentation — different from `write_config`'s 2-space output,
+    // so a spurious rewrite would be detectable even if the content were
+    // otherwise unchanged.
+    let original = "{\n    \"permissions\": {\n        \"allow\": [\n            \"Bash(ls)\"\n        ]\n    }\n}\n";
+    std::fs::write(&settings, original).unwrap();
+    let h = home.path().to_str().unwrap();
+
+    singularmem()
+        .env("HOME", h)
+        .args(["hooks", "uninstall", "claude-code"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(settings.to_str().unwrap()));
+
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        original,
+        "foreign-only config left byte-identical"
+    );
+}
+
+#[test]
+fn hooks_status_project_flag_reads_project_config() {
+    let project = TempDir::new().unwrap();
+    let project_dir = project.path().to_str().unwrap();
+    let settings = project.path().join(".claude/settings.json");
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "status", "claude-code", "--project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tabsent"))
+        .stdout(predicate::str::contains(settings.to_str().unwrap()));
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "install", "claude-code", "--project"])
+        .assert()
+        .success();
+
+    singularmem()
+        .current_dir(project_dir)
+        .args(["hooks", "status", "claude-code", "--project"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code\tinstalled"));
+}
+
+#[test]
+fn store_env_var_is_honoured_and_flag_wins() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a.db");
+    let b = dir.path().join("b.db");
+
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["ingest", "--content", "via env"])
+        .assert()
+        .success();
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("via env"));
+
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args([
+            "--store",
+            b.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "via flag",
+        ])
+        .assert()
+        .success();
+    singularmem()
+        .env("SINGULARMEM_STORE", a.to_str().unwrap())
+        .args(["--store", b.to_str().unwrap(), "list", "--format", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("via flag"))
+        .stdout(predicate::str::contains("via env").not());
+}

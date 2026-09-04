@@ -23,6 +23,7 @@ singularmem hooks install cursor        # ~/.cursor/hooks.json
 
 singularmem hooks status                # one line per editor
 singularmem hooks status claude-code    # just that editor
+singularmem hooks status --project      # reads ./.claude/settings.json etc.
 
 singularmem hooks uninstall claude-code
 ```
@@ -30,6 +31,7 @@ singularmem hooks uninstall claude-code
 - `--project` writes to (or reads from) `./.claude/settings.json` etc.
   in the current directory instead of the user's home directory —
   useful for a repo-local hook that shouldn't apply to every project.
+  `install`, `uninstall`, and `status` all support it.
 - `--print` (install only) prints the merged config to stdout instead
   of writing it — useful for reviewing the diff before committing to
   it, or for wiring the config through some other mechanism entirely.
@@ -38,13 +40,20 @@ singularmem hooks uninstall claude-code
   by parsing the command string — see `singularmem-hooks`' `config`
   module), leaving every other hook and setting in the file untouched.
   Re-running it after a binary move updates the recorded path.
+- Uninstall only rewrites the file when it actually finds one of our
+  hook entries to remove; a config with no Singularmem entries (or no
+  file at all) is left byte-for-byte untouched.
 - `hooks status` never opens the store; it only reads the editor's
-  config file. It reports, per editor: whether installed, the config
-  path, and whether the binary path recorded there still exists on
-  disk (`bin ok` / `bin missing`).
+  config file. It reports, per editor: whether installed (`installed`,
+  `absent`, or `invalid` — see below), the config path, and whether
+  the binary path recorded there still exists on disk (`bin ok` /
+  `bin missing`).
 - A config file that exists but is not valid JSON is never
   overwritten — `install`/`uninstall` fail loudly (exit 1) rather than
-  risk destroying whatever the file was supposed to contain.
+  risk destroying whatever the file was supposed to contain. `status`
+  instead reports `invalid` for that editor (still exit 0) and prints
+  a warning naming the file to stderr, since `status` never writes
+  anything and has no destructive action to refuse.
 
 ## Per-editor event table
 
@@ -60,6 +69,15 @@ session-start envelope on stdout (the shape each editor expects for
 "additional context"); the other three ingest the session's transcript
 and print nothing. **A hook always exits 0** — see
 [Error handling](#error-handling).
+
+`(async)` on Claude Code's and Codex's `Stop` hook means the editor
+fires it and moves on without waiting for it to finish — it never adds
+latency to the turn, but it also means the editor's own UI may not
+surface anything the hook writes to stderr. If ingest doesn't seem to
+be happening, run the same command by hand (or via a small wrapper
+that captures stderr) with `RUST_LOG=info`, as described in
+[Error handling](#error-handling), rather than looking for the warning
+in the editor itself.
 
 ## Wiring, in your own words
 
@@ -89,12 +107,14 @@ for that event) and either:
   - **Claude Code** ingests `transcript_path` from the payload.
     Missing it is a warning (nothing to ingest).
   - **Codex** ingests `transcript_path` when the payload has one;
-    otherwise it scans the default Codex root
-    (`~/.codex/sessions`) for rollout files whose filename contains
-    the payload's `session_id`. Zero matches is a warning, not a
-    failure.
+    otherwise it scans the Codex root (`~/.codex/sessions`, or
+    `SINGULARMEM_CODEX_ROOT` below) for rollout files whose filename
+    contains the payload's `session_id`. A payload with neither
+    `transcript_path` nor a non-empty `session_id` is a warning and
+    ingests nothing — it never scans the whole root unfiltered.
   - **Cursor** filters by `conversation_id` when the payload has one;
-    otherwise it filters by `cwd` as the project. See
+    otherwise it filters by `cwd` as the project. A payload with
+    neither is a warning and ingests nothing, for the same reason. See
     `SINGULARMEM_CURSOR_DIR` below for where it looks.
 
 ## Environment variables
@@ -108,9 +128,15 @@ for that event) and either:
 - **`SINGULARMEM_CURSOR_DIR`** — overrides Cursor's per-user directory
   (which normally defaults per OS: `~/Library/Application
   Support/Cursor/User` on macOS, `%APPDATA%\Cursor\User` on Windows,
-  `~/.config/Cursor/User` on Linux). Also accepted by `ingest-cursor
-  --cursor-dir`; primarily useful for pointing at a non-standard
-  install or a test fixture.
+  `~/.config/Cursor/User` on Linux). This applies to the `hook` command
+  only. `ingest-cursor` has no environment-variable equivalent; pass
+  `--cursor-dir` instead to point it at a non-standard install or a
+  test fixture.
+- **`SINGULARMEM_CODEX_ROOT`** — overrides the default Codex sessions
+  root (`~/.codex/sessions`). Read by the `hook` command's fallback
+  scan (used when the payload has no `transcript_path`) and by
+  `ingest-codex`'s default root when no paths are given on the command
+  line; `ingest-codex` run with an explicit path argument ignores it.
 
 ## Error handling
 
@@ -118,7 +144,10 @@ Hooks must never block the editor they're wired into, so `singularmem
 hook` always exits 0 regardless of what happens inside it — parse
 failures, missing files, a store that can't be opened, an ingest that
 partially fails. Every failure is logged as a `tracing::warn!` to
-stderr instead. To see them:
+stderr instead. `session-start` goes one step further: even when the
+store can't be opened at all, it still prints a valid session-start
+envelope with an empty context string, so the editor never sees a
+malformed (or missing) hook response. To see the warnings:
 
 ```bash
 RUST_LOG=info singularmem hook claude-code stop < payload.json

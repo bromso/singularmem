@@ -15,9 +15,9 @@ use singularmem_core::{Error, ItemId, NewItem, ScopeFilter, Store, StoreOptions}
 )]
 struct Cli {
     /// Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
-    /// Also settable via the `SINGULARMEM_STORE` environment variable (see
-    /// `run`) — the only way to point a hook (which runs with a fixed,
-    /// flag-less command line) at a non-default store.
+    /// Also settable via the `SINGULARMEM_STORE` environment variable —
+    /// the only way to point a hook (which runs with a fixed, flag-less
+    /// command line) at a non-default store.
     #[arg(long, global = true, value_name = "PATH")]
     store: Option<PathBuf>,
 
@@ -112,6 +112,9 @@ enum HooksAction {
     Status {
         /// The editor to check; every editor when omitted.
         editor: Option<String>,
+        /// Read the project-local config instead of the user's home directory.
+        #[arg(long)]
+        project: bool,
     },
 }
 
@@ -586,14 +589,16 @@ fn run(cli: Cli) -> Result<(), CliError> {
         return cmd_hooks(cmd);
     }
 
-    // `--store` wins; then `SINGULARMEM_STORE` (the only way to point a
-    // hook — a fixed, flag-less command line — at a non-default store);
-    // then the per-user XDG default.
-    let store_path = cli
-        .store
-        .clone()
-        .or_else(|| std::env::var_os("SINGULARMEM_STORE").map(PathBuf::from))
-        .unwrap_or_else(default_store_path);
+    // `hook <editor> <event>` must never fail the calling editor — including
+    // when the store itself cannot be opened (bad `--store` path, an
+    // unsupported on-disk format version, …). Dispatch it before opening the
+    // store so `cmd_hook_entry` can open (and gracefully fail to open) the
+    // store on its own terms.
+    if let Command::Hook(args) = &cli.command {
+        return cmd_hook_entry(&cli, args);
+    }
+
+    let store_path = resolve_store_path(&cli);
     let opts = StoreOptions {
         read_only: cli.read_only,
     };
@@ -625,45 +630,68 @@ fn run(cli: Cli) -> Result<(), CliError> {
             | Command::IngestCodex(_)
             | Command::IngestCursor(_)
             | Command::IngestDir(_)
-            | Command::Hook(_)
     );
-    if needs_hook && !cli.no_index {
-        let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
+    if needs_hook {
+        wire_index_hooks(&mut store, &store_path, cli.no_index);
+    }
 
-        // Tantivy lexical-search hook (sub-project 2a behaviour — always attempt).
-        let index_path = derive_index_path(&store_path);
-        match singularmem_search::Index::open(&index_path) {
-            Ok(idx) => hooks.push(Box::new(idx)),
-            Err(e) => tracing::warn!(
-                error = %e,
-                path = %index_path.display(),
-                "could not open Tantivy index; lexical search will not work until reindex"
-            ),
-        }
+    run_command(cli.command, &store, &store_path)
+}
 
-        // Embedder / vector hook — opt-in: only when .vectors/ already exists.
-        let vectors_path = derive_vectors_path(&store_path);
-        if vectors_path.exists() {
-            let embedder: Box<dyn singularmem_search::Embedder> =
-                match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
-                    Some("mock") => Box::new(singularmem_search::testing::MockEmbedder::default()),
-                    _ => match singularmem_search::FastembedEmbedder::new() {
-                        Ok(e) => Box::new(e),
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "embedder construction failed; semantic search will not work"
-                            );
-                            // Skip embedder hook; proceed with whatever hooks were assembled.
-                            if !hooks.is_empty() {
-                                store.set_hook(Some(Box::new(
-                                    singularmem_core::hook::MultiHook::new(hooks),
-                                )));
-                            }
-                            return run_command(cli.command, &store, &store_path);
-                        }
-                    },
-                };
+/// Resolve the store path from (in order of precedence) `--store`, the
+/// `SINGULARMEM_STORE` environment variable (the only way to point a hook —
+/// a fixed, flag-less command line — at a non-default store), and the
+/// per-user XDG default.
+fn resolve_store_path(cli: &Cli) -> PathBuf {
+    cli.store
+        .clone()
+        .or_else(|| std::env::var_os("SINGULARMEM_STORE").map(PathBuf::from))
+        .unwrap_or_else(default_store_path)
+}
+
+/// Wire up the Tantivy (and, opt-in, vector) `IndexHook`s on `store` so live
+/// writes populate the search sidecars. A no-op when `no_index` is set.
+///
+/// Shared by the ingest verbs (`run`) and `cmd_hook_entry`'s save-event path
+/// — `session-start` is read-only and never needs this.
+fn wire_index_hooks(store: &mut Store, store_path: &Path, no_index: bool) {
+    if no_index {
+        return;
+    }
+
+    let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
+
+    // Tantivy lexical-search hook (sub-project 2a behaviour — always attempt).
+    let index_path = derive_index_path(store_path);
+    match singularmem_search::Index::open(&index_path) {
+        Ok(idx) => hooks.push(Box::new(idx)),
+        Err(e) => tracing::warn!(
+            error = %e,
+            path = %index_path.display(),
+            "could not open Tantivy index; lexical search will not work until reindex"
+        ),
+    }
+
+    // Embedder / vector hook — opt-in: only when .vectors/ already exists.
+    let vectors_path = derive_vectors_path(store_path);
+    if vectors_path.exists() {
+        let embedder: Option<Box<dyn singularmem_search::Embedder>> =
+            match std::env::var("SINGULARMEM_TEST_EMBEDDER").ok().as_deref() {
+                Some("mock") => Some(Box::new(
+                    singularmem_search::testing::MockEmbedder::default(),
+                )),
+                _ => match singularmem_search::FastembedEmbedder::new() {
+                    Ok(e) => Some(Box::new(e)),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "embedder construction failed; semantic search will not work"
+                        );
+                        None
+                    }
+                },
+            };
+        if let Some(embedder) = embedder {
             match singularmem_search::EmbedderIndex::open(&vectors_path, embedder) {
                 Ok(idx) => hooks.push(Box::new(idx)),
                 Err(e) => tracing::warn!(
@@ -672,15 +700,13 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 ),
             }
         }
-
-        if !hooks.is_empty() {
-            store.set_hook(Some(Box::new(singularmem_core::hook::MultiHook::new(
-                hooks,
-            ))));
-        }
     }
 
-    run_command(cli.command, &store, &store_path)
+    if !hooks.is_empty() {
+        store.set_hook(Some(Box::new(singularmem_core::hook::MultiHook::new(
+            hooks,
+        ))));
+    }
 }
 
 /// Registry of available adapters. Sub-projects 3b/3c/3d each add one line
@@ -734,7 +760,7 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::SemanticSearch(args) => cmd_semantic_search(store, store_path, &args),
         Command::Scope(cmd) => cmd_scope(store, &cmd),
         Command::WakeUp(args) => cmd_wake_up(store, &args),
-        Command::Hook(args) => cmd_hook(store, &args),
+        Command::Hook(_) => unreachable!("Command::Hook is dispatched before the store opens"),
         Command::Hooks(_) => unreachable!("Command::Hooks is dispatched before the store opens"),
     }
 }
@@ -1017,7 +1043,7 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
 }
 
 fn cmd_ingest_codex(store: &Store, args: &IngestCodexArgs) -> Result<(), CliError> {
-    use singularmem_ingest::{default_codex_root, discover_codex_sessions, CodexRollout, Report};
+    use singularmem_ingest::{discover_codex_sessions, CodexRollout, Report};
 
     // Validate --scope up front so a typo is a usage error before any
     // parsing or filesystem work happens.
@@ -1029,10 +1055,7 @@ fn cmd_ingest_codex(store: &Store, args: &IngestCodexArgs) -> Result<(), CliErro
 
     let files = resolve_ingest_files(
         &args.paths,
-        || {
-            default_codex_root()
-                .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))
-        },
+        || codex_root().ok_or_else(|| CliError::Usage("cannot determine home directory".into())),
         |p| discover_codex_sessions(p),
     )?;
 
@@ -1328,46 +1351,91 @@ fn write_hook_envelope(
     Ok(())
 }
 
-/// Run one editor hook event on stdin. Never propagates an error to the
-/// caller — a hook must never fail the editor invoking it — so any failure
-/// from [`run_hook`] is logged as a warning and swallowed.
+/// Entry point for `hook <editor> <event>`, dispatched from [`run`] *before*
+/// the store is opened. A hook must never fail the editor invoking it, so
+/// this never returns an error: every failure — an unknown editor/event, a
+/// store that cannot be opened, an ingest failure — is logged as a warning
+/// on stderr and swallowed.
+///
+/// `session-start` still needs a valid envelope on stdout even when the
+/// store cannot be opened, so it is special-cased to always print one (with
+/// an empty context string on failure) rather than simply warning and doing
+/// nothing.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "signature matches every other cmd_* dispatched from run_command"
 )]
-fn cmd_hook(store: &Store, args: &HookArgs) -> Result<(), CliError> {
-    if let Err(e) = run_hook(store, args) {
-        tracing::warn!(error = %e, editor = %args.editor, event = %args.event, "hook failed; editor continues");
-    }
-    Ok(())
-}
-
-fn run_hook(store: &Store, args: &HookArgs) -> Result<(), CliError> {
+fn cmd_hook_entry(cli: &Cli, args: &HookArgs) -> Result<(), CliError> {
     use singularmem_hooks::{parse_input, Editor, Event};
 
-    let editor: Editor = args
-        .editor
-        .parse()
-        .map_err(|_| CliError::Usage(format!("unknown editor '{}'", args.editor)))?;
-    let event: Event = args
-        .event
-        .parse()
-        .map_err(|_| CliError::Usage(format!("unknown event '{}'", args.event)))?;
+    let Ok(editor) = args.editor.parse::<Editor>() else {
+        tracing::warn!(editor = %args.editor, "unknown editor; hook does nothing");
+        return Ok(());
+    };
+    let Ok(event) = args.event.parse::<Event>() else {
+        tracing::warn!(event = %args.event, "unknown event; hook does nothing");
+        return Ok(());
+    };
 
     let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
+    if let Err(e) = io::stdin().read_to_string(&mut raw) {
+        tracing::warn!(error = %e, "could not read hook input from stdin");
+        raw.clear();
+    }
     let json: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "could not parse hook input JSON; proceeding with empty input");
         serde_json::Value::Null
     });
     let input = parse_input(editor, &json);
 
+    let store_path = resolve_store_path(cli);
+    let store_result = Store::open_with_options(
+        &store_path,
+        StoreOptions {
+            read_only: cli.read_only,
+        },
+    );
+
     match event {
-        Event::SessionStart => hook_session_start(store, editor, &input),
-        Event::Stop | Event::PreCompact | Event::SessionEnd => {
-            hook_save_event(store, editor, &input)
-        }
+        Event::SessionStart => match store_result {
+            Ok(store) => {
+                if let Err(e) = hook_session_start(&store, editor, &input) {
+                    tracing::warn!(error = %e, editor = %args.editor, event = %args.event, "hook failed; editor continues");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %store_path.display(),
+                    "could not open store; emitting empty session-start context"
+                );
+                let mut out = io::stdout().lock();
+                if let Err(e2) = write_hook_envelope(&mut out, editor, "") {
+                    tracing::warn!(error = %e2, "failed to emit session-start envelope");
+                }
+            }
+        },
+        Event::Stop | Event::PreCompact | Event::SessionEnd => match store_result {
+            Ok(mut store) => {
+                // session-start is read-only; save events are the only ones
+                // that write, so only they need the index hooks wired up.
+                wire_index_hooks(&mut store, &store_path, cli.no_index);
+                if let Err(e) = hook_save_event(&store, editor, &input) {
+                    tracing::warn!(error = %e, editor = %args.editor, event = %args.event, "hook failed; editor continues");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %store_path.display(),
+                    editor = %args.editor,
+                    event = %args.event,
+                    "could not open store; nothing ingested"
+                );
+            }
+        },
     }
+    Ok(())
 }
 
 /// The `SessionStart` hook: build the project's wake-up context (scoped to
@@ -1438,23 +1506,41 @@ fn hook_ingest_claude(
     Ok(ingest_source(store, &src, false)?)
 }
 
-/// Codex sends `transcript_path` when it has one; otherwise scan the default
-/// Codex root for rollout files whose filename contains `session_id`. Zero
-/// matches ingests nothing (the caller logs the resulting zero counts).
+/// Resolve the Codex sessions root: the `SINGULARMEM_CODEX_ROOT` environment
+/// variable when set, otherwise `default_codex_root()` (`~/.codex/sessions`).
+/// Read by both the `hook`'s Codex fallback scan and `ingest-codex`'s
+/// default root, mirroring how `SINGULARMEM_CURSOR_DIR` overrides Cursor's
+/// per-user directory for the hook.
+fn codex_root() -> Option<PathBuf> {
+    std::env::var_os("SINGULARMEM_CODEX_ROOT")
+        .map(PathBuf::from)
+        .or_else(singularmem_ingest::default_codex_root)
+}
+
+/// Codex sends `transcript_path` when it has one; otherwise scan the Codex
+/// root (see [`codex_root`]) for rollout files whose filename contains
+/// `session_id`. Without a `transcript_path` *or* a non-empty `session_id`
+/// there is nothing to scope the scan to, so nothing is ingested rather than
+/// scanning the whole root with an empty filter (which would match every
+/// session).
 fn hook_ingest_codex(
     store: &Store,
     input: &singularmem_hooks::HookInput,
 ) -> Result<singularmem_ingest::Report, CliError> {
-    use singularmem_ingest::{
-        default_codex_root, discover_codex_sessions, ingest_source, CodexRollout, Report,
-    };
+    use singularmem_ingest::{discover_codex_sessions, ingest_source, CodexRollout, Report};
 
     let files: Vec<PathBuf> = if let Some(p) = &input.transcript_path {
         vec![p.clone()]
     } else {
-        let root = default_codex_root()
-            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?;
         let want = input.session_id.clone().unwrap_or_default();
+        if want.is_empty() {
+            tracing::warn!(
+                "codex hook payload has no transcript_path or session_id; nothing ingested"
+            );
+            return Ok(Report::default());
+        }
+        let root = codex_root()
+            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?;
         discover_codex_sessions(&root)?
             .into_iter()
             .filter(|f| f.to_string_lossy().contains(&want))
@@ -1471,14 +1557,20 @@ fn hook_ingest_codex(
 
 /// Cursor identifies the conversation to ingest by `conversation_id` when
 /// present; otherwise fall back to filtering by `cwd` as the project.
-/// `SINGULARMEM_CURSOR_DIR` overrides the default per-OS Cursor user
-/// directory (documented in `docs/hooks.md`; used by tests to point at a
-/// fixture).
+/// Without either, there is nothing to scope the ingest to, so nothing is
+/// ingested rather than pulling in every conversation. `SINGULARMEM_CURSOR_DIR`
+/// overrides the default per-OS Cursor user directory (documented in
+/// `docs/hooks.md`; used by tests to point at a fixture).
 fn hook_ingest_cursor(
     store: &Store,
     input: &singularmem_hooks::HookInput,
 ) -> Result<singularmem_ingest::Report, CliError> {
-    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats};
+    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats, Report};
+
+    if input.conversation_id.is_none() && input.cwd.is_none() {
+        tracing::warn!("cursor hook payload has no conversation_id or cwd; nothing ingested");
+        return Ok(Report::default());
+    }
 
     let user = std::env::var_os("SINGULARMEM_CURSOR_DIR")
         .map(PathBuf::from)
@@ -1532,33 +1624,44 @@ fn cmd_hooks(cmd: &HooksCommand) -> Result<(), CliError> {
             let editor = parse(editor)?;
             let path = config_path(editor, project.then_some(project_dir.as_path()))?;
             let existing = read_config(&path)?;
-            if path.exists() {
+            // Only rewrite the file when we actually have something to
+            // remove — an uninstall over a config that never had our hooks
+            // (foreign-only, or simply absent) must leave it byte-for-byte
+            // untouched rather than reformatting it.
+            if status(editor, &existing).installed {
                 write_config(&path, &remove(editor, &existing))?;
             }
             writeln!(out, "{}", path.display())?;
         }
-        HooksAction::Status { editor } => {
+        HooksAction::Status { editor, project } => {
             let editors: Vec<Editor> = match editor {
                 Some(e) => vec![parse(e)?],
                 None => vec![Editor::ClaudeCode, Editor::Codex, Editor::Cursor],
             };
             for e in editors {
-                let path = config_path(e, None)?;
-                let cfg = read_config(&path).unwrap_or(serde_json::Value::Null);
-                let s = status(e, &cfg);
-                writeln!(
-                    out,
-                    "{e}\t{}\t{}\t{}",
-                    if s.installed { "installed" } else { "absent" },
-                    path.display(),
-                    if s.installed && s.bin_exists {
-                        "bin ok"
-                    } else if s.installed {
-                        "bin missing"
-                    } else {
-                        "-"
+                let path = config_path(e, project.then_some(project_dir.as_path()))?;
+                match read_config(&path) {
+                    Ok(cfg) => {
+                        let s = status(e, &cfg);
+                        writeln!(
+                            out,
+                            "{e}\t{}\t{}\t{}",
+                            if s.installed { "installed" } else { "absent" },
+                            path.display(),
+                            if s.installed && s.bin_exists {
+                                "bin ok"
+                            } else if s.installed {
+                                "bin missing"
+                            } else {
+                                "-"
+                            }
+                        )?;
                     }
-                )?;
+                    Err(err) => {
+                        eprintln!("warning: {err}");
+                        writeln!(out, "{e}\tinvalid\t{}\t-", path.display())?;
+                    }
+                }
             }
         }
     }
