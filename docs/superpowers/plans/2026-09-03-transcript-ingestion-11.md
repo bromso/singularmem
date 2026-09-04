@@ -1,7 +1,7 @@
 ---
 title: Transcript ingestion (Sub-project 11)
 date: 2026-09-03
-status: draft
+status: merged
 sub-project: 11-transcript-ingestion
 spec: ../specs/2026-09-03-transcript-ingestion-11-design.md
 ---

@@ -1,7 +1,7 @@
 ---
 title: Scoping (Sub-project 12)
 date: 2026-09-04
-status: draft
+status: merged
 sub-project: 12-scoping
 supersedes: none
 ---
@@ -9,7 +9,7 @@ supersedes: none
 # Scoping (Sub-project 12) — Design Spec
 
 **Date:** 2026-09-04
-**Status:** Draft (awaiting user review of written spec)
+**Status:** Merged
 **Sub-project:** 12 (scoping — hierarchical scope path on every item, filters on every read surface)
 **Builds on:** 11 (transcript ingestion, PR #21; store format v2, `singularmem-ingest`). Branch `scoping-12` is stacked on `transcript-ingestion-11` until #21 merges.
 **Blocks:** 13 (session hooks + wake-up, which loads context by scope), 16 (MCP surface).

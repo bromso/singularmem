@@ -1,7 +1,7 @@
 ---
 title: Transcript ingestion (Sub-project 11)
 date: 2026-09-03
-status: draft
+status: merged
 sub-project: 11-transcript-ingestion
 supersedes: none
 ---
@@ -9,7 +9,7 @@ supersedes: none
 # Transcript ingestion (Sub-project 11) — Design Spec
 
 **Date:** 2026-09-03
-**Status:** Draft (awaiting user review of written spec)
+**Status:** Merged
 **Sub-project:** 11 (transcript ingestion — Claude Code JSONL sessions + source-tree mining)
 **Builds on:** 1 (memory store v0), 2a/2b/2c (search), 4b (MCP ingest hook wiring).
 **Blocks:** 12 (scoping), 13 (session hooks + wake-up), 15 (retrieval benchmark).
