@@ -58,6 +58,7 @@ singularmem-adapter-claude = { path = "crates/singularmem-adapter-claude" }
 singularmem-adapter-openai = { path = "crates/singularmem-adapter-openai" }
 singularmem-adapter-gemini = { path = "crates/singularmem-adapter-gemini" }
 singularmem-ingest = { path = "crates/singularmem-ingest" }
+singularmem-hooks = { path = "crates/singularmem-hooks" }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 dirs = "5"
 serde_json = { workspace = true }
@@ -71,6 +72,7 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 tantivy = { workspace = true }
+singularmem-ingest = { path = "crates/singularmem-ingest", features = ["testing"] }
 
 [[bin]]
 name = "singularmem"

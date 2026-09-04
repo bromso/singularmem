@@ -37,6 +37,10 @@ enum Command {
     Ingest(IngestArgs),
     /// Bulk-ingest Claude Code JSONL transcripts (idempotent).
     IngestTranscript(IngestTranscriptArgs),
+    /// Bulk-ingest `OpenAI` Codex CLI rollout JSONL files (idempotent).
+    IngestCodex(IngestCodexArgs),
+    /// Bulk-ingest Cursor chat history from its per-user `state.vscdb` stores (idempotent).
+    IngestCursor(IngestCursorArgs),
     /// Bulk-ingest a source tree, honouring .gitignore (idempotent).
     IngestDir(IngestDirArgs),
     /// Fetch one item by ID.
@@ -57,6 +61,9 @@ enum Command {
     SemanticSearch(SemanticSearchArgs),
     /// Inspect and change item scopes.
     Scope(ScopeCommand),
+    /// Print the newest items across a project's editor scopes.
+    #[command(name = "wake-up")]
+    WakeUp(WakeUpArgs),
 }
 
 /// Shared `--scope`/`--scope-exact` flags, flattened into `ListArgs`,
@@ -156,6 +163,48 @@ struct IngestTranscriptArgs {
     #[arg(long)]
     quiet: bool,
     /// Override the default `claude-code/<project>` scope for every ingested item.
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct IngestCodexArgs {
+    /// Rollout files or directories (searched recursively for
+    /// `rollout-*.jsonl`). Defaults to `~/.codex/sessions`.
+    paths: Vec<PathBuf>,
+    /// Keep only messages whose session `cwd` equals DIR.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Parse and report; write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Suppress per-file progress lines.
+    #[arg(long)]
+    quiet: bool,
+    /// Override the default `codex/<project>` scope for every ingested item.
+    #[arg(long, value_name = "PATH")]
+    scope: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct IngestCursorArgs {
+    /// Cursor's per-user directory (contains `globalStorage/` and
+    /// `workspaceStorage/`). Defaults to the per-OS Cursor `User` dir.
+    #[arg(long, value_name = "DIR")]
+    cursor_dir: Option<PathBuf>,
+    /// Keep only conversations whose workspace folder equals DIR.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Keep only this composer (conversation) id.
+    #[arg(long)]
+    conversation: Option<String>,
+    /// Parse and report; write nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Suppress per-file progress lines.
+    #[arg(long)]
+    quiet: bool,
+    /// Override the default `cursor/<project>` scope for every ingested item.
     #[arg(long, value_name = "PATH")]
     scope: Option<String>,
 }
@@ -343,6 +392,51 @@ struct RetrieveArgs {
     scope: ScopeArgs,
 }
 
+#[derive(Args, Debug)]
+struct WakeUpArgs {
+    /// Restrict to this scope and its descendants (repeatable; OR-ed).
+    /// Defaults to the editor scopes for `--project` (or the current
+    /// directory) when omitted.
+    #[arg(long = "scope", value_name = "PATH")]
+    scope: Vec<String>,
+    /// Project directory whose basename derives the default scopes.
+    /// Defaults to the current directory. Ignored when `--scope` is given.
+    #[arg(long, value_name = "DIR")]
+    project: Option<PathBuf>,
+    /// Also include the `files/<project>` scope in the default scope set.
+    #[arg(long)]
+    include_files: bool,
+    /// Newest items to include.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Rendered byte budget; oldest blocks are dropped first to fit.
+    #[arg(long, default_value_t = 8192)]
+    max_bytes: usize,
+    /// Which adapter to use for formatting.
+    #[arg(short = 'a', long, default_value = "plain")]
+    adapter: String,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = WakeUpFormat::Text)]
+    format: WakeUpFormat,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum WakeUpFormat {
+    /// Header plus adapter-formatted blocks, on stdout.
+    Text,
+    /// `{ scopes, total, shown, blocks, text }`.
+    Json,
+    /// Claude Code's `SessionStart` hook envelope.
+    #[value(name = "claude-hook")]
+    ClaudeHook,
+    /// Codex's `SessionStart` hook envelope.
+    #[value(name = "codex-hook")]
+    CodexHook,
+    /// Cursor's `SessionStart` hook envelope.
+    #[value(name = "cursor-hook")]
+    CursorHook,
+}
+
 fn main() -> ExitCode {
     // Subscribe tracing to stderr at WARN level by default; user can override
     // with RUST_LOG=… environment variable.
@@ -441,6 +535,8 @@ fn run(cli: Cli) -> Result<(), CliError> {
         && matches!(
             cli.command,
             Command::IngestTranscript(_)
+                | Command::IngestCodex(_)
+                | Command::IngestCursor(_)
                 | Command::IngestDir(_)
                 | Command::Scope(ScopeCommand {
                     action: ScopeAction::Move { .. }
@@ -456,7 +552,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
     // (single-writer-per-Directory).
     let needs_hook = matches!(
         cli.command,
-        Command::Ingest(_) | Command::IngestTranscript(_) | Command::IngestDir(_)
+        Command::Ingest(_)
+            | Command::IngestTranscript(_)
+            | Command::IngestCodex(_)
+            | Command::IngestCursor(_)
+            | Command::IngestDir(_)
     );
     if needs_hook && !cli.no_index {
         let mut hooks: Vec<Box<dyn singularmem_core::IndexHook>> = Vec::new();
@@ -529,10 +629,31 @@ fn known_adapters() -> Vec<Box<dyn singularmem_retrieve::Adapter>> {
     ]
 }
 
+/// Look up an adapter by name in [`known_adapters`].
+///
+/// # Errors
+/// `CliError::Usage` naming the known adapters when `name` matches none.
+fn find_adapter(name: &str) -> Result<Box<dyn singularmem_retrieve::Adapter>, CliError> {
+    let adapters = known_adapters();
+    let Some(pos) = adapters.iter().position(|a| a.name() == name) else {
+        let known: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
+        return Err(CliError::Usage(format!(
+            "unknown adapter '{name}'; known adapters: {}",
+            known.join(", ")
+        )));
+    };
+    Ok(adapters
+        .into_iter()
+        .nth(pos)
+        .unwrap_or_else(|| unreachable!()))
+}
+
 fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(), CliError> {
     match command {
         Command::Ingest(args) => cmd_ingest(store, args),
         Command::IngestTranscript(args) => cmd_ingest_transcript(store, &args),
+        Command::IngestCodex(args) => cmd_ingest_codex(store, &args),
+        Command::IngestCursor(args) => cmd_ingest_cursor(store, &args),
         Command::IngestDir(args) => cmd_ingest_dir(store, &args),
         Command::Get(args) => cmd_get(store, &args),
         Command::List(args) => cmd_list(store, &args),
@@ -543,6 +664,7 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::Retrieve(args) => cmd_retrieve(store, store_path, &args),
         Command::SemanticSearch(args) => cmd_semantic_search(store, store_path, &args),
         Command::Scope(cmd) => cmd_scope(store, &cmd),
+        Command::WakeUp(args) => cmd_wake_up(store, &args),
     }
 }
 
@@ -693,8 +815,81 @@ fn cmd_ingest(store: &Store, args: IngestArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Ingest each file in `files` by opening it with `open` (which also
+/// configures the resulting source), accumulating counts into `total` and
+/// unopenable files into `failed_files`. Per-file open failures are warned
+/// and counted; a store-level failure returns immediately.
+fn ingest_files<S: singularmem_ingest::Source>(
+    store: &Store,
+    files: &[PathBuf],
+    dry_run: bool,
+    quiet: bool,
+    open: impl Fn(&Path) -> singularmem_ingest::Result<S>,
+    total: &mut singularmem_ingest::Report,
+    failed_files: &mut usize,
+) -> Result<(), CliError> {
+    use singularmem_ingest::ingest_source;
+
+    for file in files {
+        let src = match open(file) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path = %file.display(), error = %e, "cannot open source");
+                *failed_files += 1;
+                continue;
+            }
+        };
+        let r = ingest_source(store, &src, dry_run)?;
+        if !quiet {
+            eprintln!(
+                "{}: +{} ingested, {} skipped",
+                file.display(),
+                r.ingested,
+                r.skipped_existing + r.skipped_filtered
+            );
+        }
+        accumulate(total, r);
+    }
+    Ok(())
+}
+
+/// Resolve the directories/files a bulk-ingest command should scan: `paths`
+/// if non-empty, otherwise a single `default_root`. Each root is expanded
+/// to files via `discover`; a root that is neither a directory nor a file
+/// is `Error::NotFound`.
+fn resolve_ingest_files(
+    paths: &[PathBuf],
+    default_root: PathBuf,
+    discover: impl Fn(&Path) -> singularmem_ingest::Result<Vec<PathBuf>>,
+) -> Result<Vec<PathBuf>, CliError> {
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        vec![default_root]
+    } else {
+        paths.to_vec()
+    };
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        if root.is_dir() {
+            files.extend(discover(root)?);
+        } else if root.is_file() {
+            files.push(root.clone());
+        } else {
+            return Err(singularmem_ingest::Error::NotFound { path: root.clone() }.into());
+        }
+    }
+    Ok(files)
+}
+
+/// Canonicalise `project`, falling back to the given path unchanged when
+/// canonicalisation fails (e.g. it does not exist).
+fn canonicalize_project(project: Option<&PathBuf>) -> Option<PathBuf> {
+    let p = project?;
+    Some(p.canonicalize().unwrap_or_else(|_| p.clone()))
+}
+
 fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(), CliError> {
-    use singularmem_ingest::{discover_transcripts, Report};
+    use singularmem_ingest::{discover_transcripts, ClaudeTranscript, Report};
 
     // Validate --scope up front so a typo is a usage error before any
     // parsing or filesystem work happens.
@@ -704,40 +899,29 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
         .map(singularmem_core::scope::validate)
         .transpose()?;
 
-    let roots: Vec<PathBuf> = if args.paths.is_empty() {
-        vec![dirs::home_dir()
-            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?
-            .join(".claude")
-            .join("projects")]
-    } else {
-        args.paths.clone()
-    };
+    let default_root = dirs::home_dir()
+        .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?
+        .join(".claude")
+        .join("projects");
+    let files = resolve_ingest_files(&args.paths, default_root, |p| discover_transcripts(p))?;
 
-    let mut files: Vec<PathBuf> = Vec::new();
-    for root in &roots {
-        if root.is_dir() {
-            files.extend(discover_transcripts(root)?);
-        } else if root.is_file() {
-            files.push(root.clone());
-        } else {
-            return Err(singularmem_ingest::Error::NotFound { path: root.clone() }.into());
-        }
-    }
-
-    let project = args
-        .project
-        .as_ref()
-        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()));
+    let project = canonicalize_project(args.project.as_ref());
     let mut total = Report::default();
     let mut failed_files = 0usize;
     // A store-level failure mid-loop still gets a summary for the files
     // already processed before it propagates.
-    let outcome = ingest_each_transcript(
+    let outcome = ingest_files(
         store,
         &files,
-        args,
-        project.as_deref(),
-        scope_override.as_deref(),
+        args.dry_run,
+        args.quiet,
+        |file| {
+            let mut s = ClaudeTranscript::open(file)?;
+            s.include_sidechains = args.include_sidechains;
+            s.project_filter.clone_from(&project);
+            s.scope_override.clone_from(&scope_override);
+            Ok(s)
+        },
         &mut total,
         &mut failed_files,
     );
@@ -752,42 +936,83 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
     Ok(())
 }
 
-/// Ingest each transcript in `files`, accumulating counts into `total` and
-/// unopenable files into `failed_files`. Per-file open failures are warned
-/// and counted; a store-level failure returns immediately.
-fn ingest_each_transcript(
-    store: &Store,
-    files: &[PathBuf],
-    args: &IngestTranscriptArgs,
-    project: Option<&Path>,
-    scope_override: Option<&str>,
-    total: &mut singularmem_ingest::Report,
-    failed_files: &mut usize,
-) -> Result<(), CliError> {
-    use singularmem_ingest::{ingest_source, ClaudeTranscript};
+fn cmd_ingest_codex(store: &Store, args: &IngestCodexArgs) -> Result<(), CliError> {
+    use singularmem_ingest::{default_codex_root, discover_codex_sessions, CodexRollout, Report};
 
-    for file in files {
-        let mut src = match ClaudeTranscript::open(file) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(path = %file.display(), error = %e, "cannot open transcript");
-                *failed_files += 1;
-                continue;
-            }
-        };
-        src.include_sidechains = args.include_sidechains;
-        src.project_filter = project.map(Path::to_path_buf);
-        src.scope_override = scope_override.map(ToString::to_string);
-        let r = ingest_source(store, &src, args.dry_run)?;
-        if !args.quiet {
-            eprintln!(
-                "{}: +{} ingested, {} skipped",
-                file.display(),
-                r.ingested,
-                r.skipped_existing + r.skipped_filtered
-            );
-        }
-        accumulate(total, r);
+    // Validate --scope up front so a typo is a usage error before any
+    // parsing or filesystem work happens.
+    let scope_override = args
+        .scope
+        .as_deref()
+        .map(singularmem_core::scope::validate)
+        .transpose()?;
+
+    let default_root = default_codex_root()
+        .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?;
+    let files = resolve_ingest_files(&args.paths, default_root, |p| discover_codex_sessions(p))?;
+
+    let project = canonicalize_project(args.project.as_ref());
+    let mut total = Report::default();
+    let mut failed_files = 0usize;
+    let outcome = ingest_files(
+        store,
+        &files,
+        args.dry_run,
+        args.quiet,
+        |file| {
+            let mut s = CodexRollout::open(file)?;
+            s.project_filter.clone_from(&project);
+            s.scope_override.clone_from(&scope_override);
+            Ok(s)
+        },
+        &mut total,
+        &mut failed_files,
+    );
+    total.failed += failed_files;
+    print_summary(&total, files.len());
+    outcome?;
+    if total.failed > 0 {
+        return Err(CliError::IngestPartial {
+            failed: total.failed,
+        });
+    }
+    Ok(())
+}
+
+fn cmd_ingest_cursor(store: &Store, args: &IngestCursorArgs) -> Result<(), CliError> {
+    use singularmem_ingest::{default_cursor_user_dir, ingest_source, CursorChats};
+
+    // Validate --scope up front so a typo is a usage error before any
+    // parsing or filesystem work happens.
+    let scope_override = args
+        .scope
+        .as_deref()
+        .map(singularmem_core::scope::validate)
+        .transpose()?;
+
+    let dir = match &args.cursor_dir {
+        Some(d) => d.clone(),
+        None => default_cursor_user_dir()
+            .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?,
+    };
+
+    let mut src = CursorChats::open(&dir)?;
+    src.project_filter = canonicalize_project(args.project.as_ref());
+    src.conversation_filter.clone_from(&args.conversation);
+    src.scope_override = scope_override;
+
+    let r = ingest_source(store, &src, args.dry_run)?;
+    if !args.quiet {
+        eprintln!(
+            "{}: +{} ingested, {} skipped",
+            dir.display(),
+            r.ingested,
+            r.skipped_existing + r.skipped_filtered
+        );
+    }
+    print_summary(&r, 1);
+    if r.failed > 0 {
+        return Err(CliError::IngestPartial { failed: r.failed });
     }
     Ok(())
 }
@@ -939,6 +1164,78 @@ fn cmd_scope(store: &Store, cmd: &ScopeCommand) -> Result<(), CliError> {
     Ok(())
 }
 
+fn cmd_wake_up(store: &Store, args: &WakeUpArgs) -> Result<(), CliError> {
+    use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
+
+    let set = if args.scope.is_empty() {
+        let dir = match &args.project {
+            Some(p) => p.clone(),
+            None => std::env::current_dir()?,
+        };
+        ScopeSet::for_project(&dir, args.include_files)
+    } else {
+        ScopeSet(
+            args.scope
+                .iter()
+                .map(|s| singularmem_core::ScopeFilter::descendants(s))
+                .collect::<Result<_, _>>()?,
+        )
+    };
+    let adapter = find_adapter(&args.adapter)?;
+    let w = build(
+        store,
+        &set,
+        &WakeupOptions {
+            limit: args.limit,
+            max_bytes: args.max_bytes,
+        },
+    )?;
+    let text = render(&w, &*adapter, args.max_bytes);
+
+    let mut out = io::stdout().lock();
+    match args.format {
+        WakeUpFormat::Text => write!(out, "{text}")?,
+        WakeUpFormat::Json => {
+            serde_json::to_writer(
+                &mut out,
+                &serde_json::json!({
+                    "scopes": w.scopes,
+                    "total": w.total,
+                    "shown": w.shown,
+                    "blocks": w.context.blocks,
+                    "text": text,
+                }),
+            )?;
+            writeln!(out)?;
+        }
+        WakeUpFormat::ClaudeHook => {
+            write_hook_envelope(&mut out, singularmem_hooks::Editor::ClaudeCode, &text)?;
+        }
+        WakeUpFormat::CodexHook => {
+            write_hook_envelope(&mut out, singularmem_hooks::Editor::Codex, &text)?;
+        }
+        WakeUpFormat::CursorHook => {
+            write_hook_envelope(&mut out, singularmem_hooks::Editor::Cursor, &text)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write a session-start hook envelope for `editor` wrapping `text`, followed
+/// by a trailing newline.
+fn write_hook_envelope(
+    out: &mut impl Write,
+    editor: singularmem_hooks::Editor,
+    text: &str,
+) -> Result<(), CliError> {
+    serde_json::to_writer(
+        &mut *out,
+        &singularmem_hooks::session_start_envelope(editor, text),
+    )?;
+    writeln!(out)?;
+    Ok(())
+}
+
 fn cmd_search(store: &Store, store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
@@ -1040,23 +1337,12 @@ fn render_search_results(
 }
 
 fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result<(), CliError> {
-    use singularmem_retrieve::{Adapter, RetrieveOptions, Retriever};
+    use singularmem_retrieve::{RetrieveOptions, Retriever};
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
     // Adapter lookup before any I/O so unknown-adapter errors fail fast.
-    let adapters = known_adapters();
-    let adapter: &dyn Adapter = adapters
-        .iter()
-        .find(|a| a.name() == args.adapter.as_str())
-        .map(std::convert::AsRef::as_ref)
-        .ok_or_else(|| {
-            let known: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
-            CliError::Usage(format!(
-                "unknown adapter '{}'; known adapters: {}",
-                args.adapter,
-                known.join(", ")
-            ))
-        })?;
+    let adapter = find_adapter(&args.adapter)?;
+    let adapter = &*adapter;
 
     let filter = args.scope.to_filter()?;
 

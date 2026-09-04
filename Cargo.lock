@@ -3194,6 +3194,7 @@ dependencies = [
  "singularmem-adapter-gemini",
  "singularmem-adapter-openai",
  "singularmem-core",
+ "singularmem-hooks",
  "singularmem-ingest",
  "singularmem-retrieve",
  "singularmem-search",

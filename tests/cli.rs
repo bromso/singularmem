@@ -1814,3 +1814,303 @@ fn stale_tantivy_sidecar_exits_2_and_reindex_recovers() {
         .success()
         .stdout(predicate::str::contains("zebra"));
 }
+
+fn fixture_codex() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex")
+}
+
+#[test]
+fn ingest_codex_is_idempotent_and_scoped() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-codex",
+            fixture_codex().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 2 filtered, 1 failed across 1 files",
+        ));
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-codex",
+            fixture_codex().to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("codex/proj\t2\n");
+}
+
+#[test]
+fn ingest_cursor_reads_a_fixture_user_dir() {
+    use singularmem_ingest::cursor::{write_fixture, FixtureBubble, FixtureWorkspace};
+    let dir = TempDir::new().unwrap();
+    let user = dir.path().join("User");
+    write_fixture(
+        &user,
+        &[FixtureWorkspace {
+            hash: "h1",
+            folder: Some("/w/proj"),
+            composers: vec![(
+                "c1",
+                "T",
+                1_700_000_000_000,
+                vec![
+                    FixtureBubble {
+                        id: "b1",
+                        kind: 1,
+                        text: "hello cursor",
+                    },
+                    FixtureBubble {
+                        id: "b2",
+                        kind: 2,
+                        text: "hi",
+                    },
+                ],
+            )],
+        }],
+    );
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            user.to_str().unwrap(),
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "ingested 2, skipped 0 existing, 0 filtered, 0 failed across 1 files",
+        ));
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            user.to_str().unwrap(),
+            "--conversation",
+            "c1",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("ingested 0, skipped 2 existing"));
+    singularmem()
+        .args(["--store", db_s, "scope", "list"])
+        .assert()
+        .success()
+        .stdout("cursor/proj\t2\n");
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest-cursor",
+            "--cursor-dir",
+            dir.path().join("nope").to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+}
+
+/// Build a store with items across `claude-code/proj`, `codex/proj`,
+/// `files/proj`, and `claude-code/other`, for the `wake-up` tests below.
+fn wake_up_test_store() -> (TempDir, std::path::PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    for (c, sc) in [
+        ("first note", "claude-code/proj"),
+        ("second note", "codex/proj"),
+        ("a file", "files/proj"),
+        ("elsewhere", "claude-code/other"),
+    ] {
+        singularmem()
+            .args(["--store", db_s, "ingest", "--content", c, "--scope", sc])
+            .assert()
+            .success();
+    }
+    (dir, db)
+}
+
+#[test]
+fn wake_up_text_format_defaults_to_project_editor_scopes() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args(["--store", db_s, "wake-up", "--project", "/x/proj"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with(
+        "# Singularmem wake-up — claude-code/proj, codex/proj, cursor/proj — 2 items, showing last 2\n"
+    ));
+    assert!(text.contains("first note") && text.contains("second note"));
+    assert!(!text.contains("a file") && !text.contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--project",
+            "/x/proj",
+            "--include-files",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("3 items, showing last 1") && text.contains("a file"));
+}
+
+#[test]
+fn wake_up_hook_and_json_formats() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "claude-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "cursor-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["additional_context"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["blocks"][0]["content"], "elsewhere");
+}
+
+#[test]
+fn wake_up_empty_and_invalid_scope() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    let out = singularmem()
+        .args(["--store", db_s, "wake-up", "--scope", "nothing/here"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "# Singularmem wake-up — nothing/here — 0 items, showing last 0\n"
+    );
+    singularmem()
+        .args(["--store", db_s, "wake-up", "--scope", "a//b"])
+        .assert()
+        .code(1);
+}
+
+#[test]
+fn wake_up_repeatable_scope_dedups_overlapping_filters() {
+    let (_dir, db) = wake_up_test_store();
+    let db_s = db.to_str().unwrap();
+
+    // Repeatable --scope with overlapping filters must not duplicate ids
+    // (sub-project 13 task 5 follow-up: see wakeup::build's HashSet dedup).
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let ids: Vec<&str> = v["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+    assert_eq!(ids.len(), unique.len(), "no duplicate ids: {ids:?}");
+    assert!(!ids.is_empty());
+}
