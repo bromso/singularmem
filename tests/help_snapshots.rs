@@ -4,15 +4,40 @@ use assert_cmd::Command;
 use std::path::PathBuf;
 
 const SUBCOMMANDS: &[&[&str]] = &[
-    &[], &["ingest"], &["ingest-transcript"], &["ingest-codex"], &["ingest-cursor"], &["ingest-dir"],
-    &["get"], &["list"], &["revisions"], &["export"], &["search"], &["reindex"], &["retrieve"],
-    &["semantic-search"], &["scope"], &["scope", "list"], &["scope", "move"], &["wake-up"],
-    &["hook"], &["hooks"], &["hooks", "install"], &["hooks", "uninstall"], &["hooks", "status"],
+    &[],
+    &["ingest"],
+    &["ingest-transcript"],
+    &["ingest-codex"],
+    &["ingest-cursor"],
+    &["ingest-dir"],
+    &["get"],
+    &["list"],
+    &["revisions"],
+    &["export"],
+    &["search"],
+    &["reindex"],
+    &["retrieve"],
+    &["semantic-search"],
+    &["scope"],
+    &["scope", "list"],
+    &["scope", "move"],
+    &["wake-up"],
+    &["hook"],
+    &["hooks"],
+    &["hooks", "install"],
+    &["hooks", "uninstall"],
+    &["hooks", "status"],
 ];
 
 fn snapshot_path(args: &[&str]) -> PathBuf {
-    let name = if args.is_empty() { "root".to_string() } else { args.join("-") };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/help").join(format!("{name}.txt"))
+    let name = if args.is_empty() {
+        "root".to_string()
+    } else {
+        args.join("-")
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/snapshots/help")
+        .join(format!("{name}.txt"))
 }
 
 #[test]
@@ -33,9 +58,12 @@ fn help_output_matches_snapshots() {
             std::fs::write(&path, &text).unwrap();
             continue;
         }
-        let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing snapshot {}", path.display()));
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing snapshot {}", path.display()));
         if expected != text {
-            failures.push(format!("{args:?}: --help changed (run with UPDATE_HELP_SNAPSHOTS=1 to accept)"));
+            failures.push(format!(
+                "{args:?}: --help changed (run with UPDATE_HELP_SNAPSHOTS=1 to accept)"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
