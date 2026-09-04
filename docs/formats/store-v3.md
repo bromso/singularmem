@@ -221,7 +221,8 @@ implementation:
    The successor row carries `supersedes = <old>` and the `external_id`
    the old row just gave up.
 
-2. **`set_scope`** — reassigning an item's scope after ingest:
+2. **`set_scope`** — available from v0.18.0 (this format version).
+   `Store::set_scope` reassigns an item's scope after ingest:
 
    ```sql
    UPDATE items SET scope = ? WHERE id = ?;
@@ -269,7 +270,7 @@ Rules:
 
 ## Known limitations
 
-Two gaps in the v2 bulk-ingest path are documented here rather than
+Two gaps in the bulk-ingest path are documented here rather than
 papered over. Both are tracked for sub-project 12.
 
 1. **Superseded items stay in the search indexes until `reindex`.**

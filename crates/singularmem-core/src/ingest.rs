@@ -276,6 +276,38 @@ impl Store {
         Ok(stored)
     }
 
+    /// Move an item to `scope` (or clear it with `None`) without creating a
+    /// revision. This is the store's second sanctioned in-place mutation
+    /// (`docs/formats/store-v3.md`). Index hooks are NOT notified: the Tantivy
+    /// document keeps its old scope until `singularmem reindex`, which the
+    /// CLI `scope move` verb documents.
+    ///
+    /// # Errors
+    /// `Error::ReadOnly`, `Error::Validation { field: "scope" }`,
+    /// `Error::NotFound`, `Error::Sqlite`.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn set_scope(&self, id: ItemId, scope: Option<&str>) -> Result<Item> {
+        self.assert_writable("set_scope")?;
+        let normalised = scope.map(crate::scope::validate).transpose()?;
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let changed = conn
+            .execute(
+                "UPDATE items SET scope = ?1 WHERE id = ?2",
+                params![normalised, id.to_string()],
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "updating scope",
+                source: e,
+            })?;
+        drop(conn);
+        if changed == 0 {
+            return Err(Error::NotFound { id });
+        }
+        self.get(id)
+    }
+
     /// Run `on_ingest` + `commit` on the attached hook, warning on failure
     /// (the `SQLite` write is already durable; Principle VII).
     fn fire_hook(&self, item: &Item) {

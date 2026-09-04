@@ -2,11 +2,13 @@
 //! `revision_history`, `latest_revision`.
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt::Write as _;
 
 use rusqlite::params;
 
 use crate::error::{Error, Result};
 use crate::item::{Item, ItemId};
+use crate::scope::ScopeFilter;
 use crate::store::Store;
 
 /// Iterator over `Item`s, returned by `Store::list` and `Store::list_by_tags`.
@@ -128,42 +130,8 @@ impl Store {
     /// Returns `Err` from the initial ID query if the database errors.
     /// Each iterator step may also return `Err` if a subsequent payload
     /// fetch fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal connection `Mutex` is poisoned (i.e. another
-    /// thread panicked while holding the lock).
     pub fn list(&self) -> Result<ItemIter<'_>> {
-        let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn
-            .prepare("SELECT id FROM items ORDER BY created_at ASC")
-            .map_err(|e| Error::Sqlite {
-                context: "preparing list query",
-                source: e,
-            })?;
-        let id_strings: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| Error::Sqlite {
-                context: "executing list query",
-                source: e,
-            })?
-            .collect::<rusqlite::Result<Vec<String>>>()
-            .map_err(|e| Error::Sqlite {
-                context: "collecting list IDs",
-                source: e,
-            })?;
-        drop(stmt);
-        drop(conn);
-
-        let pending_ids = id_strings
-            .into_iter()
-            .map(|s| s.parse::<ItemId>())
-            .collect::<std::result::Result<VecDeque<_>, _>>()?;
-
-        Ok(ItemIter {
-            store: self,
-            pending_ids,
-        })
+        self.list_by_tags_scoped(&[], None)
     }
 
     /// Iterate over items whose tag set contains every named tag (AND-semantics).
@@ -172,75 +140,141 @@ impl Store {
     /// # Errors
     ///
     /// Same as `list`.
+    pub fn list_by_tags(&self, tags: &[&str]) -> Result<ItemIter<'_>> {
+        self.list_by_tags_scoped(tags, None)
+    }
+
+    /// Iterate items in `created_at` order, restricted to `filter` when given.
+    ///
+    /// # Errors
+    /// Same as [`Store::list`].
+    pub fn list_scoped(&self, filter: Option<&ScopeFilter>) -> Result<ItemIter<'_>> {
+        self.list_by_tags_scoped(&[], filter)
+    }
+
+    /// Items carrying every tag in `tags` (AND) and matching `filter` when given.
+    ///
+    /// # Errors
+    /// Same as [`Store::list`].
     ///
     /// # Panics
-    ///
-    /// Panics if the internal connection `Mutex` is poisoned (i.e. another
-    /// thread panicked while holding the lock).
-    pub fn list_by_tags(&self, tags: &[&str]) -> Result<ItemIter<'_>> {
-        if tags.is_empty() {
-            return self.list();
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn list_by_tags_scoped(
+        &self,
+        tags: &[&str],
+        filter: Option<&ScopeFilter>,
+    ) -> Result<ItemIter<'_>> {
+        let mut sql = String::from("SELECT i.id FROM items i WHERE 1=1");
+        let mut params: Vec<String> = Vec::new();
+        if !tags.is_empty() {
+            let placeholders = vec!["?"; tags.len()].join(", ");
+            // `tags.len()` is a `usize` we computed, not user input, so it is
+            // safe to inline as a literal; binding it as a `String` parameter
+            // instead would compare `COUNT(DISTINCT tag)` (INTEGER) against a
+            // TEXT value, which SQLite's storage-class rules never equate.
+            let count = tags.len();
+            let _ = write!(
+                sql,
+                " AND i.id IN (SELECT item_id FROM item_tags WHERE tag IN ({placeholders}) \
+                  GROUP BY item_id HAVING COUNT(DISTINCT tag) = {count})"
+            );
+            params.extend(tags.iter().map(|t| (*t).to_string()));
         }
+        if let Some(f) = filter {
+            let (clause, binds) = f.sql_clause();
+            sql.push_str(" AND ");
+            sql.push_str(&clause.replace("scope", "i.scope"));
+            params.extend(binds);
+        }
+        sql.push_str(" ORDER BY i.created_at ASC");
 
         let conn = self.conn.lock().expect("store mutex poisoned");
-
-        // Build IN-list placeholders for the tag values.
-        let placeholders = tags
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let count_param = tags.len() + 1;
-        let sql = format!(
-            "SELECT i.id FROM items i \
-             WHERE i.id IN ( \
-                 SELECT item_id FROM item_tags \
-                 WHERE tag IN ({placeholders}) \
-                 GROUP BY item_id \
-                 HAVING COUNT(DISTINCT tag) = ?{count_param} \
-             ) \
-             ORDER BY i.created_at ASC",
-        );
-
-        // Collect tag strings + count into a single params list.
-        let tag_strings: Vec<String> = tags.iter().map(|t| (*t).to_string()).collect();
-        let tag_count = i64::try_from(tags.len()).unwrap_or(i64::MAX);
-
         let mut stmt = conn.prepare(&sql).map_err(|e| Error::Sqlite {
-            context: "preparing list_by_tags query",
+            context: "preparing scoped list query",
             source: e,
         })?;
         let id_strings: Vec<String> = stmt
-            .query_map(
-                rusqlite::params_from_iter(
-                    tag_strings
-                        .iter()
-                        .map(|s| s as &dyn rusqlite::ToSql)
-                        .chain(std::iter::once(&tag_count as &dyn rusqlite::ToSql)),
-                ),
-                |r| r.get::<_, String>(0),
-            )
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(|e| Error::Sqlite {
-                context: "executing list_by_tags query",
+                context: "executing scoped list query",
                 source: e,
             })?
             .collect::<rusqlite::Result<Vec<String>>>()
             .map_err(|e| Error::Sqlite {
-                context: "collecting list_by_tags IDs",
+                context: "collecting scoped list IDs",
                 source: e,
             })?;
         drop(stmt);
         drop(conn);
-
         let pending_ids = id_strings
             .into_iter()
             .map(|s| s.parse::<ItemId>())
             .collect::<std::result::Result<VecDeque<_>, _>>()?;
-
         Ok(ItemIter {
             store: self,
             pending_ids,
+        })
+    }
+
+    /// Distinct scopes with item counts, sorted by path.
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn scopes(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn
+            .prepare(
+                "SELECT scope, COUNT(*) FROM items WHERE scope IS NOT NULL \
+                 GROUP BY scope ORDER BY scope ASC",
+            )
+            .map_err(|e| Error::Sqlite {
+                context: "preparing scopes query",
+                source: e,
+            })?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| Error::Sqlite {
+                context: "executing scopes query",
+                source: e,
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::Sqlite {
+                context: "collecting scopes",
+                source: e,
+            })?;
+        drop(stmt);
+        drop(conn);
+        Ok(rows
+            .into_iter()
+            .map(|(s, n)| (s, usize::try_from(n).unwrap_or(0)))
+            .collect())
+    }
+
+    /// The scope of one item (cheap point read, no payload).
+    ///
+    /// # Errors
+    /// `Error::NotFound` if the id is unknown; `Error::Sqlite` otherwise.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn scope_of(&self, id: ItemId) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT scope FROM items WHERE id = ?1",
+            params![id.to_string()],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Error::NotFound { id },
+            other => Error::Sqlite {
+                context: "reading scope",
+                source: other,
+            },
         })
     }
 }

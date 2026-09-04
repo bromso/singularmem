@@ -128,8 +128,6 @@ impl ScopeFilter {
 
     /// SQL fragment and bound parameters for a `WHERE` clause on `items.scope`.
     /// Uses `ESCAPE '\'` because `_` is a LIKE wildcard and a legal scope byte.
-    // Not yet called: wired into read surfaces in sub-project 12 Task 2.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn sql_clause(&self) -> (&'static str, Vec<String>) {
         if self.exact {
@@ -145,5 +143,31 @@ impl ScopeFilter {
                 vec![self.path.clone(), format!("{escaped}/%")],
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScopeFilter;
+
+    /// `sql_clause` is `pub(crate)`, so this test lives here rather than in
+    /// the integration test file. `%` and `\` aren't valid scope bytes, so
+    /// the filter is built directly rather than through `descendants`
+    /// (which validates and would reject them).
+    #[test]
+    fn sql_clause_escapes_like_wildcards() {
+        let filter = ScopeFilter {
+            path: "p_q%r\\s".to_string(),
+            exact: false,
+        };
+        let (clause, binds) = filter.sql_clause();
+        assert_eq!(clause, "(scope = ? OR scope LIKE ? ESCAPE '\\')");
+        assert_eq!(binds.len(), 2);
+        assert_eq!(binds[0], filter.path);
+        let escaped = &binds[1];
+        assert!(escaped.ends_with("/%"), "{escaped:?}");
+        assert!(escaped.contains("\\_"), "{escaped:?}");
+        assert!(escaped.contains("\\%"), "{escaped:?}");
+        assert!(escaped.contains("\\\\"), "{escaped:?}");
     }
 }

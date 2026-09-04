@@ -47,3 +47,18 @@ fn filter_constructors_validate() {
     );
     assert!(ScopeFilter::exact("a//b").is_err());
 }
+
+#[test]
+fn matches_respects_segment_boundaries() {
+    let descendants = ScopeFilter::descendants("a/b").unwrap();
+    assert!(descendants.matches(Some("a/b")));
+    assert!(descendants.matches(Some("a/b/c")));
+    assert!(!descendants.matches(Some("a/bz")));
+    assert!(!descendants.matches(None));
+
+    let exact = ScopeFilter::exact("a/b").unwrap();
+    assert!(exact.matches(Some("a/b")));
+    assert!(!exact.matches(Some("a/b/c")));
+    assert!(!exact.matches(Some("a/bz")));
+    assert!(!exact.matches(None));
+}
