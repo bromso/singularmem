@@ -1,0 +1,17 @@
+Show whether hooks are installed for one editor, or all three
+
+Usage: singularmem hooks status [OPTIONS] [EDITOR]
+
+Arguments:
+  [EDITOR]  The editor to check; every editor when omitted
+
+Options:
+      --project       Read the project-local config instead of the user's home directory
+      --store <PATH>  Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also
+                      settable via the `SINGULARMEM_STORE` environment variable — the only way to
+                      point a hook (which runs with a fixed, flag-less command line) at a
+                      non-default store
+      --read-only     Open the store in read-only mode (refuses ingest)
+      --no-index      Skip wiring up the Tantivy hook on open. Use for storage-only operations that
+                      don't need search, or when the Tantivy directory is intentionally absent
+  -h, --help          Print help

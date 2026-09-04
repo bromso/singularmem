@@ -1,0 +1,21 @@
+\[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`
+
+Usage: singularmem semantic-search [OPTIONS] [QUERIES]...
+
+Arguments:
+  [QUERIES]...  One or more query tokens. Multiple tokens are joined with a space
+
+Options:
+      --limit <LIMIT>          Max hits to return [default: 20]
+      --store <PATH>           Path to the `SQLite` store file. Defaults to the per-user XDG data
+                               dir. Also settable via the `SINGULARMEM_STORE` environment variable —
+                               the only way to point a hook (which runs with a fixed, flag-less
+                               command line) at a non-default store
+      --min-score <MIN_SCORE>  Minimum cosine-similarity score (0.0–1.0) for a hit to be included
+                               [default: 0.0]
+      --read-only              Open the store in read-only mode (refuses ingest)
+      --format <FORMAT>        Output format [default: table] [possible values: table, jsonl, ids]
+      --no-index               Skip wiring up the Tantivy hook on open. Use for storage-only
+                               operations that don't need search, or when the Tantivy directory is
+                               intentionally absent
+  -h, --help                   Print help

@@ -1,0 +1,77 @@
+Full-text search over the store
+
+Usage: singularmem search [OPTIONS] [QUERIES]...
+
+Arguments:
+  [QUERIES]...
+          One or more query tokens. Multiple tokens become an implicit AND
+
+Options:
+  -m, --mode <MODE>
+          Which backend(s) to use. `auto` picks hybrid when both sidecars exist, falls back to
+          whichever one is present, and errors when neither is
+
+          Possible values:
+          - auto:     Use hybrid when both `.tantivy/` and `.vectors/` exist; degrade to whichever
+            single index is present; error when neither exists
+          - lexical:  Tantivy BM25 only
+          - semantic: `USearch` cosine only
+          - hybrid:   RRF-fused lexical + semantic; error if either is missing
+          
+          [default: auto]
+
+      --store <PATH>
+          Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also settable via
+          the `SINGULARMEM_STORE` environment variable — the only way to point a hook (which runs
+          with a fixed, flag-less command line) at a non-default store
+
+  -l, --limit <LIMIT>
+          Max hits to return
+          
+          [default: 20]
+
+      --read-only
+          Open the store in read-only mode (refuses ingest)
+
+      --no-index
+          Skip wiring up the Tantivy hook on open. Use for storage-only operations that don't need
+          search, or when the Tantivy directory is intentionally absent
+
+      --offset <OFFSET>
+          Skip first N hits (pagination, lexical mode only)
+          
+          [default: 0]
+
+      --fetch-multiplier <FETCH_MULTIPLIER>
+          Per-ranker overfetch factor; hybrid only. Default 3
+          
+          [default: 3]
+
+      --rrf-k <RRF_K>
+          RRF damping constant; hybrid only. Default 60
+          
+          [default: 60]
+
+      --no-snippets
+          Suppress snippet highlighting (faster)
+
+      --show-ranks
+          Include per-ranker rank columns in human output
+
+      --json
+          Emit JSON results instead of human-readable output
+
+      --format <FORMAT>
+          Output format. (Legacy; `--json` and `--show-ranks` are preferred.)
+          
+          [default: table]
+          [possible values: table, jsonl, ids]
+
+      --scope <PATH>
+          Restrict to this scope and its descendants (e.g. `claude-code/myproj`)
+
+      --scope-exact
+          With --scope: match only that exact scope, not descendants
+
+  -h, --help
+          Print help (see a summary with '-h')
