@@ -627,7 +627,7 @@ fn cmd_ingest(store: &Store, args: IngestArgs) -> Result<(), CliError> {
 }
 
 fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(), CliError> {
-    use singularmem_ingest::{discover_transcripts, ingest_source, ClaudeTranscript, Report};
+    use singularmem_ingest::{discover_transcripts, Report};
 
     let roots: Vec<PathBuf> = if args.paths.is_empty() {
         vec![dirs::home_dir()
@@ -655,17 +655,51 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()));
     let mut total = Report::default();
     let mut failed_files = 0usize;
-    for file in &files {
+    // A store-level failure mid-loop still gets a summary for the files
+    // already processed before it propagates.
+    let outcome = ingest_each_transcript(
+        store,
+        &files,
+        args,
+        project.as_deref(),
+        &mut total,
+        &mut failed_files,
+    );
+    total.failed += failed_files;
+    print_summary(&total, files.len());
+    outcome?;
+    if total.failed > 0 {
+        return Err(CliError::IngestPartial {
+            failed: total.failed,
+        });
+    }
+    Ok(())
+}
+
+/// Ingest each transcript in `files`, accumulating counts into `total` and
+/// unopenable files into `failed_files`. Per-file open failures are warned
+/// and counted; a store-level failure returns immediately.
+fn ingest_each_transcript(
+    store: &Store,
+    files: &[PathBuf],
+    args: &IngestTranscriptArgs,
+    project: Option<&Path>,
+    total: &mut singularmem_ingest::Report,
+    failed_files: &mut usize,
+) -> Result<(), CliError> {
+    use singularmem_ingest::{ingest_source, ClaudeTranscript};
+
+    for file in files {
         let mut src = match ClaudeTranscript::open(file) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(path = %file.display(), error = %e, "cannot open transcript");
-                failed_files += 1;
+                *failed_files += 1;
                 continue;
             }
         };
         src.include_sidechains = args.include_sidechains;
-        src.project_filter.clone_from(&project);
+        src.project_filter = project.map(Path::to_path_buf);
         let r = ingest_source(store, &src, args.dry_run)?;
         if !args.quiet {
             eprintln!(
@@ -675,13 +709,7 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
                 r.skipped_existing + r.skipped_filtered
             );
         }
-        accumulate(&mut total, r);
-    }
-    print_summary(&total, files.len());
-    if total.failed > 0 || failed_files > 0 {
-        return Err(CliError::IngestPartial {
-            failed: total.failed + failed_files,
-        });
+        accumulate(total, r);
     }
     Ok(())
 }
@@ -700,7 +728,7 @@ fn cmd_ingest_dir(store: &Store, args: &IngestDirArgs) -> Result<(), CliError> {
             r.skipped_existing + r.skipped_filtered
         );
     }
-    print_summary(&r, 1);
+    print_summary(&r, src.visited_files());
     if r.failed > 0 {
         return Err(CliError::IngestPartial { failed: r.failed });
     }

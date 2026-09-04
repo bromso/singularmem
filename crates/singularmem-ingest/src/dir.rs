@@ -31,6 +31,7 @@ pub struct DirectoryWalker {
     /// Chunk cap in bytes.
     pub chunk_bytes: usize,
     filtered: Cell<usize>,
+    visited: Cell<usize>,
 }
 
 impl DirectoryWalker {
@@ -55,10 +56,21 @@ impl DirectoryWalker {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             chunk_bytes: DEFAULT_CHUNK_BYTES,
             filtered: Cell::new(0),
+            visited: Cell::new(0),
         })
     }
 
+    /// Number of files the last walk handed to the item builder — items
+    /// produced, filtered, and errored alike. Valid after the iterator from
+    /// [`Source::items`] has been exhausted; the CLI reports it as the
+    /// "across N files" figure.
+    #[must_use]
+    pub fn visited_files(&self) -> usize {
+        self.visited.get()
+    }
+
     fn file_to_items(&self, abs: &Path) -> Result<Vec<NewItem>> {
+        self.visited.set(self.visited.get() + 1);
         let meta = std::fs::metadata(abs).map_err(|source| Error::Io {
             path: abs.to_path_buf(),
             source,
@@ -155,11 +167,15 @@ impl Source for DirectoryWalker {
 
     fn items(&self) -> Box<dyn Iterator<Item = Result<NewItem>> + '_> {
         self.filtered.set(0);
+        self.visited.set(0);
         let walker = ignore::WalkBuilder::new(&self.root)
             .hidden(true)
             .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            // Global and per-repo-exclude ignore files live outside the
+            // walked tree; honouring them would make results depend on the
+            // machine (Principle VI).
+            .git_global(false)
+            .git_exclude(false)
             .require_git(false)
             .sort_by_file_path(std::cmp::Ord::cmp)
             .build();
@@ -190,7 +206,7 @@ impl Source for DirectoryWalker {
 
 /// Extracts the path a walker error is associated with, falling back to
 /// `root` when the error carries none.
-fn walk_error_path(e: &ignore::Error, root: &Path) -> PathBuf {
+pub(crate) fn walk_error_path(e: &ignore::Error, root: &Path) -> PathBuf {
     match e {
         ignore::Error::WithPath { path, .. } => path.clone(),
         _ => root.to_path_buf(),

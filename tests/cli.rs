@@ -1584,3 +1584,19 @@ fn ingest_transcript_project_filter_matches_symlinked_cwd() {
         .success()
         .stderr(predicate::str::contains("ingested 1"));
 }
+
+#[test]
+fn ingest_dir_missing_path_is_exit_2() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    singularmem()
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-dir",
+            "/definitely/missing",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("path not found"));
+}

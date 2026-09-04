@@ -342,24 +342,28 @@ pub fn discover_transcripts(root: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
             path: root.to_path_buf(),
         });
     }
+    // A transcript tree is not a source tree: take every `*.jsonl`, hidden
+    // or not, ignoring any `.gitignore` that happens to sit nearby, and
+    // never follow a symlink out of the tree.
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .follow_links(false)
+        .sort_by_file_path(std::cmp::Ord::cmp)
+        .build();
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(|source| Error::Io {
-            path: dir.clone(),
-            source,
+    for entry in walker {
+        let entry = entry.map_err(|e| Error::Io {
+            path: crate::dir::walk_error_path(&e, root),
+            source: std::io::Error::other(e.to_string()),
         })?;
-        for entry in entries {
-            let entry = entry.map_err(|source| Error::Io {
-                path: dir.clone(),
-                source,
-            })?;
-            let p = entry.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.extension().is_some_and(|e| e == "jsonl") {
-                out.push(p);
-            }
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if entry.path().extension().is_some_and(|e| e == "jsonl") {
+            out.push(entry.into_path());
         }
     }
     out.sort();
