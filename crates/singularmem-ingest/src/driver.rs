@@ -62,16 +62,16 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
             fresh.push(item);
             continue;
         };
+        if !accepted_ids.insert(key.clone()) {
+            tracing::warn!(
+                external_id = %key,
+                source = %source.name(),
+                "skipping duplicate external_id within this run"
+            );
+            report.skipped_existing += 1;
+            continue;
+        }
         if !existing.contains(&key) {
-            if !accepted_ids.insert(key.clone()) {
-                tracing::warn!(
-                    external_id = %key,
-                    source = %source.name(),
-                    "skipping duplicate external_id within this run"
-                );
-                report.skipped_existing += 1;
-                continue;
-            }
             fresh.push(item);
             continue;
         }

@@ -178,3 +178,26 @@ fn existing_item_without_hash_is_not_replaced() {
     let kept = s.get_by_external_id("k").unwrap().unwrap();
     assert_eq!(kept.content, "v1");
 }
+
+#[test]
+fn in_run_duplicate_of_existing_key_is_replaced_at_most_once() {
+    let d = TempDir::new().unwrap();
+    let s = Store::open(d.path().join("s.db")).unwrap();
+    let mut v0 = keyed("v0", "k");
+    v0.metadata = json!({"sha256": "h0"});
+    s.ingest(v0).unwrap();
+
+    let mut item_a = keyed("vA", "k");
+    item_a.metadata = json!({"sha256": "hA"});
+    let mut item_b = keyed("vB", "k");
+    item_b.metadata = json!({"sha256": "hB"});
+    let src = Fixed(vec![item_a, item_b]);
+    let r = ingest_source(&s, &src, false).unwrap();
+    assert_eq!(r.ingested, 1);
+    assert_eq!(r.skipped_existing, 1);
+
+    let newest = s.get_by_external_id("k").unwrap().unwrap();
+    assert_eq!(newest.content, "vA");
+    assert_eq!(s.list().unwrap().count(), 2);
+    assert_eq!(s.revision_history(newest.id).unwrap().len(), 2);
+}
