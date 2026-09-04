@@ -6,9 +6,10 @@ or agent accumulates over time — conversations, files, decisions,
 embeddings, provenance — and bridges them to any LLM provider through
 a stable, vendor-neutral interface.
 
-> **Status:** v0.17.0 — memory store, hybrid search (Tantivy + USearch),
-> provider adapters, MCP server, TypeScript SDK, and bulk transcript
-> ingestion. Constitution v0.2.0 ratified 2026-05-15.
+> **Status:** v0.16.0, plus unreleased transcript ingestion (ships in
+> v0.17.0) — memory store, hybrid search (Tantivy + USearch), provider
+> adapters, MCP server, TypeScript SDK, and bulk transcript ingestion.
+> Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 
@@ -42,6 +43,16 @@ singularmem retrieve --adapter claude "release process"
 ```
 
 Both bulk verbs are idempotent: re-running ingests nothing already present.
+
+Two known limitations of the bulk verbs, both tracked for a follow-up
+(details in [docs/formats/store-v2.md](docs/formats/store-v2.md#known-limitations)):
+
+- Superseded items stay in the search indexes until `singularmem
+  reindex`, so repeated `ingest-dir` runs over a changing tree
+  accumulate stale search hits.
+- If a file's chunk count changes between runs its `external_id` shape
+  changes too (`file:<path>` vs `file:<path>#n`), so the old item is
+  orphaned rather than superseded.
 
 ## Installing the CLI
 

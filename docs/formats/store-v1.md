@@ -1,6 +1,6 @@
 # Singularmem Store Format — v1
 
-> Superseded by [store-v2.md](store-v2.md) as of v0.17.0. Kept for readers of v1 stores.
+> Superseded by [store-v2.md](store-v2.md) (first shipped in v0.17.0). Kept for readers of v1 stores.
 
 This document specifies the on-disk format of a Singularmem memory store
 at `format_version = 1`. **A third-party tool that reads this document and
@@ -114,8 +114,8 @@ emit JSONL on stdout. Format:
 
 ```jsonl
 {"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"1","exported_at":"2026-05-16T12:34:56.000000000Z"}
-{"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","supersedes":null,"source":null,"tags":["work","decision"],"metadata":{"project":"alpha"}}
-{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","tags":[],"metadata":{}}
+{"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","tags":["work","decision"],"metadata":{"project":"alpha"}}
+{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc"}
 ```
 
 Rules:
@@ -126,8 +126,12 @@ Rules:
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
 - Items are emitted in `created_at` ascending order. Given a
   deterministic store, the export is byte-identical across runs.
-- `tags` is always present; empty array `[]` if the item has no tags.
-- `metadata` is always present; empty object `{}` if the item has none.
+- Only `_kind`, `id`, `content` and `created_at` are always present.
+- `supersedes`, `source`, `tags` and `metadata` are **omitted** when they
+  carry no information: `supersedes` and `source` when null, `tags` when
+  the item has no tags, `metadata` when it is the empty object. A reader
+  MUST treat an absent field as that empty value (`null`, `[]`, `{}`)
+  rather than as an error.
 
 ## Writing a third-party loader (walkthrough)
 

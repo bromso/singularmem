@@ -339,3 +339,52 @@ timeline needs it.
 | **VIII — Privacy Telemetry Boundary** | No telemetry. |
 | **IX — Accessible by Default** | CLI plain text only. |
 | **X — Performance Budgets, Enforced in CI** | Batched `ingest_many` keeps the ≥ 50 items/s budget; benchmark unchanged. |
+
+## Deviations recorded during implementation
+
+The shipped implementation differs from this design in the following
+ways. Each is deliberate; none changes the acceptance criteria.
+
+1. **WAL pragma is scoped to write-mode opens.** `journal_mode = WAL` is
+   a persistent, file-mutating pragma, so a read-only open cannot set it
+   (and must not try). It is issued only when the store is opened
+   writable.
+
+2. **The 1 → 2 migration uses `BEGIN IMMEDIATE` plus an in-transaction
+   version re-check.** A deferred transaction would upgrade to a write
+   lock only at the first DDL statement, racing a second writer that
+   already migrated. Taking the write lock up front and re-reading
+   `format_version` inside the transaction makes the losing side a
+   no-op rollback that returns `Ok(())`.
+
+3. **The chunker's reassembly property holds only up to whitespace.**
+   `chunks.join("\n\n")` reproduces the input only when no paragraph
+   needed a hard split: a hard split drops the whitespace run that
+   straddles the boundary. The proptest therefore asserts the weaker,
+   true property — the non-whitespace characters survive in order —
+   rather than byte-for-byte reassembly.
+
+4. **`ingest_replacing` is used only when BOTH sha256 hashes are
+   present.** An item already in the store without a
+   `metadata.sha256` (ingested by hand, say) is never replaced by a
+   hashed candidate: with nothing to compare, "changed" cannot be
+   established, so the candidate is counted as `skipped_existing`.
+
+5. **Superseded items remain in the Tantivy/`USearch` indexes until
+   `singularmem reindex`.** `IndexHook` has no removal path, so repeated
+   `ingest-dir` runs over a changing tree accumulate stale search hits
+   pointing at superseded revisions. Tracked for sub-project 12; see
+   `docs/formats/store-v2.md` § "Known limitations".
+
+6. **A change in a file's chunk count orphans its previous items.** The
+   `external_id` shape depends on the count (`file:<path>` for a single
+   chunk, `file:<path>#n` for several), so crossing that boundary
+   produces ids the store has never seen: the new items are inserted
+   fresh and the old ones are left in place holding their old ids rather
+   than being superseded. Tracked for sub-project 12.
+
+7. **The plan's CLI tests assert `.code(1)`, not `.success()`.** The
+   shared transcript fixture deliberately contains one malformed JSON
+   line so the per-line failure path is covered. That line counts as a
+   failure on every run, including idempotent re-runs and `--dry-run`,
+   and the exit code honestly reflects it.

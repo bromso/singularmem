@@ -118,8 +118,8 @@ maximum version `M`:
 - `N > M` → loader MUST refuse with an "unsupported format version"
   error. It MUST NOT attempt to operate on a newer format.
 
-The Singularmem reference implementation in `crates/singularmem-core` at
-v0.17.0 supports maximum version `2`.
+The Singularmem reference implementation in `crates/singularmem-core`
+supports maximum version `2` from v0.17.0 onward.
 
 ## Migration 1 → 2
 
@@ -177,8 +177,8 @@ emit JSONL on stdout. Format:
 
 ```jsonl
 {"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"2","exported_at":"2026-05-16T12:34:56.000000000Z"}
-{"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","supersedes":null,"source":null,"tags":["work","decision"],"metadata":{"project":"alpha"}}
-{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","tags":[],"metadata":{},"external_id":"file:/a.rs"}
+{"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","tags":["work","decision"],"metadata":{"project":"alpha"}}
+{"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","external_id":"file:/a.rs"}
 ```
 
 Rules:
@@ -191,11 +191,38 @@ Rules:
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
 - Items are emitted in `created_at` ascending order. Given a
   deterministic store, the export is byte-identical across runs.
-- `tags` is always present; empty array `[]` if the item has no tags.
-- `metadata` is always present; empty object `{}` if the item has none.
-- Item lines MAY carry `"external_id"`. It is present only when the item
-  has one; readers of `export-v1` written by a v1 store simply never see
-  the field, so this is a backward-compatible addition.
+- Only `_kind`, `id`, `content` and `created_at` are always present.
+- `supersedes`, `source`, `tags`, `metadata` and `external_id` are
+  **omitted** when they carry no information: `supersedes`, `source` and
+  `external_id` when null, `tags` when the item has no tags, `metadata`
+  when it is the empty object. A reader MUST treat an absent field as
+  that empty value (`null`, `[]`, `{}`) rather than as an error — the
+  first item line above has no `supersedes` and no `source`, the second
+  has no `tags` and no `metadata`.
+- `external_id` is therefore present only on items that have one;
+  readers of `export-v1` written by a v1 store simply never see the
+  field, so this is a backward-compatible addition.
+
+## Known limitations
+
+Two gaps in the v2 bulk-ingest path are documented here rather than
+papered over. Both are tracked for sub-project 12.
+
+1. **Superseded items stay in the search indexes until `reindex`.**
+   `IndexHook` has an `on_ingest` but no removal path, so when
+   `ingest_replacing` supersedes an item the old document remains in the
+   Tantivy and `USearch` sidecars. Repeated `ingest-dir` runs over a
+   changing tree therefore accumulate stale search hits pointing at
+   superseded revisions. `singularmem reindex` rebuilds the sidecars
+   from `SQLite` and clears them.
+
+2. **A change in chunk count orphans the previous items.** The
+   `external_id` for a file is `file:<path>` when it produces exactly one
+   chunk and `file:<path>#<n>` when it produces several. If an edit moves
+   a file across that boundary — or changes how many chunks it splits
+   into — the new items carry ids the store has never seen, so they are
+   inserted fresh and the previous item(s) are orphaned (still present,
+   still holding their old ids) rather than superseded.
 
 ## Writing a third-party loader (walkthrough)
 
