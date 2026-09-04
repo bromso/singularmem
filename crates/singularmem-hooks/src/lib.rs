@@ -18,7 +18,8 @@ pub mod error;
 pub mod input;
 
 pub use config::{
-    entries, is_ours, merge, read_config, remove, status, write_config, HookStatus, MARKER,
+    entries, is_ours, merge, parse_ours, read_config, remove, status, write_config, HookStatus,
+    MARKER,
 };
 pub use editor::{config_path, Editor, Event, ParseError};
 pub use envelope::session_start_envelope;

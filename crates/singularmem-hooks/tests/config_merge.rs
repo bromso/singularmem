@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde_json::json;
-use singularmem_hooks::{entries, merge, remove, status, Editor, MARKER};
+use singularmem_hooks::{entries, is_ours, merge, remove, status, Editor, MARKER};
 
 const BIN: &str = "/opt/bin/singularmem";
 
@@ -86,6 +86,92 @@ fn remove_leaves_foreign_entries_byte_identical() {
     let cur = merge(Editor::Cursor, &json!({}), Path::new(BIN));
     let gone = remove(Editor::Cursor, &cur);
     assert_eq!(gone, json!({"version": 1, "hooks": {}}));
+}
+
+#[test]
+fn is_ours_is_structural_not_a_substring_heuristic() {
+    // The binary path need not mention "singularmem" at all.
+    let bin = Path::new("/home/x/bin/sm");
+    let merged = merge(Editor::ClaudeCode, &json!({}), bin);
+    let cmd = merged["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(is_ours(cmd));
+    let twice = merge(Editor::ClaudeCode, &merged, bin);
+    assert_eq!(twice, merged);
+    let removed = remove(Editor::ClaudeCode, &merged);
+    assert_eq!(removed, json!({}));
+
+    // A foreign command that merely mentions `singularmem` in an argument
+    // and isn't in the quoted-`hook`-shape is not ours, and survives
+    // `remove`.
+    let foreign = json!({
+        "hooks": {
+            "Stop": [{"hooks": [{
+                "type": "command",
+                "command": "\"/usr/local/bin/backup\" hook --exclude ~/singularmem"
+            }]}]
+        }
+    });
+    assert!(!is_ours(
+        foreign["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+    ));
+    assert_eq!(remove(Editor::ClaudeCode, &foreign), foreign);
+
+    // A command that mentions our binary and `hook <editor> <event>` but
+    // doesn't start with the leading quote is not ours either.
+    let unquoted = json!({
+        "hooks": {
+            "Stop": [{"hooks": [{
+                "type": "command",
+                "command": "env FOO=1 \"/opt/singularmem\" hook codex stop"
+            }]}]
+        }
+    });
+    assert!(!is_ours(
+        unquoted["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+    ));
+    assert_eq!(remove(Editor::Codex, &unquoted), unquoted);
+}
+
+#[test]
+fn find_bin_ignores_foreign_commands_in_mixed_group() {
+    let existing = json!({
+        "hooks": {
+            "Stop": [{
+                "hooks": [
+                    {"type": "command", "command": "echo unrelated"},
+                    {"type": "command", "command": format!("\"{BIN}\" hook claude-code stop")}
+                ]
+            }]
+        }
+    });
+    let s = status(Editor::ClaudeCode, &existing);
+    assert!(s.installed);
+    assert_eq!(s.bin.as_deref(), Some(Path::new(BIN)));
+}
+
+#[test]
+fn remove_preserves_key_order() {
+    let existing = json!({
+        "model": "m",
+        "hooks": {
+            "Stop": [{"hooks": [{
+                "type": "command",
+                "command": format!("\"{BIN}\" hook claude-code stop")
+            }]}]
+        },
+        "permissions": {}
+    });
+    let result = remove(Editor::ClaudeCode, &existing);
+    assert_eq!(
+        serde_json::to_string(&result).unwrap(),
+        r#"{"model":"m","permissions":{}}"#
+    );
 }
 
 #[test]

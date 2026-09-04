@@ -4,19 +4,17 @@
 //! ## Detecting "ours"
 //!
 //! The command string we write is `"<bin>" hook <editor> <event>` — the
-//! binary path is double-quoted. A naive `contains("singularmem hook ")`
-//! check breaks when the binary itself is named `singularmem`, because the
-//! closing quote lands between the name and `hook`: `"...singularmem" hook
-//! ...` does *not* contain the substring `singularmem hook ` (the quote is
-//! in the way). Instead, [`MARKER`] is the closing quote plus `" hook "`,
-//! and [`is_ours`] additionally requires the command to mention
-//! `singularmem` somewhere (almost always in the binary path), which
-//! together are specific enough to avoid matching an unrelated command
-//! that happens to invoke some other tool's `hook` subcommand.
+//! binary path is double-quoted. Detection is structural, not a substring
+//! heuristic: [`parse_ours`] requires the command to start with `"`, have a
+//! closing `"`, and have the remainder (trimmed) parse exactly as `hook
+//! <editor> <event>` with a known [`Editor`] and [`Event`]. This can't be
+//! fooled by a binary path that happens to contain `singularmem`, nor by an
+//! unrelated command that merely mentions `singularmem` or `hook`
+//! somewhere in its arguments.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::editor::{Editor, Event};
 use crate::error::{Error, Result};
@@ -25,17 +23,44 @@ use crate::error::{Error, Result};
 ///
 /// This is the closing quote around the binary path, followed by ` hook `.
 /// Kept public so callers can sanity check a command string directly;
-/// prefer [`is_ours`] for classification.
+/// prefer [`is_ours`] (or [`parse_ours`]) for classification.
 pub const MARKER: &str = "\" hook ";
+
+/// Parse `command` as one of ours, returning the binary path, editor, and
+/// event it encodes when it matches.
+///
+/// A command is ours iff it starts with `"`, has a closing `"`, and the
+/// trimmed remainder is exactly `hook <editor> <event>` where `<editor>`
+/// and `<event>` parse as [`Editor`] and [`Event`] respectively.
+#[must_use]
+pub fn parse_ours(command: &str) -> Option<(PathBuf, Editor, Event)> {
+    let rest = command.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let bin = PathBuf::from(&rest[..end]);
+    let tail = rest[end + 1..].trim();
+
+    let mut parts = tail.split(' ');
+    if parts.next()? != "hook" {
+        return None;
+    }
+    let editor: Editor = parts.next()?.parse().ok()?;
+    let event: Event = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if tail != format!("hook {editor} {event}") {
+        return None;
+    }
+
+    Some((bin, editor, event))
+}
 
 /// Whether `command` is one of ours.
 ///
-/// Requires both the quoted-`hook` shape ([`MARKER`]) and a mention of
-/// `singularmem`, since the marker alone (`" hook "`) could in principle
-/// appear in an unrelated command.
+/// See [`parse_ours`] for the structural check this delegates to.
 #[must_use]
 pub fn is_ours(command: &str) -> bool {
-    command.contains(MARKER) && command.contains("singularmem")
+    parse_ours(command).is_some()
 }
 
 /// Result of inspecting an editor's config for our hooks.
@@ -148,6 +173,13 @@ pub fn entries(editor: Editor, bin: &Path) -> Value {
 
 /// Whether a single hook-array element (a Claude/Codex group, or a Cursor
 /// flat entry) is ours.
+///
+/// A Claude/Codex group is a list of `{"type": ..., "command": ...}`
+/// entries; a group is treated as ours if *any* of its commands are ours,
+/// and such a group is removed (or replaced) whole rather than having only
+/// the matching commands stripped out of it. This is safe because the
+/// installer never writes a mixed group: every group we produce contains
+/// exactly one command, ours.
 fn group_is_ours(editor: Editor, group: &Value) -> bool {
     match editor {
         Editor::Cursor => group
@@ -218,48 +250,65 @@ pub fn remove(editor: Editor, existing: &Value) -> Value {
     let Some(mut result) = existing.as_object().cloned() else {
         return existing.clone();
     };
-    let Some(hooks_obj) = result.get("hooks").and_then(Value::as_object).cloned() else {
+    let Some(mut hooks_obj) = result.get("hooks").and_then(Value::as_object).cloned() else {
         return Value::Object(result);
     };
 
-    let mut new_hooks = Map::new();
-    for (event_key, value) in hooks_obj {
-        match value.as_array() {
-            Some(arr) => {
-                let retained: Vec<Value> = arr
-                    .iter()
-                    .filter(|group| !group_is_ours(editor, group))
-                    .cloned()
-                    .collect();
-                if !retained.is_empty() {
-                    new_hooks.insert(event_key, Value::Array(retained));
-                }
-            }
-            None => {
-                new_hooks.insert(event_key, value);
-            }
+    // Mutate `hooks_obj` in place (rather than building a fresh map) and
+    // use `shift_remove` for keys that go away entirely, so the relative
+    // order of whatever event keys survive is left untouched.
+    let event_keys: Vec<String> = hooks_obj.keys().cloned().collect();
+    for event_key in event_keys {
+        let Some(arr) = hooks_obj.get(&event_key).and_then(Value::as_array) else {
+            continue;
+        };
+        let retained: Vec<Value> = arr
+            .iter()
+            .filter(|group| !group_is_ours(editor, group))
+            .cloned()
+            .collect();
+        if retained.is_empty() {
+            hooks_obj.shift_remove(&event_key);
+        } else {
+            hooks_obj.insert(event_key, Value::Array(retained));
         }
     }
 
-    if matches!(editor, Editor::Cursor) || !new_hooks.is_empty() {
-        result.insert("hooks".to_string(), Value::Object(new_hooks));
+    if matches!(editor, Editor::Cursor) || !hooks_obj.is_empty() {
+        result.insert("hooks".to_string(), Value::Object(hooks_obj));
     } else {
-        result.remove("hooks");
+        result.shift_remove("hooks");
     }
 
     Value::Object(result)
 }
 
-/// Extract the binary path from a command string: the text between the
-/// leading `"` and the next `"`.
-fn extract_bin(command: &str) -> Option<PathBuf> {
-    let rest = command.strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(PathBuf::from(&rest[..end]))
+/// The commands carried by a single hook-array element (a Claude/Codex
+/// group, or a Cursor flat entry).
+fn group_commands(editor: Editor, group: &Value) -> Vec<&str> {
+    match editor {
+        Editor::Cursor => group
+            .get("command")
+            .and_then(Value::as_str)
+            .into_iter()
+            .collect(),
+        Editor::ClaudeCode | Editor::Codex => group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .map(|hooks| {
+                hooks
+                    .iter()
+                    .filter_map(|h| h.get("command").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
 }
 
-/// Find the binary path recorded in the first of our entries in `existing`,
-/// scanning every event array under `hooks`.
+/// Find the binary path recorded in the first of our commands in
+/// `existing`, scanning every event array under `hooks`. Foreign commands
+/// sharing a group with one of ours (see [`group_is_ours`]) are ignored:
+/// only commands for which [`parse_ours`] succeeds are considered.
 fn find_bin(editor: Editor, existing: &Value) -> Option<PathBuf> {
     let hooks_obj = existing.get("hooks")?.as_object()?;
     for arr in hooks_obj.values() {
@@ -267,21 +316,10 @@ fn find_bin(editor: Editor, existing: &Value) -> Option<PathBuf> {
             continue;
         };
         for group in arr {
-            if !group_is_ours(editor, group) {
-                continue;
-            }
-            let command = match editor {
-                Editor::Cursor => group.get("command").and_then(Value::as_str),
-                Editor::ClaudeCode | Editor::Codex => group
-                    .get("hooks")
-                    .and_then(Value::as_array)
-                    .and_then(|hooks| {
-                        hooks
-                            .iter()
-                            .find_map(|h| h.get("command").and_then(Value::as_str))
-                    }),
-            };
-            if let Some(bin) = command.and_then(extract_bin) {
+            if let Some((bin, ..)) = group_commands(editor, group)
+                .into_iter()
+                .find_map(parse_ours)
+            {
                 return Some(bin);
             }
         }
@@ -289,14 +327,33 @@ fn find_bin(editor: Editor, existing: &Value) -> Option<PathBuf> {
     None
 }
 
+/// Whether any of our hook entries are present in `existing`.
+fn has_ours(editor: Editor, existing: &Value) -> bool {
+    existing
+        .get("hooks")
+        .and_then(Value::as_object)
+        .is_some_and(|hooks_obj| {
+            hooks_obj.values().any(|arr| {
+                arr.as_array()
+                    .is_some_and(|arr| arr.iter().any(|group| group_is_ours(editor, group)))
+            })
+        })
+}
+
 /// Inspect `existing` for our hooks: whether installed, which binary path
 /// they point at, and whether that binary still exists on disk.
+///
+/// `installed` reflects whether any of our entries are present at all,
+/// independent of whether a binary path could be extracted from one of
+/// them; `bin` is populated separately via [`parse_ours`] and may be
+/// `None` even when `installed` is `true`.
 #[must_use]
 pub fn status(editor: Editor, existing: &Value) -> HookStatus {
+    let installed = has_ours(editor, existing);
     let bin = find_bin(editor, existing);
     let bin_exists = bin.as_deref().is_some_and(Path::exists);
     HookStatus {
-        installed: bin.is_some(),
+        installed,
         bin,
         bin_exists,
     }
@@ -349,12 +406,21 @@ pub fn write_config(path: &Path, value: &Value) -> Result<()> {
     tmp_name.push(".tmp");
     let tmp_path = PathBuf::from(tmp_name);
 
-    std::fs::write(&tmp_path, &text).map_err(|source| Error::Io {
-        path: tmp_path.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp_path, path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    let result = std::fs::write(&tmp_path, &text)
+        .map_err(|source| Error::Io {
+            path: tmp_path.clone(),
+            source,
+        })
+        .and_then(|()| {
+            std::fs::rename(&tmp_path, path).map_err(|source| Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        });
+
+    if result.is_err() {
+        // Best-effort: don't leave a stray `.tmp` sibling behind.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
