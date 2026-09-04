@@ -327,18 +327,33 @@ Configurable via `StoreOptions.index_path` in the Rust library; the CLI's
 `--store PATH` flag implies `PATH.tantivy/` and there is no separate
 override at v0.2.0.
 
-### Schema (Tantivy 0.22.1)
+### Schema (Tantivy 0.22.1), sidecar schema v0.3.0
 
-| Field name   | Type     | Options                       | Purpose |
-|--------------|----------|-------------------------------|---------|
-| `content`    | text     | TEXT + STORED                 | Searchable item text; default-search field. |
-| `tags`       | text     | STRING + STORED               | Exact-match tag queries via `tags:value`. |
-| `source`     | text     | TEXT + STORED                 | Tokenized provenance label; default-search field. |
-| `id`         | text     | STRING + STORED               | ULID for hit→Item lookup. |
-| `created_at` | date     | INDEXED + STORED + FAST       | Range filtering (reserved for v0.3+). |
-| `supersedes` | text     | STRING + STORED               | Revision pointer (reserved for v0.3+). |
+| Field name        | Type     | Options                  | Purpose |
+|-------------------|----------|--------------------------|---------|
+| `content`         | text     | TEXT + STORED            | Searchable item text; default-search field. |
+| `tags`            | text     | STRING + STORED          | Exact-match tag queries via `tags:value`. |
+| `source`          | text     | TEXT + STORED            | Tokenized provenance label; default-search field. |
+| `id`              | text     | STRING + STORED          | ULID for hit→Item lookup. |
+| `created_at`      | date     | INDEXED + STORED + FAST  | Range filtering (reserved for v0.3+). |
+| `supersedes`      | text     | STRING + STORED          | Revision pointer (reserved for v0.3+). |
+| `scope`           | text     | STRING + STORED          | The item's own scope path; backs an exact scope filter. |
+| `scope_ancestors` | text     | STRING                   | Multi-valued: one value per prefix of `scope` (`a`, `a/b`, `a/b/c` for scope `a/b/c`); backs a descendant-inclusive scope filter as a single term lookup. Not stored — derivable from `scope`. |
 
-`metadata` is intentionally NOT indexed in v0.2.0.
+Unscoped items carry neither field. A scope filter is therefore also an
+"is scoped" filter: an item with no scope never matches one.
+
+`metadata` is intentionally NOT indexed.
+
+### Schema version and pre-v0.18.0 sidecars
+
+The `scope` and `scope_ancestors` fields were added in v0.18.0 (sidecar
+schema v0.3.0). Tantivy refuses to open a directory whose stored schema
+differs from the one supplied, so a sidecar written by an earlier release
+fails to open with `Error::IndexSchemaMismatch { path }`; the message
+directs the user to `singularmem reindex`, which rebuilds the sidecar from
+`SQLite`. There is no in-place migration — the sidecar is a derived
+artefact and rebuilding is always safe.
 
 ### Rebuild from SQLite
 

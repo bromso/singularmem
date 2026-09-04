@@ -4,8 +4,25 @@ use tantivy::query::{BooleanQuery, Occur, Query as TantivyQuery, QueryParser, Te
 use tantivy::schema::IndexRecordOption;
 use tantivy::Term;
 
+use singularmem_core::ScopeFilter;
+
 use crate::error::{Error, Result};
-use crate::schema::build_schema;
+use crate::schema::{build_schema, Fields};
+
+/// The `Must` clause that restricts a query to `filter`.
+///
+/// An exact filter matches the item's own `scope`; a descendant-inclusive one
+/// matches `scope_ancestors`, which carries one value per prefix of the
+/// item's scope (so the subtree test is a single term lookup).
+pub(crate) fn scope_clause(fields: Fields, filter: &ScopeFilter) -> Box<dyn TantivyQuery> {
+    let field = if filter.exact {
+        fields.scope
+    } else {
+        fields.scope_ancestors
+    };
+    let term = Term::from_field_text(field, &filter.path);
+    Box::new(TermQuery::new(term, IndexRecordOption::Basic))
+}
 
 /// Schema field for `QueryBuilder::term`.
 #[derive(Copy, Clone, Debug)]
@@ -41,6 +58,21 @@ impl Query {
             .parse_query(query_str)
             .map_err(|e| Error::QueryParse(format!("{e}")))?;
         Ok(Self { inner })
+    }
+
+    /// Wrap this query so only documents matching `filter` are returned.
+    ///
+    /// `Index::search` applies `SearchOptions::scope` itself, so this is for
+    /// SDK callers composing a query by hand.
+    #[must_use]
+    pub fn scoped(self, filter: &ScopeFilter) -> Self {
+        let (_schema, fields) = build_schema();
+        Self {
+            inner: Box::new(BooleanQuery::new(vec![
+                (Occur::Must, self.inner),
+                (Occur::Must, scope_clause(fields, filter)),
+            ])),
+        }
     }
 }
 

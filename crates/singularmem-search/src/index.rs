@@ -37,8 +37,9 @@ impl Index {
     /// Open (or create) a Tantivy index at the given directory.
     ///
     /// # Errors
-    /// Returns `Error::Tantivy` if Tantivy fails to open or create the index
-    /// (e.g. the directory exists but contains incompatible segment files).
+    /// Returns `Error::IndexSchemaMismatch` if the directory holds a sidecar
+    /// built with an older schema, or `Error::Tantivy` if Tantivy fails to
+    /// open or create the index (e.g. incompatible segment files).
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(dir, IndexOptions::default())
     }
@@ -59,9 +60,17 @@ impl Index {
                 path: dir.to_path_buf(),
                 reason: format!("could not open Tantivy directory: {e}"),
             })?;
-        let inner = TantivyIndex::open_or_create(mmap_dir, schema).map_err(|e| Error::Tantivy {
-            context: "opening Tantivy index",
-            source: e,
+        // A sidecar written before the scope fields existed reports its schema
+        // difference as `SchemaError`; surface that as the actionable
+        // "rebuild me" error rather than a raw Tantivy failure.
+        let inner = TantivyIndex::open_or_create(mmap_dir, schema).map_err(|e| match e {
+            tantivy::TantivyError::SchemaError(_) => Error::IndexSchemaMismatch {
+                path: dir.to_path_buf(),
+            },
+            other => Error::Tantivy {
+                context: "opening Tantivy index",
+                source: other,
+            },
         })?;
 
         let writer = inner
@@ -100,6 +109,10 @@ impl Index {
 
     /// Execute a query and return ranked hits.
     ///
+    /// When `options.scope` is set, the query is `AND`-ed with a scope clause
+    /// so out-of-scope documents count neither towards the hits nor towards
+    /// `total_matched`.
+    ///
     /// # Errors
     /// Returns `Error::Tantivy` on index-read failure.
     pub fn search(
@@ -117,9 +130,27 @@ impl Index {
         let start = Instant::now();
         let searcher = self.reader.searcher();
 
+        // Moved out of `options` so the rest of the struct stays usable while
+        // this method owns the (non-`Copy`) filter.
+        let scope = options.scope;
+
+        // `Query` is opaque and not `Clone`, so the scope clause is composed
+        // here against a `box_clone` of the caller's query rather than by
+        // consuming it via `Query::scoped`.
+        let effective: Box<dyn tantivy::query::Query> = match &scope {
+            None => query.inner.box_clone(),
+            Some(filter) => Box::new(tantivy::query::BooleanQuery::new(vec![
+                (tantivy::query::Occur::Must, query.inner.box_clone()),
+                (
+                    tantivy::query::Occur::Must,
+                    crate::query::scope_clause(self.fields, filter),
+                ),
+            ])),
+        };
+
         let collector = TopDocs::with_limit(options.limit + options.offset);
         let (top_docs, total) = searcher
-            .search(&*query.inner, &(collector, Count))
+            .search(&*effective, &(collector, Count))
             .map_err(|e| Error::Tantivy {
                 context: "executing search",
                 source: e,
@@ -128,7 +159,7 @@ impl Index {
         // Snippet generator (only build if requested).
         let snippet_gen = if options.include_snippets {
             Some(
-                SnippetGenerator::create(&searcher, &*query.inner, self.fields.content).map_err(
+                SnippetGenerator::create(&searcher, &*effective, self.fields.content).map_err(
                     |e| Error::Tantivy {
                         context: "building snippet generator",
                         source: e,

@@ -848,6 +848,7 @@ fn cmd_search(store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
         fetch_multiplier: args.fetch_multiplier,
         rrf_k: args.rrf_k,
         include_snippets: !args.no_snippets,
+        scope: None,
     };
 
     // Open whichever indexes the resolved mode requires.
@@ -960,6 +961,7 @@ fn cmd_retrieve(store: &Store, store_path: &Path, args: &RetrieveArgs) -> Result
         fetch_multiplier: args.fetch_multiplier,
         rrf_k: args.rrf_k,
         include_snippets: false, // we use full content, not snippets
+        scope: None,
     };
     let opts = RetrieveOptions {
         max_blocks: args.limit,

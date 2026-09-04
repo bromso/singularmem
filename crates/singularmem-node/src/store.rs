@@ -623,6 +623,7 @@ fn run_search(
         fetch_multiplier,
         rrf_k,
         include_snippets: false, // snippets not exposed in 5b
+        scope: None,
     };
     let results = searcher
         .search(query, &opts)
@@ -728,6 +729,7 @@ fn run_retrieve(
             fetch_multiplier,
             rrf_k,
             include_snippets: false,
+            scope: None,
         },
     };
     retriever

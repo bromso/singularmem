@@ -59,6 +59,14 @@ fn index_item(index: &Index, item: &Item) -> crate::Result<()> {
     for tag in &item.tags {
         doc.add_text(index.fields.tags, tag);
     }
+    if let Some(scope) = &item.scope {
+        doc.add_text(index.fields.scope, scope);
+        // One `scope_ancestors` value per prefix, so a descendant-inclusive
+        // filter is a single term lookup rather than a prefix scan.
+        for anc in singularmem_core::scope::ancestors(scope) {
+            doc.add_text(index.fields.scope_ancestors, anc);
+        }
+    }
     doc.add_date(index.fields.created_at, datetime);
 
     // Scope the writer lock so it is released immediately after add_document.
