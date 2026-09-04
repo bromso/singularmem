@@ -63,7 +63,7 @@ fn open_core_only_round_trip() {
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(meta["_singularmem_format"], "export-v1");
-    assert_eq!(meta["store_format_version"], "3");
+    assert_eq!(meta["store_format_version"], "4");
 
     // Parse each item line as a serde-deserialised Item to prove the wire
     // shape is round-trip-compatible with the type itself.

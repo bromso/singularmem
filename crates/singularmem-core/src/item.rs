@@ -4,55 +4,21 @@
 //! `NewItem` is the to-be-ingested form — the type system prevents callers
 //! from setting an ID that the store does not control.
 
-use std::fmt;
-use std::str::FromStr;
-
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
 
-/// Stable, opaque identifier for a memory item.
-///
-/// Implemented as a [ULID](https://github.com/ulid/spec): 26 characters of
-/// Crockford base32, time-sortable, URL-safe.
-///
-/// # Display and parsing
-///
-/// `Display` always emits uppercase. `FromStr` accepts either case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ItemId(Ulid);
+use crate::id::ulid_id;
 
-impl ItemId {
-    /// Wrap a raw `Ulid`. Crate-internal — public API uses `ingest` to mint IDs.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) const fn from_ulid(u: Ulid) -> Self {
-        Self(u)
-    }
-
-    /// Underlying ULID. Useful for callers that want to inspect the time
-    /// component or convert to bytes.
-    #[must_use]
-    pub const fn as_ulid(&self) -> Ulid {
-        self.0
-    }
-}
-
-impl fmt::Display for ItemId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // ulid::Ulid::Display emits uppercase by default.
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl FromStr for ItemId {
-    type Err = ulid::DecodeError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // ulid::Ulid::from_string accepts case-insensitive Crockford base32.
-        Ulid::from_string(s).map(Self)
-    }
-}
+ulid_id!(
+    /// Stable, opaque identifier for a memory item.
+    ///
+    /// Implemented as a [ULID](https://github.com/ulid/spec): 26 characters of
+    /// Crockford base32, time-sortable, URL-safe.
+    ///
+    /// # Display and parsing
+    ///
+    /// `Display` always emits uppercase. `FromStr` accepts either case.
+    ItemId
+);
 
 /// A persisted memory item. Immutable once stored.
 ///

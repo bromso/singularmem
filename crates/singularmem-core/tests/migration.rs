@@ -1,7 +1,7 @@
-//! Store format migrations (1 → 2 → 3). Builds v1 and v2 stores with raw
-//! SQL (the exact DDL from `docs/formats/store-v1.md` and the 1 → 2
-//! migration statements), opens them with the current binary, and asserts
-//! each is upgraded in place with all data intact.
+//! Store format migrations (1 → 2 → 3 → 4). Builds v1, v2, and v3 stores
+//! with raw SQL (the exact DDL from `docs/formats/store-v1.md` and the
+//! 1 → 2 / 2 → 3 migration statements), opens them with the current binary,
+//! and asserts each is upgraded in place with all data intact.
 
 use rusqlite::Connection;
 use singularmem_core::{Error, Store, StoreOptions};
@@ -47,13 +47,25 @@ fn make_v2(dir: &TempDir) -> std::path::PathBuf {
     path
 }
 
+fn make_v3(dir: &TempDir) -> std::path::PathBuf {
+    let path = make_v2(dir);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE items ADD COLUMN scope TEXT;
+         CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+         UPDATE singularmem_meta SET value = '3' WHERE key = 'format_version';",
+    )
+    .unwrap();
+    path
+}
+
 #[test]
 fn v1_store_migrates_to_v3_on_open() {
     let dir = TempDir::new().unwrap();
     let path = make_v1(&dir);
 
     let store = Store::open(&path).expect("open migrates");
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
 
     let item = store
         .get("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap())
@@ -103,7 +115,7 @@ fn newer_store_still_refused() {
     let path = make_v1(&dir);
     let conn = Connection::open(&path).unwrap();
     conn.execute(
-        "UPDATE singularmem_meta SET value='4' WHERE key='format_version'",
+        "UPDATE singularmem_meta SET value='5' WHERE key='format_version'",
         [],
     )
     .unwrap();
@@ -113,28 +125,62 @@ fn newer_store_still_refused() {
 }
 
 /// Simulates the losing side of a migration race: another process already
-/// completed the 1 -> 2 -> 3 migration chain (full DDL + meta bump) by the
-/// time this one opens the file. `Store::open` must still succeed and see
-/// version 3 — whether it takes the "already current" fast path or
-/// re-enters a migration function's in-transaction re-check, the outcome is
-/// the same.
+/// completed the 3 -> 4 migration (full DDL + meta bump) by the time this
+/// one opens the file. `Store::open` must still succeed and see version 4 —
+/// whether it takes the "already current" fast path or re-enters a
+/// migration function's in-transaction re-check, the outcome is the same.
 #[test]
-fn already_migrated_v2_fixture_opens_cleanly_as_v3() {
+fn already_migrated_v3_fixture_opens_cleanly_as_v4() {
     let dir = TempDir::new().unwrap();
-    let path = make_v2(&dir);
+    let path = make_v3(&dir);
 
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
-            "ALTER TABLE items ADD COLUMN scope TEXT;
-             CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
-             UPDATE singularmem_meta SET value = '3' WHERE key = 'format_version';",
+            "CREATE TABLE entities (
+                 id               TEXT PRIMARY KEY NOT NULL,
+                 name             TEXT NOT NULL,
+                 normalised_name  TEXT NOT NULL,
+                 kind             TEXT,
+                 scope            TEXT,
+                 created_at       TEXT NOT NULL,
+                 CHECK (length(name) > 0)
+             ) STRICT;
+             CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+
+             CREATE TABLE facts (
+                 id              TEXT PRIMARY KEY NOT NULL,
+                 subject_id      TEXT NOT NULL,
+                 predicate       TEXT NOT NULL,
+                 object_id       TEXT,
+                 object_value    TEXT,
+                 valid_from      TEXT,
+                 valid_to        TEXT,
+                 confidence      REAL NOT NULL DEFAULT 1.0,
+                 source_item_id  TEXT,
+                 scope           TEXT,
+                 supersedes      TEXT,
+                 recorded_at     TEXT NOT NULL,
+                 FOREIGN KEY (subject_id) REFERENCES entities(id),
+                 FOREIGN KEY (object_id) REFERENCES entities(id),
+                 FOREIGN KEY (source_item_id) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
+                 FOREIGN KEY (supersedes) REFERENCES facts(id) DEFERRABLE INITIALLY DEFERRED,
+                 CHECK ((object_id IS NULL) <> (object_value IS NULL)),
+                 CHECK (confidence >= 0.0 AND confidence <= 1.0),
+                 CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+             ) STRICT;
+             CREATE INDEX idx_facts_subject   ON facts(subject_id);
+             CREATE INDEX idx_facts_object    ON facts(object_id) WHERE object_id IS NOT NULL;
+             CREATE INDEX idx_facts_predicate ON facts(predicate);
+             CREATE INDEX idx_facts_supersedes ON facts(supersedes) WHERE supersedes IS NOT NULL;
+             CREATE INDEX idx_facts_scope     ON facts(scope) WHERE scope IS NOT NULL;
+             UPDATE singularmem_meta SET value = '4' WHERE key = 'format_version';",
         )
         .unwrap();
     }
 
     let store = Store::open(&path).expect("open of already-migrated fixture succeeds");
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
 }
 
 /// Failure path: the migration's `CREATE UNIQUE INDEX idx_items_external_id`
@@ -184,7 +230,7 @@ fn fresh_store_is_v3_with_external_id_column() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("fresh.db");
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
     let mut item = singularmem_core::NewItem::text("x");
     item.external_id = Some("test:1".into());
     let stored = store.ingest(item).unwrap();
@@ -210,7 +256,7 @@ fn migrated_v1_store_exports_cleanly() {
 
     let meta: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(meta["_kind"], "meta");
-    assert_eq!(meta["store_format_version"], "3");
+    assert_eq!(meta["store_format_version"], "4");
 
     let item: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(item["_kind"], "item");
@@ -229,7 +275,7 @@ fn v2_store_migrates_to_v3_on_open() {
     let dir = TempDir::new().unwrap();
     let path = make_v2(&dir);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
     let item = store
         .get("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap())
         .unwrap();
@@ -297,7 +343,7 @@ fn v2_store_migrates_to_v3_on_open() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(format_version, "3");
+    assert_eq!(format_version, "4");
 
     // Descendant-inclusive query from docs/formats/store-v3.md, using the
     // escaped-LIKE form the reference implementation actually binds: `?2`
@@ -329,7 +375,7 @@ fn v1_store_migrates_through_the_chain_to_v3() {
     let dir = TempDir::new().unwrap();
     let path = make_v1(&dir);
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
     let conn = Connection::open(&path).unwrap();
     let cols: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('items')")
@@ -385,7 +431,7 @@ fn read_only_v2_refuses_to_migrate() {
 fn fresh_store_is_v3_and_round_trips_scope() {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path().join("f.db")).unwrap();
-    assert_eq!(store.format_version().unwrap(), "3");
+    assert_eq!(store.format_version().unwrap(), "4");
     let mut n = singularmem_core::NewItem::text("x");
     n.scope = Some("Proj/Sub".into());
     let stored = store.ingest(n).unwrap();
@@ -408,7 +454,7 @@ fn fresh_store_is_v3_and_round_trips_scope() {
 
 /// Four processes (here: threads) opening the same *non-existent* store at
 /// once all take the fresh-store bootstrap branch. Without a transaction
-/// around the DDL, the losers hit "table singularmem_meta already exists"
+/// around the DDL, the losers hit "table `singularmem_meta` already exists"
 /// and `Store::open` fails — exactly the shape a burst of editor hooks
 /// produces on a brand-new machine.
 #[test]
@@ -433,7 +479,7 @@ fn concurrent_first_open_of_a_fresh_store_all_succeed() {
     for h in handles {
         match h.join().expect("thread panicked") {
             Ok((i, s)) => {
-                assert_eq!(s.format_version().unwrap(), "3", "opener {i}");
+                assert_eq!(s.format_version().unwrap(), "4", "opener {i}");
                 stores.push(s);
             }
             Err(e) => panic!("concurrent Store::open failed: {e}"),
@@ -447,4 +493,73 @@ fn concurrent_first_open_of_a_fresh_store_all_succeed() {
         .query_row("SELECT count(*) FROM singularmem_meta", [], |r| r.get(0))
         .unwrap();
     assert_eq!(rows, 2, "one format_version and one created_at row");
+}
+
+#[test]
+fn v3_store_migrates_to_v4_with_graph_tables() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v3(&dir);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.format_version().unwrap(), "4");
+    drop(store);
+    let conn = Connection::open(&path).unwrap();
+    for t in ["entities", "facts"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [t],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "table {t}");
+    }
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_entities_identity'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn v1_store_migrates_through_the_chain_to_v4() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v1(&dir);
+    assert_eq!(Store::open(&path).unwrap().format_version().unwrap(), "4");
+}
+
+#[test]
+fn failing_3_to_4_leaves_store_at_v3_and_readable() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v3(&dir);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE INDEX idx_facts_subject ON items(source);")
+        .unwrap();
+    drop(conn);
+    let err = Store::open(&path).unwrap_err();
+    assert!(
+        matches!(err, Error::Migration { ref from, to: "4", .. } if from == "3"),
+        "{err:?}"
+    );
+    let conn = Connection::open(&path).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM singularmem_meta WHERE key='format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, "3");
+}
+
+#[test]
+fn read_only_v3_refuses_to_migrate() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v3(&dir);
+    assert!(matches!(
+        Store::open_with_options(&path, StoreOptions { read_only: true }),
+        Err(Error::Migration { .. })
+    ));
 }

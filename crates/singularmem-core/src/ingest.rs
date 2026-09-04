@@ -37,7 +37,7 @@ impl Store {
 
         // Generate ID + timestamp using injected clock+rng.
         let now = self.clock.now();
-        let id = mint_ulid(self, now)?;
+        let id = ItemId::from_ulid(mint_raw_ulid(self, now)?);
 
         // Write under a single transaction.
         let mut conn = self.conn.lock().expect("store mutex poisoned");
@@ -155,7 +155,7 @@ impl Store {
 
             // Generate a new ULID per item; all share the wall-clock instant
             // captured at the start of the batch but differ in random bytes.
-            let id = mint_ulid(self, now)?;
+            let id = ItemId::from_ulid(mint_raw_ulid(self, now)?);
             insert_item_row(&tx, id, now, &item, &normalised_tags, scope.as_deref())?;
 
             out.push(Item {
@@ -232,7 +232,7 @@ impl Store {
             scope,
         } = validate(&item)?;
         let now = self.clock.now();
-        let id = mint_ulid(self, now)?;
+        let id = ItemId::from_ulid(mint_raw_ulid(self, now)?);
 
         let mut conn = self.conn.lock().expect("store mutex poisoned");
         let tx = conn.transaction().map_err(|e| Error::Sqlite {
@@ -400,8 +400,17 @@ fn map_insert_err(e: rusqlite::Error, external_id: Option<&str>, context: &'stat
 /// Mint a fresh ULID using the store's injected rng and the given timestamp.
 ///
 /// This is a free function (not a method) so that `ingest_many` can call it
-/// inside a loop without re-entering the `impl Store` borrow.
-fn mint_ulid(store: &Store, now: Timestamp) -> Result<ItemId> {
+/// inside a loop without re-entering the `impl Store` borrow. Returns the raw
+/// `Ulid` rather than an `ItemId` so it can back any of the store's ULID
+/// newtypes (`ItemId`, `EntityId`, `FactId`).
+///
+/// `pub` rather than `pub(crate)`: `ingest` is a private module, so the two
+/// are equally crate-bounded here and clippy's `redundant_pub_crate` prefers
+/// the plain form.
+///
+/// # Errors
+/// `Error::Validation` if the current wall-clock predates 1970-01-01.
+pub fn mint_raw_ulid(store: &Store, now: Timestamp) -> Result<Ulid> {
     // ulid::Ulid::from_parts takes (timestamp_ms_u64, random_u128).
     let ms = u64::try_from(now.as_millisecond()).map_err(|_| Error::Validation {
         field: "internal:timestamp",
@@ -413,5 +422,5 @@ fn mint_ulid(store: &Store, now: Timestamp) -> Result<ItemId> {
         rng.fill_bytes(&mut random_bytes);
     }
     let random = u128::from_be_bytes(random_bytes);
-    Ok(ItemId::from_ulid(Ulid::from_parts(ms, random)))
+    Ok(Ulid::from_parts(ms, random))
 }

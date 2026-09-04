@@ -1,11 +1,72 @@
-//! SQL DDL for `format_version = 3` and the migration runner.
+//! SQL DDL for `format_version = 4` and the migration runner.
 
 use crate::error::{Error, Result};
 use crate::format::FORMAT_VERSION;
 
-/// The full v3 DDL for a fresh store: v2 plus the nullable, indexed `scope`
-/// column. Spec: `docs/formats/store-v3.md`.
-const DDL_V3: &str = "
+/// DDL applied by the 1 → 2 migration (excluding the `BEGIN`/`COMMIT`
+/// bracketing, which is handled in Rust so the transaction can be inspected
+/// and conditionally rolled back — see `run_migration`).
+const MIGRATE_1_TO_2_DDL: &str = "
+ALTER TABLE items ADD COLUMN external_id TEXT;
+CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
+";
+
+/// DDL applied by the 2 → 3 migration (same transactional shape as 1 → 2;
+/// see `run_migration`).
+const MIGRATE_2_TO_3_DDL: &str = "
+ALTER TABLE items ADD COLUMN scope TEXT;
+CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+";
+
+/// DDL applied by the 3 → 4 migration: the `entities` and `facts` tables
+/// backing the knowledge graph (same transactional shape as 1 → 2 and
+/// 2 → 3; see `run_migration`). Spec:
+/// `docs/superpowers/specs/2026-09-05-knowledge-graph-14-design.md`
+/// § "Store format v4".
+const MIGRATE_3_TO_4_DDL: &str = "
+CREATE TABLE entities (
+    id               TEXT PRIMARY KEY NOT NULL,
+    name             TEXT NOT NULL,
+    normalised_name  TEXT NOT NULL,
+    kind             TEXT,
+    scope            TEXT,
+    created_at       TEXT NOT NULL,
+    CHECK (length(name) > 0)
+) STRICT;
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+
+CREATE TABLE facts (
+    id              TEXT PRIMARY KEY NOT NULL,
+    subject_id      TEXT NOT NULL,
+    predicate       TEXT NOT NULL,
+    object_id       TEXT,
+    object_value    TEXT,
+    valid_from      TEXT,
+    valid_to        TEXT,
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    source_item_id  TEXT,
+    scope           TEXT,
+    supersedes      TEXT,
+    recorded_at     TEXT NOT NULL,
+    FOREIGN KEY (subject_id) REFERENCES entities(id),
+    FOREIGN KEY (object_id) REFERENCES entities(id),
+    FOREIGN KEY (source_item_id) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (supersedes) REFERENCES facts(id) DEFERRABLE INITIALLY DEFERRED,
+    CHECK ((object_id IS NULL) <> (object_value IS NULL)),
+    CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+) STRICT;
+CREATE INDEX idx_facts_subject   ON facts(subject_id);
+CREATE INDEX idx_facts_object    ON facts(object_id) WHERE object_id IS NOT NULL;
+CREATE INDEX idx_facts_predicate ON facts(predicate);
+CREATE INDEX idx_facts_supersedes ON facts(supersedes) WHERE supersedes IS NOT NULL;
+CREATE INDEX idx_facts_scope     ON facts(scope) WHERE scope IS NOT NULL;
+";
+
+/// The full v4 DDL for a fresh store: the v3 schema plus
+/// [`MIGRATE_3_TO_4_DDL`]'s `entities`/`facts` tables, written as a single
+/// self-contained literal so a fresh store's schema reads in one place.
+const DDL_V4: &str = "
 CREATE TABLE singularmem_meta (
     key    TEXT PRIMARY KEY NOT NULL,
     value  TEXT NOT NULL
@@ -38,21 +99,44 @@ CREATE INDEX idx_items_supersedes ON items(supersedes) WHERE supersedes IS NOT N
 CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
-";
 
-/// DDL applied by the 1 → 2 migration (excluding the `BEGIN`/`COMMIT`
-/// bracketing, which is handled in Rust so the transaction can be inspected
-/// and conditionally rolled back — see `run_migration`).
-const MIGRATE_1_TO_2_DDL: &str = "
-ALTER TABLE items ADD COLUMN external_id TEXT;
-CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
-";
+CREATE TABLE entities (
+    id               TEXT PRIMARY KEY NOT NULL,
+    name             TEXT NOT NULL,
+    normalised_name  TEXT NOT NULL,
+    kind             TEXT,
+    scope            TEXT,
+    created_at       TEXT NOT NULL,
+    CHECK (length(name) > 0)
+) STRICT;
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
 
-/// DDL applied by the 2 → 3 migration (same transactional shape as 1 → 2;
-/// see `run_migration`).
-const MIGRATE_2_TO_3_DDL: &str = "
-ALTER TABLE items ADD COLUMN scope TEXT;
-CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+CREATE TABLE facts (
+    id              TEXT PRIMARY KEY NOT NULL,
+    subject_id      TEXT NOT NULL,
+    predicate       TEXT NOT NULL,
+    object_id       TEXT,
+    object_value    TEXT,
+    valid_from      TEXT,
+    valid_to        TEXT,
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    source_item_id  TEXT,
+    scope           TEXT,
+    supersedes      TEXT,
+    recorded_at     TEXT NOT NULL,
+    FOREIGN KEY (subject_id) REFERENCES entities(id),
+    FOREIGN KEY (object_id) REFERENCES entities(id),
+    FOREIGN KEY (source_item_id) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (supersedes) REFERENCES facts(id) DEFERRABLE INITIALLY DEFERRED,
+    CHECK ((object_id IS NULL) <> (object_value IS NULL)),
+    CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+) STRICT;
+CREATE INDEX idx_facts_subject   ON facts(subject_id);
+CREATE INDEX idx_facts_object    ON facts(object_id) WHERE object_id IS NOT NULL;
+CREATE INDEX idx_facts_predicate ON facts(predicate);
+CREATE INDEX idx_facts_supersedes ON facts(supersedes) WHERE supersedes IS NOT NULL;
+CREATE INDEX idx_facts_scope     ON facts(scope) WHERE scope IS NOT NULL;
 ";
 
 /// Apply the 1 → 2 migration.
@@ -74,6 +158,17 @@ pub fn migrate_1_to_2(conn: &mut rusqlite::Connection) -> Result<()> {
 /// version 2.
 pub fn migrate_2_to_3(conn: &mut rusqlite::Connection) -> Result<()> {
     run_migration(conn, "2", "3", MIGRATE_2_TO_3_DDL)
+}
+
+/// Apply the 3 → 4 migration: adds the `entities` and `facts` tables.
+///
+/// # Errors
+///
+/// Returns `Error::Migration { from: "3", to: "4", .. }` if any statement
+/// fails; the transaction is rolled back and the store is left at format
+/// version 3.
+pub fn migrate_3_to_4(conn: &mut rusqlite::Connection) -> Result<()> {
+    run_migration(conn, "3", "4", MIGRATE_3_TO_4_DDL)
 }
 
 /// Run a single-step format migration from `from` to `to`, applying `ddl`.
@@ -136,7 +231,7 @@ fn migration_err(from: &str, to: &'static str, reason: String) -> Error {
     }
 }
 
-/// Apply the current (v3) schema and write `format_version = '3'` to the
+/// Apply the current (v4) schema and write `format_version = '4'` to the
 /// meta table. Used by `Store::open` on a fresh store.
 ///
 /// Takes the write lock up front with `BEGIN IMMEDIATE` and re-reads
@@ -169,9 +264,9 @@ pub fn apply_current(conn: &mut rusqlite::Connection, created_at: &str) -> Resul
     }
 
     let applied = tx
-        .execute_batch(DDL_V3)
+        .execute_batch(DDL_V4)
         .map_err(|e| Error::Sqlite {
-            context: "applying v3 schema",
+            context: "applying v4 schema",
             source: e,
         })
         .and_then(|()| {
