@@ -14,6 +14,26 @@ Format for amendments (one block per amendment, newest first):
 
 Amendment log (newest first):
 
+  - Date:                2026-09-04
+  - Version:             0.2.0 → 0.3.0
+  - Type:                MINOR
+  - Principles changed:  none
+  - Open/Closed Split:   "Editor integration" (editor-triggered hooks for
+                         Claude Code, Codex CLI, Cursor and the `wake-up`
+                         command) added to the OPEN tier; the proprietary
+                         "Convenience automation" bullet narrowed to
+                         scheduled ingest, filesystem watchers, and
+                         pre-built skills/recipes beyond those hooks.
+  - Templates updated:   none
+  - Rationale:           Sub-project 13 (session hooks + wake-up). Auto-saving
+                         a transcript when an editor fires a stop or
+                         pre-compaction event, and loading a project's recent
+                         memory at session start, are part of the core job of
+                         a memory layer (Principle III.b), not premium
+                         convenience. The move is proprietary → open, which
+                         III.a permits and encourages; scheduled ingest and
+                         watchers remain proprietary.
+
   - Date:                2026-05-15
   - Version:             0.0.0 → 0.2.0
   - Type:                Initial ratification
@@ -28,9 +48,9 @@ Amendment log (newest first):
 
 # Singularmem — Project Constitution
 
-**Version:** 0.2.0
+**Version:** 0.3.0
 **Ratification date:** 2026-05-15
-**Last amended:** 2026-05-15
+**Last amended:** 2026-09-04
 
 ---
 
@@ -247,6 +267,11 @@ Principle III.a.
 - **Library SDK:** Rust crates with documented public APIs, plus a
   TypeScript binding via napi-rs as the first non-Rust binding. Python
   is tracked as a separate sub-project, not part of v0.
+- **Editor integration:** editor-triggered hooks (Claude Code, Codex CLI,
+  Cursor) that save transcripts on stop / pre-compaction events and inject
+  recent memory at session start, the `wake-up` command that produces that
+  context, and the `hooks install` tooling that wires them. These are
+  event-driven CLI invocations, not schedulers or watchers.
 
 ### Proprietary (licensed under a proprietary commercial license — full terms TBD with the first proprietary release)
 
@@ -257,8 +282,9 @@ Principle III.a.
   relevance falloff, diff view, tag ribbon. (The visualisation library
   itself is proprietary; the *data* it visualises is in open formats.)
 - **Cross-device sync:** end-to-end encrypted, optional, paid.
-- **Convenience automation:** scheduled ingest, watchers, pre-built
-  skills/recipes for common workflows.
+- **Convenience automation:** scheduled ingest, filesystem watchers, and
+  pre-built skills/recipes for common workflows beyond the open editor
+  hooks (see "Editor integration" above).
 - **Hosted services**, if ever offered: hosted sync relay, hosted backup,
   hosted team coordination. None are planned for v1.
 
