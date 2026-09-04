@@ -199,6 +199,10 @@ impl Store {
     ///
     /// `item.supersedes` is overwritten with `replaces`.
     ///
+    /// The replaced row's `external_id` is cleared unconditionally — even
+    /// when `item` carries none — so an id never survives on a superseded
+    /// row.
+    ///
     /// # Errors
     /// `Error::ReadOnly`, `Error::Validation`, `Error::SupersedesNotFound`
     /// if `replaces` is unknown, `Error::ExternalIdConflict` if the id is

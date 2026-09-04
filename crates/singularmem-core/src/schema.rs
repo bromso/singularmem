@@ -65,7 +65,8 @@ pub fn migrate_1_to_2(conn: &mut rusqlite::Connection) -> Result<()> {
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| migration_err(e.to_string()))?;
 
-    if read_format_version(&tx)?.as_deref() == Some(FORMAT_VERSION) {
+    let current = read_format_version(&tx).map_err(|e| migration_err(e.to_string()))?;
+    if current.as_deref() == Some(FORMAT_VERSION) {
         // Another process already completed the migration before we
         // acquired the write lock; nothing left to do.
         tx.rollback().map_err(|e| migration_err(e.to_string()))?;

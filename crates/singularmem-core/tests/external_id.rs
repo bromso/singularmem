@@ -1,8 +1,10 @@
 //! `external_id` uniqueness conflicts: single-item and bulk ingest.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use singularmem_core::{Error, NewItem, Store};
+use singularmem_core::{Error, IndexHook, Item, NewItem, Store};
 use tempfile::TempDir;
 
 fn store() -> (TempDir, Store) {
@@ -106,4 +108,65 @@ fn ingest_replacing_refused_read_only() {
         ro.ingest_replacing(keyed("v2", "k"), old_id),
         Err(Error::ReadOnly { .. })
     ));
+}
+
+#[test]
+fn ingest_replacing_conflicts_when_third_item_holds_id() {
+    let (_d, s) = store();
+    let a = s.ingest(keyed("a", "k")).unwrap();
+    let b = s.ingest(keyed("b", "j")).unwrap();
+
+    // Ask B to be superseded by an item claiming A's id: A still holds it.
+    let err = s.ingest_replacing(keyed("x", "k"), b.id).unwrap_err();
+    assert!(
+        matches!(err, Error::ExternalIdConflict { ref external_id } if external_id == "k"),
+        "got {err:?}"
+    );
+
+    // Nothing moved: no new row, and B kept the id the failed call cleared.
+    assert_eq!(s.list().unwrap().count(), 2);
+    assert_eq!(s.get(a.id).unwrap().external_id.as_deref(), Some("k"));
+    assert_eq!(s.get(b.id).unwrap().external_id.as_deref(), Some("j"));
+}
+
+/// Records the id of every item handed to `on_ingest`, plus commit calls.
+struct RecordingHook {
+    ingested: Arc<Mutex<Vec<String>>>,
+    commits: Arc<AtomicUsize>,
+}
+
+impl IndexHook for RecordingHook {
+    fn on_ingest(&self, item: &Item) -> singularmem_core::Result<()> {
+        self.ingested.lock().unwrap().push(item.id.to_string());
+        Ok(())
+    }
+    fn on_reindex(&self, _item: &Item) -> singularmem_core::Result<()> {
+        Ok(())
+    }
+    fn commit(&self) -> singularmem_core::Result<()> {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+fn ingest_replacing_fires_hook_for_new_item() {
+    let dir = TempDir::new().unwrap();
+    let ingested = Arc::new(Mutex::new(Vec::new()));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let hook = Box::new(RecordingHook {
+        ingested: Arc::clone(&ingested),
+        commits: Arc::clone(&commits),
+    });
+    let s = Store::open_with_hook(dir.path().join("s.db"), hook).unwrap();
+
+    let old = s.ingest(keyed("v1", "k")).unwrap();
+    let new = s.ingest_replacing(keyed("v2", "k"), old.id).unwrap();
+
+    assert_eq!(
+        *ingested.lock().unwrap(),
+        vec![old.id.to_string(), new.id.to_string()],
+        "the successor is indexed like any other ingest"
+    );
+    assert_eq!(commits.load(Ordering::SeqCst), 2);
 }

@@ -180,3 +180,32 @@ fn fresh_store_is_v2_with_external_id_column() {
         Some("test:1")
     );
 }
+
+/// Plan acceptance criterion 5: a v1 store written by an older binary opens
+/// under the current one and exports cleanly at `store_format_version = 2`.
+#[test]
+fn migrated_v1_store_exports_cleanly() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v1(&dir);
+
+    let store = Store::open(&path).expect("open migrates");
+    let mut out: Vec<u8> = Vec::new();
+    store.export(&mut out).expect("export");
+    let text = String::from_utf8(out).unwrap();
+    let mut lines = text.lines();
+
+    let meta: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(meta["_kind"], "meta");
+    assert_eq!(meta["store_format_version"], "2");
+
+    let item: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+    assert_eq!(item["_kind"], "item");
+    assert_eq!(item["id"], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    assert_eq!(item["content"], "legacy item");
+    assert_eq!(item["tags"], serde_json::json!(["old"]));
+    assert!(
+        item.get("external_id").is_none(),
+        "a migrated legacy row carries no external_id: {item}"
+    );
+    assert!(lines.next().is_none(), "exactly one item line");
+}
