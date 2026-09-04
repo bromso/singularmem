@@ -368,6 +368,14 @@ class Store {
   export() {
     return this._native.export()
   }
+
+  scopes() {
+    return this._native.scopes()
+  }
+
+  setScope(id, scope) {
+    return this._native.setScope(id, scope).then(liftItem)
+  }
 }
 
 // Construct the frozen `adapters` namespace from the four native classes.

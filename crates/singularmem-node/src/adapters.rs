@@ -187,9 +187,7 @@ fn napi_ctx_to_core(ctx: crate::types::RetrievedContext) -> singularmem_retrieve
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             created_at: jiff::Timestamp::from_millisecond(b.created_at as i64)
                 .unwrap_or_else(|_| jiff::Timestamp::now()),
-            // The napi-facing `MemoryBlock` doesn't carry scope yet (out of
-            // scope for sub-project 12's Task 4); adapters don't render it.
-            scope: None,
+            scope: b.scope,
         })
         .collect();
     singularmem_retrieve::RetrievedContext {
@@ -220,6 +218,7 @@ mod tests {
                 source: Some("test".to_string()),
                 tags: vec!["t1".to_string()],
                 created_at: 1_700_000_000_000.0,
+                scope: None,
             }],
         }
     }
