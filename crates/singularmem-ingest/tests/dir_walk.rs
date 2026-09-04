@@ -95,3 +95,42 @@ fn missing_root_is_not_found() {
         Err(singularmem_ingest::Error::NotFound { .. })
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn walk_error_reports_failing_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let d = TempDir::new().unwrap();
+    let locked = d.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("x.txt"), "hi").unwrap();
+
+    let mut perms = fs::metadata(&locked).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&locked, perms).unwrap();
+
+    if fs::read_dir(&locked).is_ok() {
+        eprintln!("skipping walk_error_reports_failing_path: running as root, permissions ignored");
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&locked, perms).unwrap();
+        return;
+    }
+
+    let w = DirectoryWalker::new(d.path()).unwrap();
+    let errors: Vec<_> = w.items().filter_map(std::result::Result::err).collect();
+
+    let mut perms = fs::metadata(&locked).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&locked, perms).unwrap();
+
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            singularmem_ingest::Error::Io { path, .. }
+                if path.components().any(|c| c.as_os_str() == "locked")
+        )),
+        "expected an Io error under `locked`, got: {errors:?}"
+    );
+}

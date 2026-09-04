@@ -68,6 +68,7 @@ impl DirectoryWalker {
             self.filtered.set(self.filtered.get() + 1);
             return Ok(Vec::new());
         }
+        let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let Ok(text) = String::from_utf8(bytes) else {
             self.filtered.set(self.filtered.get() + 1);
             return Ok(Vec::new());
@@ -106,7 +107,7 @@ impl DirectoryWalker {
                         "path": abs_str,
                         "rel_path": rel_str,
                         "sha256": sha256,
-                        "size_bytes": meta.len(),
+                        "size_bytes": size_bytes,
                         "chunk_index": i,
                         "chunk_count": chunk_count,
                     }),
@@ -133,10 +134,13 @@ impl Source for DirectoryWalker {
             .sort_by_file_path(std::cmp::Ord::cmp)
             .build();
         Box::new(walker.flat_map(move |entry| match entry {
-            Err(e) => vec![Err(Error::Io {
-                path: self.root.clone(),
-                source: std::io::Error::other(e.to_string()),
-            })],
+            Err(e) => {
+                let path = walk_error_path(&e, &self.root);
+                vec![Err(Error::Io {
+                    path,
+                    source: std::io::Error::other(e.to_string()),
+                })]
+            }
             Ok(entry) => {
                 if !entry.file_type().is_some_and(|t| t.is_file()) {
                     return Vec::new();
@@ -151,5 +155,14 @@ impl Source for DirectoryWalker {
 
     fn filtered_count(&self) -> usize {
         self.filtered.get()
+    }
+}
+
+/// Extracts the path a walker error is associated with, falling back to
+/// `root` when the error carries none.
+fn walk_error_path(e: &ignore::Error, root: &Path) -> PathBuf {
+    match e {
+        ignore::Error::WithPath { path, .. } => path.clone(),
+        _ => root.to_path_buf(),
     }
 }
