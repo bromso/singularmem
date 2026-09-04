@@ -354,6 +354,42 @@ impl Store {
         Ok(usize::try_from(n).unwrap_or(0))
     }
 
+    /// Number of items matching the union (OR) of `filters`. Unlike calling
+    /// `count_scoped` once per filter and summing, an item matching more
+    /// than one filter (e.g. filters on `a` and `a/b`, both of which match
+    /// an item scoped to `a/b`) is counted once, not once per match. An
+    /// empty `filters` slice returns `0`.
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub fn count_scoped_any(&self, filters: &[ScopeFilter]) -> Result<usize> {
+        if filters.is_empty() {
+            return Ok(0);
+        }
+        let mut clauses: Vec<String> = Vec::with_capacity(filters.len());
+        let mut params: Vec<String> = Vec::new();
+        for f in filters {
+            let (clause, binds) = f.sql_clause();
+            clauses.push(format!("({clause})"));
+            params.extend(binds);
+        }
+        let sql = format!("SELECT COUNT(*) FROM items WHERE {}", clauses.join(" OR "));
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let n: i64 = conn
+            .query_row(&sql, rusqlite::params_from_iter(params.iter()), |r| {
+                r.get(0)
+            })
+            .map_err(|e| Error::Sqlite {
+                context: "counting scoped items (union)",
+                source: e,
+            })?;
+        drop(conn);
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
     /// The scope of one item (cheap point read, no payload).
     ///
     /// # Errors

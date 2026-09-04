@@ -23,8 +23,14 @@ impl ScopeSet {
     /// (`claude-code/<b>`, `codex/<b>`, `cursor/<b>`) and, when
     /// `include_files`, `files/<b>`. A basename that is not a valid scope
     /// segment yields an empty set.
+    ///
+    /// `dir` is canonicalised first (falling back to `dir` unchanged if
+    /// canonicalisation fails, e.g. the path does not exist) so that `.` and
+    /// `..` — whose `Path::file_name` is `None` — resolve to the real
+    /// basename instead of silently yielding an empty scope set.
     #[must_use]
     pub fn for_project(dir: &Path, include_files: bool) -> Self {
+        let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let Some(base) = dir.file_name().and_then(|b| b.to_str()) else {
             return Self(Vec::new());
         };
@@ -85,10 +91,12 @@ pub struct Wakeup {
 /// Propagates store errors.
 pub fn build(store: &Store, scopes: &ScopeSet, opts: &WakeupOptions) -> crate::Result<Wakeup> {
     let start = Instant::now();
+    // `count_scoped_any` unions the filters in one query so an item in more
+    // than one scope (e.g. `a` and `a/b`) is counted once, not once per
+    // matching filter.
+    let total = store.count_scoped_any(&scopes.0)?;
     let mut items = Vec::new();
-    let mut total = 0usize;
     for f in &scopes.0 {
-        total += store.count_scoped(Some(f))?;
         items.extend(store.recent(Some(f), opts.limit)?);
     }
     // Newest first across scopes, then keep `limit`, then chronological.

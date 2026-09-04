@@ -1435,6 +1435,27 @@ fn ingest_transcript_missing_path_is_exit_2() {
 }
 
 #[test]
+fn ingest_transcript_with_explicit_path_does_not_need_home() {
+    // `resolve_ingest_files`'s default root (`$HOME/.claude/projects`) is
+    // only computed when `paths` is empty; an explicit path must not require
+    // `HOME` to be resolvable at all.
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let fx = fixture_transcripts();
+    singularmem()
+        .env_remove("HOME")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest-transcript",
+            fx.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1) // malformed line still counts, per the other fixture tests
+        .stderr(predicate::str::contains("ingested 4"));
+}
+
+#[test]
 fn ingest_dir_tracks_changes_via_supersedes() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("store.db");
@@ -1952,6 +1973,45 @@ fn wake_up_test_store() -> (TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn wake_up_project_dot_resolves_via_canonicalize() {
+    // `Path::new(".").file_name()` is `None`, so before the fix
+    // `ScopeSet::for_project` silently returned an empty scope set for
+    // `--project .` — a plausible, common invocation (run from the project
+    // root). `--project .` must canonicalise to the real directory and
+    // derive its basename, same as passing the absolute path would.
+    let dir = TempDir::new().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    singularmem()
+        .args([
+            "--store",
+            db_s,
+            "ingest",
+            "--content",
+            "note",
+            "--scope",
+            "claude-code/proj",
+        ])
+        .assert()
+        .success();
+
+    let out = singularmem()
+        .current_dir(&proj)
+        .args(["--store", db_s, "wake-up", "--project", "."])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with(
+        "# Singularmem wake-up — claude-code/proj, codex/proj, cursor/proj — 1 items, showing last 1\n"
+    ));
+}
+
+#[test]
 fn wake_up_text_format_defaults_to_project_editor_scopes() {
     let (_dir, db) = wake_up_test_store();
     let db_s = db.to_str().unwrap();
@@ -2011,6 +2071,28 @@ fn wake_up_hook_and_json_formats() {
         .stdout
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .contains("elsewhere"));
+
+    let out = singularmem()
+        .args([
+            "--store",
+            db_s,
+            "wake-up",
+            "--scope",
+            "claude-code/other",
+            "--format",
+            "codex-hook",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
     assert!(v["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap()
@@ -2086,6 +2168,12 @@ fn wake_up_repeatable_scope_dedups_overlapping_filters() {
 
     // Repeatable --scope with overlapping filters must not duplicate ids
     // (sub-project 13 task 5 follow-up: see wakeup::build's HashSet dedup).
+    // This store's items don't tie on created_at, so this test doesn't
+    // discriminate the old adjacent-`dedup_by` bug from the fix — that
+    // coverage lives in singularmem-retrieve's
+    // build_dedups_items_seen_via_overlapping_scope_filters (fixed clock,
+    // forced tie). This test instead covers the end-to-end CLI wiring and
+    // the union `total`.
     let out = singularmem()
         .args([
             "--store",
@@ -2113,4 +2201,9 @@ fn wake_up_repeatable_scope_dedups_overlapping_filters() {
     let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
     assert_eq!(ids.len(), unique.len(), "no duplicate ids: {ids:?}");
     assert!(!ids.is_empty());
+    // `claude-code` matches both `claude-code/proj` and `claude-code/other`
+    // (2 items); `claude-code/other` matches `claude-code/other` again (1
+    // more). The union is 2 distinct items, not the 3 a naive per-filter sum
+    // would give.
+    assert_eq!(v["total"], 2);
 }

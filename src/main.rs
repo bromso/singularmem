@@ -409,7 +409,9 @@ struct WakeUpArgs {
     /// Newest items to include.
     #[arg(long, default_value_t = 20)]
     limit: usize,
-    /// Rendered byte budget; oldest blocks are dropped first to fit.
+    /// Rendered byte budget; oldest blocks are dropped first to fit
+    /// (applies to the rendered text; hook envelopes add a few bytes of
+    /// JSON).
     #[arg(long, default_value_t = 8192)]
     max_bytes: usize,
     /// Which adapter to use for formatting.
@@ -854,16 +856,20 @@ fn ingest_files<S: singularmem_ingest::Source>(
 }
 
 /// Resolve the directories/files a bulk-ingest command should scan: `paths`
-/// if non-empty, otherwise a single `default_root`. Each root is expanded
+/// if non-empty, otherwise a single default root. Each root is expanded
 /// to files via `discover`; a root that is neither a directory nor a file
 /// is `Error::NotFound`.
+///
+/// `default_root` is a closure rather than an eager `PathBuf` and is called
+/// only when `paths` is empty, so a command given explicit paths never needs
+/// `HOME` (or whatever the default root depends on) to be resolvable.
 fn resolve_ingest_files(
     paths: &[PathBuf],
-    default_root: PathBuf,
+    default_root: impl FnOnce() -> Result<PathBuf, CliError>,
     discover: impl Fn(&Path) -> singularmem_ingest::Result<Vec<PathBuf>>,
 ) -> Result<Vec<PathBuf>, CliError> {
     let roots: Vec<PathBuf> = if paths.is_empty() {
-        vec![default_root]
+        vec![default_root()?]
     } else {
         paths.to_vec()
     };
@@ -899,11 +905,16 @@ fn cmd_ingest_transcript(store: &Store, args: &IngestTranscriptArgs) -> Result<(
         .map(singularmem_core::scope::validate)
         .transpose()?;
 
-    let default_root = dirs::home_dir()
-        .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?
-        .join(".claude")
-        .join("projects");
-    let files = resolve_ingest_files(&args.paths, default_root, |p| discover_transcripts(p))?;
+    let files = resolve_ingest_files(
+        &args.paths,
+        || {
+            Ok(dirs::home_dir()
+                .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?
+                .join(".claude")
+                .join("projects"))
+        },
+        |p| discover_transcripts(p),
+    )?;
 
     let project = canonicalize_project(args.project.as_ref());
     let mut total = Report::default();
@@ -947,9 +958,14 @@ fn cmd_ingest_codex(store: &Store, args: &IngestCodexArgs) -> Result<(), CliErro
         .map(singularmem_core::scope::validate)
         .transpose()?;
 
-    let default_root = default_codex_root()
-        .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))?;
-    let files = resolve_ingest_files(&args.paths, default_root, |p| discover_codex_sessions(p))?;
+    let files = resolve_ingest_files(
+        &args.paths,
+        || {
+            default_codex_root()
+                .ok_or_else(|| CliError::Usage("cannot determine home directory".into()))
+        },
+        |p| discover_codex_sessions(p),
+    )?;
 
     let project = canonicalize_project(args.project.as_ref());
     let mut total = Report::default();
@@ -1168,8 +1184,15 @@ fn cmd_wake_up(store: &Store, args: &WakeUpArgs) -> Result<(), CliError> {
     use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
 
     let set = if args.scope.is_empty() {
-        let dir = match &args.project {
-            Some(p) => p.clone(),
+        // Route through `canonicalize_project` — the same helper the ingest
+        // commands use — so `--project .` (and any other relative path)
+        // resolves to the real directory before `ScopeSet::for_project`
+        // derives a basename from it. `for_project` also canonicalises
+        // internally, so this is belt-and-suspenders, not load-bearing on
+        // its own; keeping both layers in agreement avoids surprises if one
+        // changes without the other.
+        let dir = match canonicalize_project(args.project.as_ref()) {
+            Some(p) => p,
             None => std::env::current_dir()?,
         };
         ScopeSet::for_project(&dir, args.include_files)
