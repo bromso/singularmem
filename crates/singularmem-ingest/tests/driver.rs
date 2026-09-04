@@ -1,5 +1,6 @@
 use std::fs;
 
+use serde_json::json;
 use singularmem_core::{NewItem, Store};
 use singularmem_ingest::{ingest_source, DirectoryWalker, Report, Source};
 use tempfile::TempDir;
@@ -121,4 +122,59 @@ fn large_batches_are_split() {
     let r = ingest_source(&s, &Fixed(items), false).unwrap();
     assert_eq!(r.ingested, 1203);
     assert_eq!(s.list().unwrap().count(), 1203);
+}
+
+#[test]
+fn duplicate_external_id_within_one_run_is_skipped_deterministically() {
+    let d = TempDir::new().unwrap();
+    let s = Store::open(d.path().join("s.db")).unwrap();
+    let src = Fixed(vec![
+        keyed("a", "k:1"),
+        keyed("b", "k:2"),
+        keyed("c", "k:1"),
+    ]);
+    let r = ingest_source(&s, &src, false).unwrap();
+    assert_eq!(r.ingested, 2);
+    assert_eq!(r.skipped_existing, 1);
+    assert_eq!(s.list().unwrap().count(), 2);
+    let kept = s.get_by_external_id("k:1").unwrap().unwrap();
+    assert_eq!(kept.content, "a");
+}
+
+#[test]
+fn duplicate_external_id_across_batch_boundary_is_skipped_deterministically() {
+    let d = TempDir::new().unwrap();
+    let s = Store::open(d.path().join("s.db")).unwrap();
+    let items: Vec<NewItem> = (0..501)
+        .map(|i| {
+            let key = if i == 500 {
+                "k:0".to_string()
+            } else {
+                format!("k:{i}")
+            };
+            keyed(&format!("c{i}"), &key)
+        })
+        .collect();
+    let r = ingest_source(&s, &Fixed(items), false).unwrap();
+    assert_eq!(r.ingested, 500);
+    assert_eq!(r.skipped_existing, 1);
+    assert_eq!(s.list().unwrap().count(), 500);
+}
+
+#[test]
+fn existing_item_without_hash_is_not_replaced() {
+    let d = TempDir::new().unwrap();
+    let s = Store::open(d.path().join("s.db")).unwrap();
+    s.ingest(keyed("v1", "k")).unwrap();
+
+    let mut new_version = keyed("v2", "k");
+    new_version.metadata = json!({"sha256": "abc"});
+    let src = Fixed(vec![new_version]);
+    let r = ingest_source(&s, &src, false).unwrap();
+    assert_eq!(r.ingested, 0);
+    assert_eq!(r.skipped_existing, 1);
+
+    assert_eq!(s.list().unwrap().count(), 1);
+    let kept = s.get_by_external_id("k").unwrap().unwrap();
+    assert_eq!(kept.content, "v1");
 }

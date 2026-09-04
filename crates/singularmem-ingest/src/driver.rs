@@ -15,7 +15,8 @@ pub const BATCH_SIZE: usize = 500;
 pub struct Report {
     /// Items written (or, in dry-run, that would have been written).
     pub ingested: usize,
-    /// Items whose `external_id` already existed with identical content hash.
+    /// Items whose `external_id` was already present (in the store, or
+    /// earlier in this run) and did not qualify for replacement.
     pub skipped_existing: usize,
     /// Inputs the source deliberately filtered (tool results, binaries, …).
     pub skipped_filtered: usize,
@@ -32,7 +33,7 @@ pub struct Report {
 /// computed as if it were.
 ///
 /// # Errors
-/// Returns `Err` only for store-level failures (read-only, SQLite). Source
+/// Returns `Err` only for store-level failures (read-only, `SQLite`). Source
 /// errors are counted in `Report::failed`.
 pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Result<Report> {
     let mut report = Report::default();
@@ -55,26 +56,41 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
     let existing: HashSet<String> = store.existing_external_ids(&ids)?;
 
     let mut fresh: Vec<NewItem> = Vec::new();
+    let mut accepted_ids: HashSet<String> = HashSet::new();
     for item in candidates {
         let Some(key) = item.external_id.clone() else {
             fresh.push(item);
             continue;
         };
         if !existing.contains(&key) {
+            if !accepted_ids.insert(key.clone()) {
+                tracing::warn!(
+                    external_id = %key,
+                    source = %source.name(),
+                    "skipping duplicate external_id within this run"
+                );
+                report.skipped_existing += 1;
+                continue;
+            }
             fresh.push(item);
             continue;
         }
-        // Present: unchanged unless the content hash differs.
-        let new_hash = item.metadata.get("sha256").and_then(|v| v.as_str());
+        // Present: replace only when both sides carry a hash and they differ.
+        let new_hash = item
+            .metadata
+            .get("sha256")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let old = store.get_by_external_id(&key)?;
         let old_hash = old
             .as_ref()
             .and_then(|o| o.metadata.get("sha256").and_then(|v| v.as_str()))
             .map(str::to_owned);
-        match (new_hash, old) {
-            (Some(nh), Some(old)) if Some(nh) != old_hash.as_deref() => {
+        let differs = matches!((&new_hash, &old_hash), (Some(a), Some(b)) if a != b);
+        match (differs, old) {
+            (true, Some(o)) => {
                 if !dry_run {
-                    store.ingest_replacing(item, old.id)?;
+                    store.ingest_replacing(item, o.id)?;
                 }
                 report.ingested += 1;
             }
@@ -87,8 +103,10 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
         return Ok(report);
     }
 
-    for batch in fresh.chunks(BATCH_SIZE) {
-        match store.ingest_many(batch.to_vec()) {
+    while !fresh.is_empty() {
+        let n = fresh.len().min(BATCH_SIZE);
+        let batch: Vec<NewItem> = fresh.drain(..n).collect();
+        match store.ingest_many(batch.clone()) {
             Ok(written) => report.ingested += written.len(),
             Err(CoreError::ExternalIdConflict { .. }) => {
                 // Race with a concurrent writer: re-filter and retry once.
@@ -98,16 +116,16 @@ pub fn ingest_source(store: &Store, source: &dyn Source, dry_run: bool) -> Resul
                     .collect();
                 let now_existing = store.existing_external_ids(&ids)?;
                 let retry: Vec<NewItem> = batch
-                    .iter()
+                    .into_iter()
                     .filter(|i| {
                         !i.external_id
                             .as_deref()
                             .is_some_and(|k| now_existing.contains(k))
                     })
-                    .cloned()
                     .collect();
-                report.skipped_existing += batch.len() - retry.len();
-                let written = store.ingest_many(retry).map_err(Error::Core)?;
+                let skipped = n - retry.len();
+                report.skipped_existing += skipped;
+                let written = store.ingest_many(retry)?;
                 report.ingested += written.len();
             }
             Err(e) => return Err(Error::Core(e)),
