@@ -105,23 +105,29 @@ impl CodexRollout {
                 return Some(Vec::new());
             }
         }
-        let text: Vec<&str> = payload
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| {
-                        matches!(
-                            b.get("type").and_then(|t| t.as_str()),
-                            Some("input_text" | "output_text" | "text")
-                        )
+        let content = payload.get("content");
+        let text: String = content.and_then(|c| c.as_str()).map_or_else(
+            || {
+                content
+                    .and_then(|c| c.as_array())
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter(|b| {
+                                matches!(
+                                    b.get("type").and_then(|t| t.as_str()),
+                                    Some("input_text" | "output_text" | "text")
+                                )
+                            })
+                            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<&str>>()
+                            .join("\n\n")
                     })
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let chunks = chunk_text(&text.join("\n\n"), self.chunk_bytes);
+                    .unwrap_or_default()
+            },
+            str::to_string,
+        );
+        let chunks = chunk_text(&text, self.chunk_bytes);
         if chunks.is_empty() {
             return Some(Vec::new());
         }
@@ -206,7 +212,11 @@ impl Source for CodexRollout {
             id: self.file_stem(),
             cwd: None,
         };
-        let mut warned_no_meta = false;
+        // Tracks whether we've reached the first successfully parsed line yet
+        // (blank and malformed lines don't count), so the "no session_meta"
+        // warning fires exactly once, based on that line's kind — not on
+        // `line_no == 1`, which never fires when line 1 is blank or malformed.
+        let mut first_parsed_line_seen = false;
         let iter = BufReader::new(file)
             .lines()
             .enumerate()
@@ -234,6 +244,8 @@ impl Source for CodexRollout {
                         })]
                     }
                 };
+                let is_first_parsed_line = !first_parsed_line_seen;
+                first_parsed_line_seen = true;
                 if parsed.kind == "session_meta" {
                     if let Some(p) = &parsed.payload {
                         if let Some(id) = p.get("id").and_then(|v| v.as_str()) {
@@ -243,8 +255,7 @@ impl Source for CodexRollout {
                     }
                     return Vec::new();
                 }
-                if line_no == 1 && !warned_no_meta {
-                    warned_no_meta = true;
+                if is_first_parsed_line {
                     tracing::warn!(
                         path = %self.path.display(),
                         "rollout has no session_meta line; using file stem as session id"

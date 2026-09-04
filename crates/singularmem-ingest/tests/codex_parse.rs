@@ -65,6 +65,50 @@ fn project_filter_and_override() {
 }
 
 #[test]
+fn accepts_plain_string_content() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("rollout-string-content.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"timestamp":"2026-09-01T10:00:00Z","type":"session_meta","payload":{"id":"sess-str","cwd":"/home/me/proj"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":"plain string content"}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let src = CodexRollout::open(&path).unwrap();
+    let items: Vec<_> = src.items().map(Result::unwrap).collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].content, "plain string content");
+    assert_eq!(items[0].external_id.as_deref(), Some("codex:sess-str:2"));
+}
+
+#[test]
+fn warns_once_when_first_parsed_line_is_blank_then_no_session_meta() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("rollout-blank-first.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            "\n",
+            r#"{"timestamp":"2026-09-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let src = CodexRollout::open(&path).unwrap();
+    let items: Vec<_> = src.items().map(Result::unwrap).collect();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].external_id.as_deref(),
+        Some("codex:rollout-blank-first:2")
+    );
+    assert_eq!(items[0].metadata["cwd"], serde_json::Value::Null);
+}
+
+#[test]
 fn discover_finds_rollout_files_only() {
     let d = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(d.path().join("2026/09/01")).unwrap();
