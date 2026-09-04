@@ -204,19 +204,24 @@ use crate::semantic_query::{SemanticHit, SemanticSearchOptions};
 /// Drop semantic hits whose scope does not satisfy `filter`.
 ///
 /// `USearch` cannot filter during the ANN walk, so this runs over the
-/// overfetched candidate list. With no filter (or no lookup — callers reject
-/// that combination before getting here) the hits pass through untouched.
+/// overfetched candidate list. With no filter, the hits pass through
+/// untouched. `(Some(_), None)` — a filter with no lookup attached — is an
+/// invariant violation: every caller (`search_semantic_only`,
+/// `search_hybrid`) checks for and returns `Error::ScopeLookupMissing`
+/// *before* calling this function, so that combination must never reach
+/// here.
 fn scope_filter_hits(
     hits: Vec<SemanticHit>,
     filter: Option<&ScopeFilter>,
     lookup: Option<&dyn ScopeLookup>,
 ) -> Vec<SemanticHit> {
     match (filter, lookup) {
+        (None, _) => hits,
+        (Some(_), None) => unreachable!("callers must check ScopeLookupMissing before filtering"),
         (Some(f), Some(l)) => hits
             .into_iter()
             .filter(|h| f.matches(l.scope_of(h.id).as_deref()))
             .collect(),
-        _ => hits,
     }
 }
 

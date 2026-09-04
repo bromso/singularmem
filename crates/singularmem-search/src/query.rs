@@ -1,6 +1,8 @@
 //! Query construction: text parsing (Tantivy `QueryParser`) and programmatic builder.
 
-use tantivy::query::{BooleanQuery, Occur, Query as TantivyQuery, QueryParser, TermQuery};
+use tantivy::query::{
+    BooleanQuery, ConstScoreQuery, Occur, Query as TantivyQuery, QueryParser, TermQuery,
+};
 use tantivy::schema::IndexRecordOption;
 use tantivy::Term;
 
@@ -14,6 +16,11 @@ use crate::schema::{build_schema, Fields};
 /// An exact filter matches the item's own `scope`; a descendant-inclusive one
 /// matches `scope_ancestors`, which carries one value per prefix of the
 /// item's scope (so the subtree test is a single term lookup).
+///
+/// Wrapped in a [`ConstScoreQuery`] scored at `0.0` so this clause narrows
+/// the document set without perturbing the BM25 score of the query it is
+/// combined with — a scoped and an unscoped search for the same terms must
+/// rank identically among the documents both return.
 pub(crate) fn scope_clause(fields: Fields, filter: &ScopeFilter) -> Box<dyn TantivyQuery> {
     let field = if filter.exact {
         fields.scope
@@ -21,7 +28,8 @@ pub(crate) fn scope_clause(fields: Fields, filter: &ScopeFilter) -> Box<dyn Tant
         fields.scope_ancestors
     };
     let term = Term::from_field_text(field, &filter.path);
-    Box::new(TermQuery::new(term, IndexRecordOption::Basic))
+    let term_query = TermQuery::new(term, IndexRecordOption::Basic);
+    Box::new(ConstScoreQuery::new(Box::new(term_query), 0.0))
 }
 
 /// Schema field for `QueryBuilder::term`.
