@@ -355,6 +355,11 @@ mod tests {
         };
         let out = handle_memory_retrieve(&args, &config).expect("ok");
         assert!(
+            out.text.contains("number 0"),
+            "expected the in-scope even item to be present: {}",
+            out.text
+        );
+        assert!(
             !out.text.contains("number 1"),
             "expected only even-scoped hits, found an odd one: {}",
             out.text

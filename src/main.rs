@@ -388,8 +388,8 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(code)
         }
-        Err(CliError::StoreReadOnly) => {
-            eprintln!("singularmem: store is opened read-only; bulk ingest requires write access");
+        Err(e @ CliError::StoreReadOnly) => {
+            eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
         Err(CliError::Ingest(singularmem_ingest::Error::NotFound { ref path })) => {
@@ -424,7 +424,7 @@ enum CliError {
     Retrieve(#[from] singularmem_retrieve::Error),
     #[error("{0}")]
     Ingest(#[from] singularmem_ingest::Error),
-    #[error("store is opened read-only; bulk ingest requires write access")]
+    #[error("store is opened read-only; this command requires write access")]
     StoreReadOnly,
     #[error("{failed} item(s) failed during bulk ingest; see warnings above")]
     IngestPartial { failed: usize },
@@ -1167,19 +1167,20 @@ fn cmd_semantic_search(
 
 /// Open the Tantivy sidecar at `index_path` for reindexing, recreating it
 /// from scratch when it was built with an older schema.
-fn open_or_rebuild_index(
-    index_path: &Path,
-    quiet: bool,
-) -> Result<singularmem_search::Index, CliError> {
+fn open_or_rebuild_index(index_path: &Path) -> Result<singularmem_search::Index, CliError> {
     use singularmem_search::Index;
 
     match Index::open(index_path) {
         Ok(index) => Ok(index),
         Err(singularmem_search::Error::IndexSchemaMismatch { .. }) => {
-            if !quiet {
-                eprintln!("rebuilding Tantivy sidecar with the current schema");
-            }
-            std::fs::remove_dir_all(index_path).map_err(CliError::Io)?;
+            // Destructive action: always announce it, even with --quiet.
+            eprintln!("rebuilding Tantivy sidecar with the current schema");
+            std::fs::remove_dir_all(index_path).map_err(|e| {
+                CliError::IndexOpen(format!(
+                    "removing stale sidecar {}: {e}",
+                    index_path.display()
+                ))
+            })?;
             Index::open(index_path).map_err(|e| CliError::IndexOpen(e.to_string()))
         }
         Err(e) => Err(CliError::IndexOpen(e.to_string())),
@@ -1189,7 +1190,7 @@ fn open_or_rebuild_index(
 fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {
     // Phase 1: Tantivy lexical reindex (always).
     let index_path = derive_index_path(store_path);
-    let index = open_or_rebuild_index(&index_path, args.quiet)?;
+    let index = open_or_rebuild_index(&index_path)?;
     let progress = |n: u64| {
         if !args.quiet {
             tracing::info!("reindex (tantivy): {n} items processed");

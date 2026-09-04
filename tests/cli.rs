@@ -1601,6 +1601,32 @@ fn ingest_dir_missing_path_is_exit_2() {
         .stderr(predicate::str::contains("path not found"));
 }
 
+/// Run `search --scope <scope> [--scope-exact] cargo --json` and return the
+/// `hits[].id` values from the JSON output.
+fn scoped_search_hit_ids(db_s: &str, scope: &str, exact: bool) -> Vec<String> {
+    let mut args = vec!["--store", db_s, "search", "--scope", scope];
+    if exact {
+        args.push("--scope-exact");
+    }
+    args.extend(["cargo", "--json"]);
+    let out = singularmem()
+        .args(&args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("\"id\""), "expected JSON hits: {out}");
+    let parsed: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+    parsed["hits"]
+        .as_array()
+        .expect("hits array")
+        .iter()
+        .map(|h| h["id"].as_str().expect("id string").to_string())
+        .collect()
+}
+
 #[test]
 fn bulk_verbs_apply_default_scopes_and_filters_work() {
     let dir = TempDir::new().unwrap();
@@ -1659,22 +1685,19 @@ fn bulk_verbs_apply_default_scopes_and_filters_work() {
         .success()
         .stdout("");
 
-    let out = singularmem()
-        .args([
-            "--store",
-            db_s,
-            "search",
-            "--scope",
-            "claude-code",
-            "cargo",
-            "--json",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    assert!(String::from_utf8(out).unwrap().contains("\"id\""));
+    let claude_code_ids = scoped_search_hit_ids(db_s, "claude-code", false);
+    assert!(!claude_code_ids.is_empty());
+
+    // Descendant-style filter (no --scope-exact) also finds the file hit.
+    let files_ids = scoped_search_hit_ids(db_s, "files", false);
+    assert!(!files_ids.is_empty());
+
+    // The two scoped searches must return disjoint sets of ids.
+    assert!(
+        claude_code_ids.iter().all(|id| !files_ids.contains(id)),
+        "expected disjoint ids: claude-code={claude_code_ids:?} files={files_ids:?}"
+    );
+
     singularmem()
         .args([
             "--store",
