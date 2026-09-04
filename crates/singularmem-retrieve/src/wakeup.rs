@@ -92,8 +92,13 @@ pub fn build(store: &Store, scopes: &ScopeSet, opts: &WakeupOptions) -> crate::R
         items.extend(store.recent(Some(f), opts.limit)?);
     }
     // Newest first across scopes, then keep `limit`, then chronological.
+    // Overlapping scope filters (e.g. `a` and `a/b`) can return the same
+    // item from more than one `store.recent` call; dedup by id via a
+    // `HashSet` rather than `dedup_by` on adjacents, since two duplicates
+    // can end up non-adjacent (or tied on `created_at`) after the sort.
     items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
-    items.dedup_by(|a, b| a.id == b.id);
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.id));
     items.truncate(opts.limit);
     items.reverse();
     let shown = items.len();

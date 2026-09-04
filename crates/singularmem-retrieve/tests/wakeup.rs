@@ -94,6 +94,21 @@ fn render_has_header_and_budget_drops_oldest_first() {
 }
 
 #[test]
+fn build_dedups_items_seen_via_overlapping_scope_filters() {
+    let (_d, s) = store_with(&[("c1", "a/b"), ("c2", "a/b")]);
+    let set = ScopeSet(vec![
+        ScopeFilter::descendants("a").unwrap(),
+        ScopeFilter::descendants("a/b").unwrap(),
+    ]);
+    let w = build(&s, &set, &WakeupOptions::default()).unwrap();
+    // Both filters match both items; each item must appear exactly once.
+    let ids: Vec<_> = w.context.blocks.iter().map(|b| b.id).collect();
+    let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+    assert_eq!(ids.len(), unique.len(), "no duplicate ids: {ids:?}");
+    assert_eq!(unique.len(), 2);
+}
+
+#[test]
 fn empty_store_gives_header_only() {
     let d = TempDir::new().unwrap();
     let s = Store::open(d.path().join("s.db")).unwrap();
