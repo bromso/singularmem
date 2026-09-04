@@ -15,6 +15,9 @@ pub trait ScopeLookup {
     fn scope_of(&self, id: ItemId) -> Option<String>;
 }
 
+/// A store error during lookup is logged and the item is treated as
+/// unscoped; under an active filter that means the hit is dropped rather
+/// than let through (fail-closed).
 impl ScopeLookup for singularmem_core::Store {
     fn scope_of(&self, id: ItemId) -> Option<String> {
         // `Self::scope_of` is the store's inherent method, not this trait's.

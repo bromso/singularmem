@@ -214,23 +214,24 @@ use crate::semantic_query::{SemanticHit, SemanticSearchOptions};
 ///
 /// `USearch` cannot filter during the ANN walk, so this runs over the
 /// overfetched candidate list. With no filter, the hits pass through
-/// untouched. `(Some(_), None)` — a filter with no lookup attached — is an
-/// invariant violation: every caller (`search_semantic_only`,
-/// `search_hybrid`) checks for and returns `Error::ScopeLookupMissing`
-/// *before* calling this function, so that combination must never reach
-/// here.
+/// untouched. `(Some(_), None)` — a filter with no lookup attached — returns
+/// [`Error::ScopeLookupMissing`]: both current callers (`search_semantic_only`,
+/// `search_hybrid`) already check for and return this same error *before*
+/// calling this function, so this arm is redundant defense-in-depth rather
+/// than a reachable path today, but a future caller that skips that
+/// pre-check now gets an honest error instead of a panic.
 fn scope_filter_hits(
     hits: Vec<SemanticHit>,
     filter: Option<&ScopeFilter>,
     lookup: Option<&dyn ScopeLookup>,
-) -> Vec<SemanticHit> {
+) -> Result<Vec<SemanticHit>> {
     match (filter, lookup) {
-        (None, _) => hits,
-        (Some(_), None) => unreachable!("callers must check ScopeLookupMissing before filtering"),
-        (Some(f), Some(l)) => hits
+        (None, _) => Ok(hits),
+        (Some(_), None) => Err(Error::ScopeLookupMissing),
+        (Some(f), Some(l)) => Ok(hits
             .into_iter()
             .filter(|h| f.matches(l.scope_of(h.id).as_deref()))
-            .collect(),
+            .collect()),
     }
 }
 
@@ -329,7 +330,7 @@ impl HybridSearcher<'_> {
         };
         let res = sem.semantic_search(query, &sem_opts)?;
         let semantic_hits = Some(res.total_indexed);
-        let mut kept = scope_filter_hits(res.hits, scope, lookup);
+        let mut kept = scope_filter_hits(res.hits, scope, lookup)?;
         kept.truncate(opts.limit);
         let hits: Vec<HybridHit> = kept
             .into_iter()
@@ -391,7 +392,7 @@ impl HybridSearcher<'_> {
         };
         let sem_res = sem.semantic_search(query, &sem_opts)?;
         let semantic_hits = Some(sem_res.total_indexed);
-        let mut sem_kept = scope_filter_hits(sem_res.hits, scope, lookup);
+        let mut sem_kept = scope_filter_hits(sem_res.hits, scope, lookup)?;
         sem_kept.truncate(fetch_n);
 
         // Build ItemId-keyed lookups so we can re-attach ranks + snippets after

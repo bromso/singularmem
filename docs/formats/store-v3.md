@@ -228,6 +228,13 @@ implementation:
    UPDATE items SET scope = ? WHERE id = ?;
    ```
 
+   `set_scope` updates only the SQLite row; it does not touch the Tantivy
+   sidecar. The lexical index keeps indexing the item under its old scope
+   until `singularmem reindex` runs, so between a `set_scope` call and the
+   next reindex a hybrid search may rank the item under its old scope on
+   the lexical side while the semantic side (post-filtered against the
+   store) already sees the new one.
+
 A third-party loader that only ever reads should treat both as part of
 the normal supersedes chain and column semantics respectively —
 `get_by_external_id` always resolves to the current holder of an id, and

@@ -24,11 +24,20 @@ pub const MAX_SCOPE_BYTES: usize = 512;
 /// # Errors
 /// `Error::Validation { field: "scope", .. }` describing the first rule broken.
 pub fn validate(raw: &str) -> Result<String> {
-    let trimmed = raw.trim_matches('/');
     let reject = |reason: String| Error::Validation {
         field: "scope",
         reason,
     };
+    // Cheap length guard before any allocation or per-segment work below.
+    // `+ 2` allows for a leading and trailing slash, which trimming below
+    // removes before the real `MAX_SCOPE_BYTES` check on the joined path.
+    if raw.len() > MAX_SCOPE_BYTES + 2 {
+        return Err(reject(format!(
+            "exceeds {MAX_SCOPE_BYTES} bytes (got {} bytes before normalisation)",
+            raw.len()
+        )));
+    }
+    let trimmed = raw.trim_matches('/');
     if trimmed.is_empty() {
         return Err(reject("must contain at least one segment".into()));
     }
@@ -148,7 +157,17 @@ impl ScopeFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::ScopeFilter;
+    use super::{validate, ScopeFilter};
+
+    /// A ~10 KB input is rejected by the early length guard before any
+    /// per-segment allocation. Any rejection reason is acceptable — this
+    /// only proves the guard fires, not which message it produces.
+    #[test]
+    fn oversized_input_is_rejected() {
+        let huge = "a/".repeat(5000);
+        assert!(huge.len() > 9000);
+        assert!(validate(&huge).is_err());
+    }
 
     /// `sql_clause` is `pub(crate)`, so this test lives here rather than in
     /// the integration test file. `%` and `\` aren't valid scope bytes, so

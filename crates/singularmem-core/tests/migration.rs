@@ -234,8 +234,18 @@ fn v2_store_migrates_to_v3_on_open() {
         .get("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap())
         .unwrap();
     assert_eq!(item.scope, None);
+
+    // Spec acceptance criterion 6: a raw-rusqlite loader (no Singularmem
+    // code) can read `scope` from a store this binary migrated, per the
+    // walkthrough in docs/formats/store-v3.md.
+    let mut scoped = singularmem_core::NewItem::text("loader-visible item");
+    scoped.scope = Some("loader/check".into());
+    let scoped = store.ingest(scoped).unwrap();
+    assert_eq!(scoped.scope.as_deref(), Some("loader/check"));
     drop(store);
+
     let conn = Connection::open(&path).unwrap();
+
     let cols: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('items')")
         .unwrap()
@@ -252,6 +262,35 @@ fn v2_store_migrates_to_v3_on_open() {
         )
         .unwrap();
     assert_eq!(idx, 1);
+
+    let scope: String = conn
+        .query_row(
+            "SELECT scope FROM items WHERE id = ?1",
+            [scoped.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(scope, "loader/check");
+
+    let format_version: String = conn
+        .query_row(
+            "SELECT value FROM singularmem_meta WHERE key='format_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(format_version, "3");
+
+    // Descendant-inclusive query from docs/formats/store-v3.md, using the
+    // escaped-LIKE form the reference implementation actually binds.
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM items WHERE scope = ?1 OR scope LIKE ?2 ESCAPE '\\'")
+        .unwrap()
+        .query_map(rusqlite::params!["loader/check", "loader/%"], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(ids, vec![scoped.id.to_string()]);
 }
 
 #[test]

@@ -130,6 +130,10 @@ impl Store {
     /// Returns `Err` from the initial ID query if the database errors.
     /// Each iterator step may also return `Err` if a subsequent payload
     /// fetch fails.
+    ///
+    /// # Panics
+    /// Delegates to [`Store::list_by_tags_scoped`], which panics if the
+    /// connection `Mutex` is poisoned.
     pub fn list(&self) -> Result<ItemIter<'_>> {
         self.list_by_tags_scoped(&[], None)
     }
@@ -140,6 +144,10 @@ impl Store {
     /// # Errors
     ///
     /// Same as `list`.
+    ///
+    /// # Panics
+    /// Delegates to [`Store::list_by_tags_scoped`], which panics if the
+    /// connection `Mutex` is poisoned.
     pub fn list_by_tags(&self, tags: &[&str]) -> Result<ItemIter<'_>> {
         self.list_by_tags_scoped(tags, None)
     }

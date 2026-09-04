@@ -956,7 +956,6 @@ impl Task for ScopesTask {
             .into_iter()
             .map(|(path, count)| crate::types::ScopeCount {
                 path,
-                #[allow(clippy::cast_possible_truncation)]
                 count: u32::try_from(count).unwrap_or(u32::MAX),
             })
             .collect())

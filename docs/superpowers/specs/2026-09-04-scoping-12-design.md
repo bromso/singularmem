@@ -267,6 +267,51 @@ otherwise unchanged.
 None blocking. Whether `scope rename` (subtree) is wanted is left to
 demand; `set_scope` covers single items.
 
+## Deviations recorded during implementation
+
+- **`normalise_tags` extraction.** Tag normalisation was factored into its
+  own helper rather than left inlined in the scoped list query, so scope
+  filtering and tag filtering compose without duplicating the lowering
+  logic.
+- **`HAVING COUNT(DISTINCT tag) = <n>` inlined as a literal.** SQLite never
+  equates a `String`-bound parameter with an `INTEGER` result of
+  `COUNT(...)`, so the AND-tag count is spliced into the SQL text as a
+  literal integer (the tag list itself is still fully parameter-bound) rather
+  than passed as a bound parameter.
+- **Scope clause wrapped in `ConstScoreQuery(0.0)`.** The Tantivy
+  `scope`/`scope_ancestors` `TermQuery` clauses are wrapped in
+  `ConstScoreQuery(0.0)` so they contribute zero to BM25 ranking — they
+  filter membership only and must not perturb relevance order.
+- **`Retriever` auto-attaches its store as `ScopeLookup`.** Rather than
+  requiring every caller of `singularmem-retrieve` to wire a `ScopeLookup`
+  by hand, `Retriever` attaches its own `Store` as the lookup whenever a
+  scope filter and the semantic ranker are both in play.
+- **Node `SearchTask` attaches the lookup for all modes.** The Node binding
+  attaches the store-backed `ScopeLookup` unconditionally (lexical, semantic,
+  and hybrid modes) rather than only when the semantic ranker is active, to
+  keep the binding's control flow uniform across modes; the trait is a no-op
+  for lexical-only searches.
+- **MCP `list_tools` coverage moved to wire-level tests.** Rather than
+  asserting `memory_scopes`'s presence in a unit test against the in-process
+  tool table, that assertion lives with the other wire-level `tools/list`
+  JSON-RPC tests, matching how the other tools are covered.
+- **Ingest sources warn and fall back to the derived default on an invalid
+  `scope_override`.** If `--scope` fails `scope::validate`, the CLI already
+  rejects it as a usage error before any store access (per the "Interfaces
+  → CLI" section); a `scope_override` reaching a `Source` invalid for some
+  other reason falls back to that source's derived default with a
+  `tracing::warn!` rather than aborting the whole bulk ingest run.
+- **`scope_filter_hits` returns `ScopeLookupMissing` rather than panicking.**
+  The original sketch used `unreachable!()` for a filter-with-no-lookup
+  combination that current callers already guard against; it now returns
+  `Result<Vec<SemanticHit>>` and maps that combination to
+  `Error::ScopeLookupMissing`, so a future caller that skips the guard fails
+  honestly instead of panicking.
+- **Known limitation: lexical index stale after `set_scope` until reindex.**
+  `set_scope` only updates the SQLite row; the Tantivy sidecar keeps
+  indexing the item under its prior scope until `singularmem reindex` runs.
+  Documented in `docs/formats/store-v3.md`.
+
 ## Acceptance criteria
 
 1. `cargo test --workspace --all-targets` passes offline; clippy and fmt
