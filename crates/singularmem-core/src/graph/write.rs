@@ -570,21 +570,41 @@ impl Store {
             Err(other) => return Err(other),
         };
 
-        let replacement = self.add_fact_in_tx(
-            &tx,
-            now,
-            NewFact {
-                subject: subject.to_string(),
-                subject_kind: None,
-                predicate: predicate.to_string(),
-                object: new,
-                valid_from: Some(at),
-                valid_to: None,
-                confidence: 1.0,
-                source_item_id: None,
-                scope: scope.map(ToString::to_string),
-            },
-        )?;
+        let replacement = self
+            .add_fact_in_tx(
+                &tx,
+                now,
+                NewFact {
+                    subject: subject.to_string(),
+                    subject_kind: None,
+                    predicate: predicate.to_string(),
+                    object: new,
+                    valid_from: Some(at),
+                    valid_to: None,
+                    confidence: 1.0,
+                    source_item_id: None,
+                    scope: scope.map(ToString::to_string),
+                },
+            )
+            .map_err(|e| match e {
+                // `add`'s divergence error tells the caller to supersede — which
+                // is what they just did. Say what actually applies here.
+                Error::Validation {
+                    field: "fact",
+                    reason,
+                } => Error::Validation {
+                    field: "fact",
+                    reason: format!(
+                        "{}; the replacement already stands, so supersede with the \
+                     time point it opened at, or invalidate it first",
+                        reason
+                            .split("; use supersede or invalidate")
+                            .next()
+                            .unwrap_or(&reason)
+                    ),
+                },
+                other => other,
+            })?;
 
         tx.commit().map_err(|e| Error::Sqlite {
             context: "committing supersede_fact transaction",

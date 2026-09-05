@@ -271,7 +271,7 @@ fn open_core_only_round_trip_entities_and_facts() {
         .iter()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    // `name` is the display form as first written; `normalised_name` is the
+    // `name` is the display form as first written (trimmed); `normalised_name` is the
     // identity: NFC, trimmed, lowercased, internal whitespace collapsed to
     // `_`. `Meili Search` exercises both differences at once.
     let by_name: HashMap<&str, &EntityLine> =

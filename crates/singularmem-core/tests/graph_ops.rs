@@ -244,6 +244,33 @@ fn supersede_is_atomic_and_tolerates_missing_old() {
     assert_eq!(new.subject.name, "b");
 }
 
+#[test]
+fn repeated_supersede_without_matching_time_point_names_the_replacement() {
+    let (_d, s) = store();
+    s.add_fact(NewFact::triple("a", "p", "x")).unwrap();
+    let first = parse_point("2026-01-01").unwrap();
+    s.supersede_fact("a", "p", &entity("x"), entity("y"), None, Some(first))
+        .unwrap();
+    // Same replacement, different opening instant: the standing `y` fact
+    // diverges from the request, and the error must not tell the caller to
+    // "use supersede" — that is what they just did.
+    let later = parse_point("2026-02-01").unwrap();
+    let err = s
+        .supersede_fact("a", "p", &entity("x"), entity("y"), None, Some(later))
+        .unwrap_err();
+    match err {
+        Error::Validation {
+            field: "fact",
+            reason,
+        } => {
+            assert!(reason.contains("replacement already stands"), "{reason}");
+            assert!(!reason.contains("use supersede"), "{reason}");
+        }
+        other => panic!("expected Validation{{fact}}, got {other:?}"),
+    }
+    assert_eq!(s.graph_stats(None).unwrap().open_facts, 1);
+}
+
 /// Seed a store with three facts spanning two scopes
 /// (`claude-code/singularmem` and `claude-code/other`) for the
 /// direction/scope/predicate/timeline/entities tests below.
