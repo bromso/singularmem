@@ -6,9 +6,15 @@
 //! asserts on the protocol-level shape.
 //!
 //! Verifies the most failure-prone properties of an MCP server:
-//! - Initialize handshake returns the expected serverInfo.
-//! - `tools/list` includes the `memory_retrieve` descriptor.
+//! - Initialize handshake returns the expected serverInfo and advertises
+//!   the `tools`, `prompts`, and `resources` capabilities.
+//! - `tools/list` includes all 15 tool descriptors.
 //! - tools/call invokes the handler and returns a text block.
+//! - `prompts/list` returns the one `wake-up` prompt.
+//! - `resources/templates/list` returns the `singularmem://memory/{id}`
+//!   template; `resources/list` stays empty by design; `resources/read`
+//!   round-trips a seeded item and reports `resource_not_found` for an
+//!   unknown id.
 //! - stdout stays clean (no stray writes corrupt the JSON-RPC stream).
 //! - stderr is drained continuously to avoid buffer-fill deadlock.
 
@@ -126,6 +132,14 @@ fn handshake_and_retrieve_end_to_end() {
         resp["result"]["capabilities"]["tools"].is_object(),
         "tools capability missing: {resp}"
     );
+    assert!(
+        resp["result"]["capabilities"]["prompts"].is_object(),
+        "prompts capability missing: {resp}"
+    );
+    assert!(
+        resp["result"]["capabilities"]["resources"].is_object(),
+        "resources capability missing: {resp}"
+    );
 
     // Step 2: initialized notification (no response expected).
     send(
@@ -183,6 +197,108 @@ fn handshake_and_retrieve_end_to_end() {
     assert!(
         text.contains("the quick brown fox"),
         "expected ingested memory in response, got: {text}"
+    );
+
+    // Step 5b: prompts/list — one prompt named `wake-up`.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":4,"method":"prompts/list"}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 4);
+    let prompts = resp["result"]["prompts"].as_array().expect("prompts array");
+    assert_eq!(prompts.len(), 1, "expected exactly one prompt: {prompts:?}");
+    assert_eq!(prompts[0]["name"], "wake-up");
+
+    // Step 5c: resources/templates/list — one template for singularmem://memory/{id}.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":5,"method":"resources/templates/list"}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 5);
+    let templates = resp["result"]["resourceTemplates"]
+        .as_array()
+        .expect("resourceTemplates array");
+    assert_eq!(
+        templates.len(),
+        1,
+        "expected exactly one resource template: {templates:?}"
+    );
+    assert_eq!(
+        templates[0]["uriTemplate"], "singularmem://memory/{id}",
+        "wrong uriTemplate: {resp}"
+    );
+
+    // Step 5d: resources/list stays empty by design.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":6,"method":"resources/list"}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 6);
+    let resources = resp["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    assert!(
+        resources.is_empty(),
+        "expected resources/list to stay empty: {resources:?}"
+    );
+
+    // Step 5e: resources/read for the seeded item.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"memory_list","arguments":{}}}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 7);
+    let list_text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("memory_list text block");
+    let item_line = list_text
+        .lines()
+        .find(|l| l.contains(": "))
+        .unwrap_or_else(|| panic!("no item line in memory_list output: {list_text}"));
+    let seeded_id = item_line
+        .split(':')
+        .next()
+        .expect("id before ':'")
+        .trim()
+        .to_string();
+
+    send(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":8,"method":"resources/read","params":{{"uri":"singularmem://memory/{seeded_id}"}}}}"#
+        ),
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 8);
+    let contents = resp["result"]["contents"]
+        .as_array()
+        .expect("contents array");
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0]["mimeType"], "text/plain");
+    let resource_text = contents[0]["text"].as_str().expect("resource text");
+    assert!(
+        resource_text.starts_with("id: "),
+        "wrong resource text: {resource_text}"
+    );
+    assert!(
+        resource_text.contains("the quick brown fox"),
+        "wrong resource text: {resource_text}"
+    );
+
+    // Step 5f: resources/read for an unknown id is `resource_not_found`.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":9,"method":"resources/read","params":{"uri":"singularmem://memory/01ARZ3NDEKTSV4RRFFQ69G5FAV"}}"#,
+    );
+    let resp = recv_response(&mut reader);
+    assert_eq!(resp["id"], 9);
+    assert!(
+        resp.get("error").is_some(),
+        "expected an error for unknown resource id: {resp}"
     );
 
     // Step 6: close stdin, wait for exit, check stderr was clean.

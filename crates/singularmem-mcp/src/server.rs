@@ -9,7 +9,8 @@ use std::sync::Arc;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
-        Implementation, ListPromptsResult, ListToolsResult, PaginatedRequestParams,
+        Implementation, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
         ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
@@ -176,6 +177,16 @@ fn map_wakeup_error(err: Error) -> McpError {
             None,
         ),
         other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+/// Map a `resources/read` error to an MCP error.
+fn map_resource_error(err: crate::resources::ResourceError) -> McpError {
+    match err {
+        crate::resources::ResourceError::NotFound(uri) => {
+            McpError::resource_not_found(format!("resource not found: {uri}"), None)
+        }
+        crate::resources::ResourceError::Other(e) => McpError::internal_error(e.to_string(), None),
     }
 }
 
@@ -492,6 +503,45 @@ impl ServerHandler for SingularmemServer {
                 None,
             ))
         })
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListResourcesResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        // Enumerating a store is not a browsing experience: memories are
+        // reached by ID (via `memory_get`/`memory_retrieve`/`memory_list`),
+        // not by listing every item as a resource. `resources/list` stays
+        // empty by design; only the template is advertised.
+        std::future::ready(Ok(ListResourcesResult::default()))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListResourceTemplatesResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
+            crate::resources::template(),
+        ])))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ReadResourceResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let config = Arc::clone(&self.config);
+        std::future::ready(
+            crate::resources::read(&config, &request.uri).map_err(map_resource_error),
+        )
     }
 }
 
