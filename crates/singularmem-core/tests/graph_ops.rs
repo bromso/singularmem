@@ -71,7 +71,7 @@ fn value_objects_and_kinds() {
         matches!(stored.object, singularmem_core::graph::FactObject::Value(ref v) if v == "Rust 1.80")
     );
     assert_eq!(
-        s.get_entity("singularmem", None)
+        s.get_entity("singularmem")
             .unwrap()
             .unwrap()
             .kind

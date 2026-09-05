@@ -55,6 +55,19 @@ pub enum Error {
         id: FactId,
     },
 
+    /// `fact_history` walked forward along `supersedes` and found more than
+    /// one revision superseding the same one — a forked chain. The library
+    /// refuses to pick a branch (Principle VII).
+    #[error(
+        "fact chain forks at {} competing revisions; candidates {}",
+        candidates.len(),
+        candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    AmbiguousFactRevision {
+        /// The competing revisions that all supersede the same fact.
+        candidates: Vec<FactId>,
+    },
+
     /// `latest_revision` walked forward from an item and found multiple
     /// candidates that nothing supersedes — a fork. The library refuses to
     /// guess (Principle VII).

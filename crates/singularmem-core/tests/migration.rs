@@ -142,11 +142,10 @@ fn already_migrated_v3_fixture_opens_cleanly_as_v4() {
                  name             TEXT NOT NULL,
                  normalised_name  TEXT NOT NULL,
                  kind             TEXT,
-                 scope            TEXT,
                  created_at       TEXT NOT NULL,
                  CHECK (length(name) > 0)
              ) STRICT;
-             CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+             CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name);
 
              CREATE TABLE facts (
                  id              TEXT PRIMARY KEY NOT NULL,
@@ -566,10 +565,10 @@ fn read_only_v3_refuses_to_migrate() {
 
 /// A store migrated 3 → 4 ends up with exactly the schema a fresh v4 store
 /// is created with: same tables, same indexes, same definitions. Compared
-/// Compared with whitespace stripped: the v1 fixture above writes its DDL
-/// more compactly than `schema.rs` does and `sqlite_master.sql` preserves
-/// the original text verbatim, so the layout differs while the schema —
-/// every table, index, column, and constraint — must not.
+/// with whitespace stripped, because `make_v3` writes the v1–v3 DDL more
+/// compactly than `schema.rs` does and `sqlite_master.sql` preserves the
+/// original text verbatim: the layout differs while the schema — every
+/// table, index, column, and constraint — must not.
 #[test]
 fn fresh_and_migrated_v4_schemas_are_identical() {
     let fresh_dir = TempDir::new().unwrap();

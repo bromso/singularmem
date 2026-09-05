@@ -224,9 +224,10 @@ pub(super) fn load_fact(conn: &Connection, id: FactId) -> Result<Option<Fact>> {
     Ok(facts.pop())
 }
 
-/// Ids of every entity whose normalised name is `name`, across scopes: the
-/// scope filter narrows the *facts* a query returns, not which entity the
-/// name resolves to (spec § "Operations").
+/// Ids of every entity whose normalised name is `name` — at most one, since
+/// entities are store-global. Returned as a list so the callers' `IN (…)`
+/// clauses stay uniform; a query's scope filter narrows the *facts*, never
+/// which entity the name resolves to (spec § "Operations").
 pub(super) fn entity_ids_by_name(conn: &Connection, name: &str) -> Result<Vec<String>> {
     let normalised = normalise::entity_name(name)?;
     let mut stmt = conn
@@ -274,7 +275,6 @@ struct RawEntity {
     name: String,
     normalised_name: String,
     kind: Option<String>,
-    scope: Option<String>,
     created_at: String,
 }
 
@@ -286,8 +286,7 @@ fn read_entity(row: &Row<'_>) -> rusqlite::Result<RawEntity> {
         name: row.get(1)?,
         normalised_name: row.get(2)?,
         kind: row.get(3)?,
-        scope: row.get(4)?,
-        created_at: row.get(5)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -299,10 +298,35 @@ impl RawEntity {
             name: self.name,
             normalised_name: self.normalised_name,
             kind: self.kind,
-            scope: self.scope,
             created_at: parse_point(&self.created_at)?,
         })
     }
+}
+
+/// Every revision that supersedes `id`, oldest recorded first. More than
+/// one means the chain forks — see [`Store::fact_history`].
+fn successors_of(conn: &Connection, id: FactId) -> Result<Vec<FactId>> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM facts WHERE supersedes = ? ORDER BY recorded_at ASC, id ASC")
+        .map_err(|e| Error::Sqlite {
+            context: "walking the fact chain forwards",
+            source: e,
+        })?;
+    let ids = stmt
+        .query_map([id.to_string()], |row| row.get::<_, String>(0))
+        .map_err(|e| Error::Sqlite {
+            context: "walking the fact chain forwards",
+            source: e,
+        })?
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(|e| Error::Sqlite {
+            context: "collecting fact chain successors",
+            source: e,
+        })?;
+    drop(stmt);
+    ids.into_iter()
+        .map(|s| s.parse::<FactId>().map_err(Into::into))
+        .collect()
 }
 
 /// `COUNT(*)` of head facts (matching `filter`) touching entity `e`.
@@ -413,6 +437,8 @@ impl Store {
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.
+    // Two queries share one guard: dropping it between them would let
+    // another writer interleave and make the counts mutually inconsistent.
     #[allow(clippy::significant_drop_tightening)]
     pub fn graph_stats(&self, scope: Option<&ScopeFilter>) -> Result<GraphStats> {
         let q = scope_only(scope);
@@ -472,14 +498,19 @@ impl Store {
 
     /// Entities sorted by normalised name, each with the number of head
     /// facts it takes part in (as subject or object). `kind` filters by the
-    /// entity's kind; `scope` restricts both the counted facts and the
-    /// entities returned to those appearing in a fact in scope.
+    /// entity's kind.
+    ///
+    /// Entities themselves are store-global; `scope` filters on **fact**
+    /// scope, restricting both the counted facts and the entities returned
+    /// to those taking part in a fact in scope.
     ///
     /// # Errors
     /// `Error::Sqlite` on database error.
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.
+    // The statement borrows `conn`, so the guard cannot be dropped before
+    // the rows are collected; tightening the scope would not compile.
     #[allow(clippy::significant_drop_tightening)]
     pub fn entities(
         &self,
@@ -489,7 +520,7 @@ impl Store {
         let q = scope_only(scope);
         let (filter, filter_binds) = fact_where(&q, Validity::AnyHead);
         let mut sql = format!(
-            "SELECT e.id, e.name, e.normalised_name, e.kind, e.scope, e.created_at, {} \
+            "SELECT e.id, e.name, e.normalised_name, e.kind, e.created_at, {} \
              FROM entities e WHERE 1=1",
             fact_count_subquery(&filter)
         );
@@ -512,7 +543,7 @@ impl Store {
         })?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
-                Ok((read_entity(row)?, row.get::<_, i64>(6)?))
+                Ok((read_entity(row)?, row.get::<_, i64>(5)?))
             })
             .map_err(|e| Error::Sqlite {
                 context: "listing entities",
@@ -537,20 +568,26 @@ impl Store {
     /// The revision chain containing `id`, oldest first.
     ///
     /// # Errors
-    /// `Error::FactIdNotFound` if `id` is unknown; `Error::Sqlite` on
-    /// database error.
+    /// `Error::FactIdNotFound` if `id` is unknown;
+    /// `Error::AmbiguousFactRevision` if more than one revision supersedes
+    /// the same one (a forked chain — the library refuses to pick a branch);
+    /// `Error::Sqlite` on database error.
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.
+    // The whole chain walk reads under one guard so the revisions it
+    // returns are a consistent snapshot rather than a stitched-together one.
     #[allow(clippy::significant_drop_tightening)]
     pub fn fact_history(&self, id: FactId) -> Result<Vec<Fact>> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let start = load_fact(&conn, id)?.ok_or(Error::FactIdNotFound { id })?;
 
         // Backwards along `supersedes` to the root, then forwards along the
-        // rows that supersede us. Each revision has at most one predecessor
-        // and (by construction) at most one successor, so both walks are
-        // linear; `seen` still guards against a cycle in a hand-edited file.
+        // rows that supersede us. Each revision has exactly one predecessor
+        // column, so the backward walk is linear by construction; the
+        // forward walk can fan out in a hand-edited or externally-written
+        // file, and surfaces that as `AmbiguousFactRevision` rather than
+        // guessing. `seen` guards against a cycle either way.
         let mut seen = vec![start.id];
         let mut older = Vec::new();
         let mut cursor = start.supersedes;
@@ -569,20 +606,16 @@ impl Store {
         chain.push(start);
         loop {
             let last = chain.last().expect("chain always holds the start fact").id;
-            let next: Option<String> = conn
-                .query_row(
-                    "SELECT id FROM facts WHERE supersedes = ? ORDER BY recorded_at ASC, id ASC \
-                     LIMIT 1",
-                    [last.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(|e| Error::Sqlite {
-                    context: "walking the fact chain forwards",
-                    source: e,
-                })?;
-            let Some(next) = next else { break };
-            let next: FactId = next.parse()?;
+            let successors = successors_of(&conn, last)?;
+            let next = match successors.as_slice() {
+                [] => break,
+                [only] => *only,
+                _ => {
+                    return Err(Error::AmbiguousFactRevision {
+                        candidates: successors,
+                    })
+                }
+            };
             if seen.contains(&next) {
                 break;
             }
@@ -605,7 +638,8 @@ impl Store {
         load_fact(&conn, id)?.ok_or(Error::FactIdNotFound { id })
     }
 
-    /// The entity with this name (normalised) in `scope`, if it exists.
+    /// The entity with this name (normalised), if it exists. Entities are
+    /// store-global, so there is at most one per normalised name.
     ///
     /// # Errors
     /// `Error::Validation { field: "entity" }` if `name` does not normalise;
@@ -613,14 +647,14 @@ impl Store {
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.
-    pub fn get_entity(&self, name: &str, scope: Option<&str>) -> Result<Option<Entity>> {
+    pub fn get_entity(&self, name: &str) -> Result<Option<Entity>> {
         let normalised = normalise::entity_name(name)?;
         let conn = self.conn.lock().expect("store mutex poisoned");
         let row = conn
             .query_row(
-                "SELECT id, name, normalised_name, kind, scope, created_at FROM entities \
-                 WHERE normalised_name = ?1 AND IFNULL(scope, '') = IFNULL(?2, '')",
-                rusqlite::params![normalised, scope],
+                "SELECT id, name, normalised_name, kind, created_at FROM entities \
+                 WHERE normalised_name = ?1",
+                rusqlite::params![normalised],
                 read_entity,
             )
             .optional()

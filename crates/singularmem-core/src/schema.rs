@@ -23,17 +23,20 @@ CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
 /// 2 → 3; see `run_migration`). Spec:
 /// `docs/superpowers/specs/2026-09-05-knowledge-graph-14-design.md`
 /// § "Store format v4".
+///
+/// Entities are store-global: identity is the normalised name alone, so
+/// `tantivy` is one node everywhere. Only `facts` carry a `scope`, which
+/// is what scoped queries narrow on.
 const MIGRATE_3_TO_4_DDL: &str = "
 CREATE TABLE entities (
     id               TEXT PRIMARY KEY NOT NULL,
     name             TEXT NOT NULL,
     normalised_name  TEXT NOT NULL,
     kind             TEXT,
-    scope            TEXT,
     created_at       TEXT NOT NULL,
     CHECK (length(name) > 0)
 ) STRICT;
-CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name);
 
 CREATE TABLE facts (
     id              TEXT PRIMARY KEY NOT NULL,
@@ -105,11 +108,10 @@ CREATE TABLE entities (
     name             TEXT NOT NULL,
     normalised_name  TEXT NOT NULL,
     kind             TEXT,
-    scope            TEXT,
     created_at       TEXT NOT NULL,
     CHECK (length(name) > 0)
 ) STRICT;
-CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name);
 
 CREATE TABLE facts (
     id              TEXT PRIMARY KEY NOT NULL,

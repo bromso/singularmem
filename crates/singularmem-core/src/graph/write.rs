@@ -137,14 +137,14 @@ fn insert_fact_row(tx: &Transaction<'_>, fact: &Fact) -> Result<()> {
     Ok(())
 }
 
-/// The id of an existing entity, without creating one.
-fn find_entity(tx: &Transaction<'_>, name: &str, scope: Option<&str>) -> Result<Option<EntityRef>> {
+/// The id of an existing entity, without creating one. Entities are
+/// store-global, so the lookup is by normalised name alone.
+fn find_entity(tx: &Transaction<'_>, name: &str) -> Result<Option<EntityRef>> {
     let normalised = normalise::entity_name(name)?;
     let row: Option<(String, String)> = tx
         .query_row(
-            "SELECT id, name FROM entities \
-             WHERE normalised_name = ?1 AND IFNULL(scope, '') = IFNULL(?2, '')",
-            params![normalised, scope],
+            "SELECT id, name FROM entities WHERE normalised_name = ?1",
+            params![normalised],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
@@ -163,23 +163,22 @@ fn find_entity(tx: &Transaction<'_>, name: &str, scope: Option<&str>) -> Result<
 
 impl Store {
     /// Resolve or create an entity inside `tx`, returning its id and display
-    /// name. `kind` is set on first creation and on an entity that has none;
-    /// a conflicting kind is a validation error (spec: kind is immutable
-    /// once set).
+    /// name. Entities are store-global: identity is the normalised name
+    /// alone. `kind` is set on first creation and on an entity that has
+    /// none; a conflicting kind is a validation error (spec: kind is
+    /// immutable once set).
     fn get_or_create_entity(
         &self,
         tx: &Transaction<'_>,
         now: Timestamp,
         name: &str,
         kind: Option<&str>,
-        scope: Option<&str>,
     ) -> Result<EntityRef> {
         let normalised = normalise::entity_name(name)?;
         let existing: Option<(String, String, Option<String>)> = tx
             .query_row(
-                "SELECT id, name, kind FROM entities \
-                 WHERE normalised_name = ?1 AND IFNULL(scope, '') = IFNULL(?2, '')",
-                params![normalised, scope],
+                "SELECT id, name, kind FROM entities WHERE normalised_name = ?1",
+                params![normalised],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
@@ -216,16 +215,9 @@ impl Store {
         let id = EntityId::from_ulid(mint_raw_ulid(self, now)?);
         let display = name.trim().to_string();
         tx.execute(
-            "INSERT INTO entities (id, name, normalised_name, kind, scope, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                id.to_string(),
-                display,
-                normalised,
-                kind,
-                scope,
-                now.to_string()
-            ],
+            "INSERT INTO entities (id, name, normalised_name, kind, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id.to_string(), display, normalised, kind, now.to_string()],
         )
         .map_err(|e| Error::Sqlite {
             context: "inserting entity",
@@ -279,24 +271,25 @@ impl Store {
             }
         }
 
-        let subject =
-            self.get_or_create_entity(tx, now, &f.subject, f.subject_kind.as_deref(), None)?;
+        let subject_kind = f.subject_kind.as_deref().map(str::trim);
+        let subject = self.get_or_create_entity(tx, now, &f.subject, subject_kind)?;
         let object = match f.object {
-            NewObject::Entity { name, kind } => FactObject::Entity(self.get_or_create_entity(
-                tx,
-                now,
-                &name,
-                kind.as_deref(),
-                None,
-            )?),
+            NewObject::Entity { name, kind } => {
+                let kind = kind.as_deref().map(str::trim);
+                FactObject::Entity(self.get_or_create_entity(tx, now, &name, kind)?)
+            }
             NewObject::Value(value) => {
-                if value.trim().is_empty() {
+                // Literal values are stored trimmed so the surrounding
+                // whitespace of one write cannot fork the triple's identity
+                // from another's — `invalidate` trims the same way.
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
                     return Err(Error::Validation {
                         field: "object",
                         reason: "value must be non-empty".to_string(),
                     });
                 }
-                FactObject::Value(value)
+                FactObject::Value(trimmed.to_string())
             }
         };
 
@@ -345,20 +338,21 @@ impl Store {
     ) -> Result<Fact> {
         let predicate = normalise::predicate(triple.predicate)?;
         let scope = triple.scope.map(scope::validate).transpose()?;
-        let Some(subject) = find_entity(tx, triple.subject, None)? else {
+        let Some(subject) = find_entity(tx, triple.subject)? else {
             return Err(triple.not_found());
         };
         let columns = match triple.object {
-            NewObject::Entity { name, .. } => match find_entity(tx, name, None)? {
+            NewObject::Entity { name, .. } => match find_entity(tx, name)? {
                 None => return Err(triple.not_found()),
                 Some(e) => ObjectColumns {
                     id: Some(e.id.to_string()),
                     value: None,
                 },
             },
+            // Matched against the trimmed form `add_fact_in_tx` stored.
             NewObject::Value(value) => ObjectColumns {
                 id: None,
-                value: Some(value.clone()),
+                value: Some(value.trim().to_string()),
             },
         };
 
@@ -408,6 +402,8 @@ impl Store {
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.
+    // The transaction borrows the guard, so the guard must outlive the
+    // commit; there is no tighter scope to drop it in.
     #[allow(clippy::significant_drop_tightening)]
     pub fn add_fact(&self, f: NewFact) -> Result<Fact> {
         self.assert_writable("add_fact")?;

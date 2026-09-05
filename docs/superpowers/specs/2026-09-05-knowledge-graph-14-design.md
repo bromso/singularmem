@@ -59,8 +59,8 @@ second ledger, not a new system.
   `wake-up` (16 may add one).
 - Node binding exposure (16/17).
 - Graph visualisation (proprietary tier by constitution).
-- Cross-scope entity identity: the same normalised name in two scopes is
-  two entities.
+- Per-scope entity identity: entities are store-global (one `tantivy`
+  everywhere); facts carry scope, so scoped queries still narrow results.
 
 ## Recommended approach
 
@@ -84,7 +84,7 @@ loaders ignore unknown kinds.
 ```
 CLI graph *  ─┐
 MCP memory_graph_* ─┼──► singularmem_core::graph (Store methods)
-                    │        ├── entities  (get-or-create by normalised name + scope)
+                    │        ├── entities  (get-or-create by normalised name; store-global)
                     │        ├── facts     (add / invalidate / supersede / query / timeline / stats)
                     │        └── export    (entity + fact lines)
                     └──► scope::ScopeFilter (reused)
@@ -112,11 +112,10 @@ CREATE TABLE entities (
     name             TEXT NOT NULL,
     normalised_name  TEXT NOT NULL,
     kind             TEXT,
-    scope            TEXT,
     created_at       TEXT NOT NULL,
     CHECK (length(name) > 0)
 ) STRICT;
-CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name, IFNULL(scope, ''));
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name);
 
 CREATE TABLE facts (
     id              TEXT PRIMARY KEY NOT NULL,
@@ -176,8 +175,12 @@ other row supersedes it). Reads use heads unless `--recorded-at` is given.
 | `query_predicate(predicate, scope, as_of, recorded_at)` | All facts with that predicate. |
 | `timeline(entity: Option, scope)` | Head revisions ordered by `valid_from` ascending (NULLs last), then `recorded_at`; each row flagged `current` (open). Cap 500. |
 | `stats(scope)` | entities, open facts, closed facts, distinct predicates. |
-| `entities(scope, kind)` | Entities sorted by name with fact counts. |
+| `entities(scope, kind)` | Entities sorted by name with fact counts. Entities are store-global; `scope` filters on **fact** scope, so it narrows both the counts and which entities appear. |
 | `fact_history(id)` | The chain oldest → newest. |
+
+Entities are store-global: the normalised name alone is their identity, so
+`tantivy` in `claude-code/a` and `claude-code/b` is one node. Scope lives on
+facts, which is what every scoped read filters on.
 
 Entities are never deleted. Entity `kind` is free text, set on first
 creation (`--subject-kind` / `--object-kind`) and immutable afterwards; a
@@ -187,7 +190,7 @@ error, and omitting the kind on later adds is fine.
 ### Export — `export-v2`
 
 Marker `_singularmem_format: "export-v2"`. Line kinds: `meta`, `item`
-(unchanged shape), `entity` (`{ "_kind":"entity", id, name, kind, scope, created_at }`),
+(unchanged shape), `entity` (`{ "_kind":"entity", id, name, kind, created_at }`),
 `fact` (`{ "_kind":"fact", id, subject, predicate, object: {entity: name} | {value: text}, valid_from, valid_to, confidence, source_item_id, scope, supersedes, recorded_at }`).
 Order: meta, items, entities, facts (each `created_at`/`recorded_at`
 ascending). Rule for loaders: ignore unknown `_kind`s. `store_format_version`
@@ -198,7 +201,7 @@ reports `"4"`.
 ### Library (`singularmem-core`)
 
 ```rust
-pub struct Entity { pub id: ItemId /* ULID newtype reused as EntityId alias */, pub name: String, pub normalised_name: String, pub kind: Option<String>, pub scope: Option<String>, pub created_at: Timestamp }
+pub struct Entity { pub id: ItemId /* ULID newtype reused as EntityId alias */, pub name: String, pub normalised_name: String, pub kind: Option<String>, pub created_at: Timestamp }
 pub enum FactObject { Entity { id: EntityId, name: String }, Value(String) }
 pub struct Fact { pub id: FactId, pub subject: EntityRef, pub predicate: String, pub object: FactObject, pub valid_from: Option<Timestamp>, pub valid_to: Option<Timestamp>, pub confidence: f32, pub source_item_id: Option<ItemId>, pub scope: Option<String>, pub supersedes: Option<FactId>, pub recorded_at: Timestamp }
 pub struct NewFact { pub subject: String, pub subject_kind: Option<String>, pub predicate: String, pub object: NewObject, pub valid_from: Option<Timestamp>, pub valid_to: Option<Timestamp>, pub confidence: f32, pub source_item_id: Option<ItemId>, pub scope: Option<String> }
@@ -263,7 +266,8 @@ call `memory_graph_query` for current facts before answering.
 ## Error handling
 
 - `Validation { field: "entity" | "predicate" | "confidence" | "valid_window" | "kind" }` for bad input; nothing written.
-- `FactNotFound { subject, predicate }` (new `Error` variant, exit 2) for invalidate/supersede-old with no open head (supersede tolerates it and reports `old: null`).
+- `FactNotFound { subject, predicate, object }` (new `Error` variant, exit 2) for invalidate/supersede-old with no open head (supersede tolerates it and reports `old: null`).
+- `FactIdNotFound { id }` (new `Error` variant, exit 2) when a fact **id** — `get_fact`, `fact_history` — is not in the store. Distinct from `FactNotFound`, which addresses a triple.
 - `ReadOnly` for any writer on a read-only store; exit 2 from the CLI, `invalid_params` from MCP.
 - `source_item_id` that does not exist → `SupersedesNotFound`-style `Validation { field: "source_item_id" }` (checked in the transaction).
 - Migration 3→4 failure leaves the store at 3 (same runner and tests as before).
@@ -293,6 +297,29 @@ is deferred to 16.
 5. A v0.16.0 (v1) store opens, reports format version 4, and exports as `export-v2` with zero entity/fact lines.
 6. `docs/formats/store-v4.md` exists; the raw loader test passes.
 7. `tools/list` shows six `memory_graph_*` tools normally and three in read-only mode.
+
+## Deviations recorded during implementation
+
+1. **Entities are store-global** (human ruling, 2026-09-05). The original
+   non-goal made the same normalised name in two scopes two entities. The
+   `entities` table therefore has no `scope` column and its unique index is
+   on `normalised_name` alone; `get_entity`, `find_entity`, and
+   `get_or_create_entity` take no scope. `entities(scope, kind)` keeps its
+   `scope` parameter, which filters on **fact** scope. The format was
+   unreleased when this landed, so v4 was amended in place — there is no
+   4 → 5 migration.
+2. **As-of before a NULL `valid_from`.** A closed revision that inherited a
+   `NULL valid_from` is valid at *any* instant before its `valid_to`,
+   because the spec defines `NULL valid_from` as "since unknown" and the
+   as-of rule as `(valid_from IS NULL OR valid_from <= T)`. This is
+   spec-consistent; the implementation plan's test expected an empty result
+   and was corrected, not the code.
+3. **`AmbiguousFactRevision { candidates }`**, an error variant beyond the
+   set this spec's § "Error handling" first listed. `fact_history`'s
+   forward walk returns it when more than one revision supersedes the same
+   one — a forked chain the library refuses to resolve by guessing
+   (Principle VII). Reachable only from a hand-edited or externally-written
+   store; the graph's own writes cannot fork a chain.
 
 ## Constitution Check
 

@@ -55,6 +55,18 @@ impl From<NodeError> for NapiError<&'static str> {
             CoreError::FactIdNotFound { id } => {
                 ("FactIdNotFound", format!("fact {id} not found"))
             }
+            CoreError::AmbiguousFactRevision { candidates } => (
+                "AmbiguousFactRevision",
+                format!(
+                    "fact chain forks at {} competing revisions; candidates {}",
+                    candidates.len(),
+                    candidates
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
             CoreError::AmbiguousLatest { candidates } => (
                 "AmbiguousLatest",
                 format!("ambiguous latest revision: {} candidates", candidates.len()),

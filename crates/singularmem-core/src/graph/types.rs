@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::{EntityId, FactId, ItemId, ScopeFilter};
 
 /// A node in the knowledge graph: a named thing facts can refer to.
+///
+/// Entities are store-global: the normalised name alone is their identity,
+/// so `tantivy` is one node everywhere. Scope lives on [`Fact`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entity {
     /// Stable identifier, minted at first creation.
@@ -19,8 +22,6 @@ pub struct Entity {
     pub normalised_name: String,
     /// Free-form kind, set on first creation and immutable afterwards.
     pub kind: Option<String>,
-    /// Scope path the entity was created under, if any.
-    pub scope: Option<String>,
     /// When this entity was first created.
     pub created_at: Timestamp,
 }
