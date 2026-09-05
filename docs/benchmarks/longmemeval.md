@@ -10,9 +10,16 @@ mean reciprocal rank of the first evidence-session hit. Both are
 reported per search mode (`lexical`, `semantic`, `hybrid`). Abstention
 questions (no evidence session — the model is meant to say "I don't
 know") and questions that errored during retrieval are excluded from
-the scored average but counted separately in the header. This is
-**retrieval only** — it does not measure LLM-judged answer accuracy,
-which is the metric LongMemEval's own leaderboard reports.
+the scored average but counted separately in the header. A question
+that is both an abstention and errored during retrieval is counted
+under `errors`, not `abstention` — the reported abstention count is
+therefore a floor, not necessarily the dataset's true abstention count.
+Retrieval uses `min_score: 0.0`, which drops any candidate scoring
+below zero; BM25 and RRF scores are always non-negative, so this floor
+only ever has an effect in semantic mode, where cosine similarity can
+be negative. This is **retrieval only** — it does not measure
+LLM-judged answer accuracy, which is the metric LongMemEval's own
+leaderboard reports.
 
 ## Getting the dataset
 
@@ -70,9 +77,9 @@ CPU Apple M2 Max (12 cores), macOS (Darwin 25.6.0).
 commit 6e79632  model none  dataset sha256 08d8dad4be43  questions 500 (scored 470, abstention 30, errors 0)
 ingest 2320.6 items/s  wall 02:09
 
-| mode | R@1 | R@5 | R@10 | MRR | q/s |
-|---|---|---|---|---|---|
-| lexical | 0.849 | 0.949 | 0.972 | 0.891 | 826.0 |
+| mode | R@1 | R@5 | R@10 | MRR |
+|---|---|---|---|---|
+| lexical | 0.849 | 0.949 | 0.972 | 0.891 |
 
 ## R@5 by question type
 
@@ -94,11 +101,11 @@ ingest 2320.6 items/s  wall 02:09
 commit 6e79632  model sentence-transformers/all-MiniLM-L6-v2@v1  dataset sha256 08d8dad4be43  questions 500 (scored 470, abstention 30, errors 0)
 ingest 56.4 items/s  wall 73:29
 
-| mode | R@1 | R@5 | R@10 | MRR | q/s |
-|---|---|---|---|---|---|
-| lexical | 0.849 | 0.949 | 0.972 | 0.891 | 1010.8 |
-| semantic | 0.864 | 0.972 | 0.987 | 0.910 | 223.1 |
-| hybrid | 0.891 | 0.981 | 0.996 | 0.929 | 237.0 |
+| mode | R@1 | R@5 | R@10 | MRR |
+|---|---|---|---|---|
+| lexical | 0.849 | 0.949 | 0.972 | 0.891 |
+| semantic | 0.864 | 0.972 | 0.987 | 0.910 |
+| hybrid | 0.891 | 0.981 | 0.996 | 0.929 |
 
 ## R@5 by question type
 
@@ -111,6 +118,12 @@ ingest 56.4 items/s  wall 73:29
 | temporal-reasoning | 127 | 0.921 | 0.945 | 0.961 |
 | knowledge-update | 72 | 1.000 | 1.000 | 1.000 |
 ```
+
+Retrieval calls themselves are sub-millisecond per question in both
+runs above; wall time is dominated by ingestion, not retrieval — 2320.6
+items/s and a 02:09 wall for the lexical-only run vs. 56.4 items/s and a
+73:29 wall once semantic/hybrid re-embed every haystack turn per
+question (both figures from each run's header above).
 
 The two runs both scored 470/500 questions (30 abstention questions
 excluded, 0 errors). Full per-question hit lists were written to
@@ -164,6 +177,11 @@ mempalace's raw 96.6%. These numbers are **not directly comparable**:
 - Both use a session-level hit definition (a hit is any evidence
   session appearing in the top-k retrieved sessions), so the *k*
   semantics should be comparable even though the pipelines are not.
+- The dataset file itself differs: mempalace's README reproduces its
+  numbers against `longmemeval_s_cleaned.json`; the runs in this
+  document were taken against the raw `longmemeval_s` file (see
+  "Getting the dataset" above), and the two are not guaranteed to
+  contain identical questions or haystacks.
 
 ## Reading the numbers
 
@@ -175,10 +193,13 @@ The biggest lexical weak spot is `single-session-preference`
 (R@5 0.667) — preference questions ("what's my favorite ...")
 rarely share exact wording with the answer turn, so lexical search
 misses them; semantic and hybrid close that gap to 0.967. The next
-things worth trying: sweep `rrf_k` and the retrieval `fetch_multiplier`
-(currently `max(ks) * 4`) to see whether over-fetching more sessions
-before truncation narrows the `temporal-reasoning` gap (0.921 lexical
-vs 0.961 hybrid, the largest remaining spread), and compare
-`bge-small-en` against `all-mini-lm-l6-v2` for the semantic and hybrid
-rows since embedding quality is the more likely lever than fusion
-parameters at this recall level.
+things worth trying: sweep `rrf_k` to see whether it narrows the
+`temporal-reasoning` gap (0.921 lexical vs 0.961 hybrid, the largest
+remaining spread), and compare `bge-small-en` against
+`all-mini-lm-l6-v2` for the semantic and hybrid rows since embedding
+quality is the more likely lever than fusion parameters at this recall
+level. (Over-fetching more candidates before truncation — raising the
+retrieval `fetch_multiplier`, currently `max(ks) * 4` — was considered
+and ruled out: every miss in these runs already had ten distinct
+sessions within the top-40 blocks fetched per question, so fetching
+even more candidates cannot change which sessions land in the top-10.)

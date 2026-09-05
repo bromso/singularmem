@@ -358,3 +358,23 @@ No test loads a real embedding model.
   in under the 3-hour budget in the spec's Performance section, so both
   published tables are full, untruncated 500-question `_S` runs — no
   `--limit` sampling was needed.
+- Whole-branch review fix wave: `QuestionResult.query_ms: BTreeMap<SearchMode, u64>`
+  (milliseconds, spec §`report.rs`) is `query_us` (microseconds).
+  Retrieval calls land well under a millisecond, so the millisecond
+  field quantised almost every per-question timing to `0`, making the
+  derived `queries_per_s` figure meaningless; the JSON field is also
+  renamed `retrieve_queries_per_s` (moved off `ModeMetrics` name
+  `queries_per_s`) to make clear it excludes ingestion.
+- The spec's Markdown mode table (§ sample output) has a `q/s` column;
+  it is dropped entirely rather than fixed, since a column readers
+  would keep reading at millisecond-quantised precision is worse than
+  no column — `retrieve_queries_per_s` remains available in the JSON
+  summary for anyone who wants it.
+- `--question-type` (spec's CLI flags table) takes an arbitrary
+  `String`, relying on `QuestionType::from` to fall back to `Other` for
+  typos, so a misspelled type silently matched zero questions and
+  exited 1 with no indication of the typo. It is now validated at the
+  clap level against the six known `LongMemEval` type names — a typo
+  exits 2 with the valid list — while `QuestionType::Other` remains for
+  parsing arbitrary values out of the dataset file itself, which is
+  unaffected.
