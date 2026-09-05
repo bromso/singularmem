@@ -8,7 +8,7 @@
 //! Split into three focused tests sharing one [`setup`] fixture: items +
 //! envelope shape, entity/fact lines, and backward-compatibility/determinism.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use singularmem_core::graph::{Fact, NewFact, NewObject};
@@ -119,9 +119,11 @@ fn setup() -> Setup {
 
     // Graph: one entity-object fact, one value-object fact carrying a
     // source item, then invalidate the entity-object fact — three fact
-    // revisions in total, over two entities (singularmem, tantivy).
+    // revisions in total, over two entities. The object is deliberately
+    // written mixed-case and spaced so the export's `normalised_name` is
+    // visibly *not* just a lowercased `name`.
     let triple_fact = store
-        .add_fact(NewFact::triple("singularmem", "uses", "tantivy"))
+        .add_fact(NewFact::triple("singularmem", "uses", "Meili Search"))
         .unwrap();
     let value_fact = store
         .add_fact(NewFact {
@@ -141,7 +143,7 @@ fn setup() -> Setup {
             "singularmem",
             "uses",
             &NewObject::Entity {
-                name: "tantivy".into(),
+                name: "Meili Search".into(),
                 kind: None,
             },
             None,
@@ -175,7 +177,8 @@ fn open_core_only_round_trip_items() {
     // Manually re-parse the JSONL: skip meta line, parse items.
     let text = String::from_utf8(s.buf.clone()).expect("utf8");
     let lines: Vec<&str> = text.lines().collect();
-    // 1 meta + 6 items + 2 entities (singularmem, tantivy) + 3 fact revisions.
+    // 1 meta + 6 items + 2 entities (singularmem, Meili Search) + 3 fact
+    // revisions.
     assert_eq!(lines.len(), 12, "1 meta + 6 items + 2 entities + 3 facts");
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
@@ -259,7 +262,7 @@ fn open_core_only_round_trip_entities_and_facts() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 12, "1 meta + 6 items + 2 entities + 3 facts");
 
-    // Entity lines: singularmem and tantivy. Both are resolved inside the
+    // Entity lines: singularmem and Meili Search. Both are resolved inside the
     // same `add_fact` call and so share one `created_at`, in which case the
     // spec's tie-break is by id — not by which of the two was resolved
     // first — so only the *set* of names, not their order, is asserted
@@ -268,16 +271,21 @@ fn open_core_only_round_trip_entities_and_facts() {
         .iter()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    // `name` is the display form as first written; `normalised_name` is the
+    // identity: NFC, trimmed, lowercased, internal whitespace collapsed to
+    // `_`. `Meili Search` exercises both differences at once.
+    let by_name: HashMap<&str, &EntityLine> =
+        entity_lines.iter().map(|e| (e.name.as_str(), e)).collect();
     for entity in &entity_lines {
         assert_eq!(entity.line_kind, "entity");
         assert!(entity.entity_kind.is_none());
-        assert_eq!(entity.normalised_name, entity.name.to_lowercase());
     }
-    let entity_names: HashSet<&str> = entity_lines.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(
-        entity_names,
-        ["singularmem", "tantivy"].into_iter().collect()
+        by_name.keys().copied().collect::<HashSet<&str>>(),
+        ["singularmem", "Meili Search"].into_iter().collect()
     );
+    assert_eq!(by_name["singularmem"].normalised_name, "singularmem");
+    assert_eq!(by_name["Meili Search"].normalised_name, "meili_search");
 
     // Ordering invariant: (created_at, id) is non-decreasing across the
     // entity block.
@@ -317,7 +325,7 @@ fn open_core_only_round_trip_entities_and_facts() {
         .expect("triple fact line present");
     assert_eq!(triple_line.subject.name, "singularmem");
     assert_eq!(triple_line.predicate, "uses");
-    assert_eq!(triple_line.object["entity"]["name"], "tantivy");
+    assert_eq!(triple_line.object["entity"]["name"], "Meili Search");
     assert!(triple_line.object.get("value").is_none());
     assert!(triple_line.source_item_id.is_none());
     assert!(triple_line.scope.is_none());

@@ -90,7 +90,7 @@ fn schema(path: &std::path::Path) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn v1_store_migrates_to_v3_on_open() {
+fn v1_store_migrates_to_v4_on_open() {
     let dir = TempDir::new().unwrap();
     let path = make_v1(&dir);
 
@@ -255,7 +255,7 @@ fn conflicting_index_name_fails_migration_and_leaves_v1_intact() {
 }
 
 #[test]
-fn fresh_store_is_v3_with_external_id_column() {
+fn fresh_store_is_v4_with_external_id_column() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("fresh.db");
     let store = Store::open(&path).unwrap();
@@ -271,7 +271,7 @@ fn fresh_store_is_v3_with_external_id_column() {
 }
 
 /// Plan acceptance criterion 5: a v1 store written by an older binary opens
-/// under the current one and exports cleanly at `store_format_version = 3`.
+/// under the current one and exports cleanly at `store_format_version = 4`.
 #[test]
 fn migrated_v1_store_exports_cleanly() {
     let dir = TempDir::new().unwrap();
@@ -300,7 +300,7 @@ fn migrated_v1_store_exports_cleanly() {
 }
 
 #[test]
-fn v2_store_migrates_to_v3_on_open() {
+fn v2_store_migrates_to_v4_on_open() {
     let dir = TempDir::new().unwrap();
     let path = make_v2(&dir);
     let store = Store::open(&path).unwrap();
@@ -399,12 +399,15 @@ fn v2_store_migrates_to_v3_on_open() {
     );
 }
 
+/// A v1 store runs the whole `1 → 2 → 3 → 4` chain on one open: it lands at
+/// `format_version = 4` with every column each link in the chain added.
 #[test]
-fn v1_store_migrates_through_the_chain_to_v3() {
+fn v1_store_migrates_through_the_chain_to_v4() {
     let dir = TempDir::new().unwrap();
     let path = make_v1(&dir);
     let store = Store::open(&path).unwrap();
     assert_eq!(store.format_version().unwrap(), "4");
+    drop(store);
     let conn = Connection::open(&path).unwrap();
     let cols: Vec<String> = conn
         .prepare("SELECT name FROM pragma_table_info('items')")
@@ -414,6 +417,16 @@ fn v1_store_migrates_through_the_chain_to_v3() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert!(cols.contains(&"external_id".to_string()) && cols.contains(&"scope".to_string()));
+    for table in ["entities", "facts"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "table {table}");
+    }
 }
 
 #[test]
@@ -457,7 +470,7 @@ fn read_only_v2_refuses_to_migrate() {
 }
 
 #[test]
-fn fresh_store_is_v3_and_round_trips_scope() {
+fn fresh_store_is_v4_and_round_trips_scope() {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path().join("f.db")).unwrap();
     assert_eq!(store.format_version().unwrap(), "4");
@@ -550,13 +563,6 @@ fn v3_store_migrates_to_v4_with_graph_tables() {
         )
         .unwrap();
     assert_eq!(n, 1);
-}
-
-#[test]
-fn v1_store_migrates_through_the_chain_to_v4() {
-    let dir = TempDir::new().unwrap();
-    let path = make_v1(&dir);
-    assert_eq!(Store::open(&path).unwrap().format_version().unwrap(), "4");
 }
 
 #[test]

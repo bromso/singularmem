@@ -194,10 +194,10 @@ fn as_of_and_recorded_at_answer_both_axes() {
         "what we believed before the supersede"
     );
     // The closing revision inherited the original's NULL `valid_from`, which
-    // the spec defines as "since unknown" — so it is still valid at any point
-    // before its `valid_to`. (The task brief expected `is_empty()` here; that
-    // contradicts the spec's as-of rule, § "Revisions and the two time axes",
-    // which is the contract. Flagged in the task report.)
+    // the spec defines as "since unknown" — not "since recorded" — so it is
+    // still valid at any instant before its `valid_to`, however early. An
+    // as-of query from long before the fact was written therefore still
+    // sees it; only a `valid_from` would bound it.
     assert_eq!(
         names(
             s2.query_entity("singularmem", &q(Some("2025-01-01"), None))
@@ -214,9 +214,19 @@ fn supersede_is_atomic_and_tolerates_missing_old() {
     s.add_fact(NewFact::triple("a", "p", "old")).unwrap();
     let entities_before = s.entities(None, None).unwrap().len();
     let bad_new = entity("   ");
-    assert!(s
+    let err = s
         .supersede_fact("a", "p", &entity("old"), bad_new, None, None)
-        .is_err());
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Validation {
+                field: "entity",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
     assert_eq!(
         s.graph_stats(None).unwrap().open_facts,
         1,

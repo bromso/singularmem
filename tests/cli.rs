@@ -3044,7 +3044,8 @@ fn graph_errors_and_read_only() {
 
 /// Every timestamp flag (`--from`/`--to`/`--at`/`--as-of`/`--recorded-at`)
 /// must name itself in a bad-value error, not just say "validation failed
-/// for timestamp" (review finding 1).
+/// for timestamp" — otherwise a script with two time flags cannot tell
+/// which one it got wrong.
 #[test]
 fn graph_timestamp_errors_name_the_flag() {
     let dir = TempDir::new().unwrap();
@@ -3294,7 +3295,7 @@ fn graph_history_format_table_and_ids() {
 
 /// `graph history --json` is a shortcut for `--format json` (spec's literal
 /// `graph history <FACT_ID> [--json]`), and conflicts with an explicit
-/// `--format ids` (review finding 3).
+/// `--format ids`.
 #[test]
 fn graph_history_json_flag_matches_format_json_and_conflicts_with_format() {
     let dir = TempDir::new().unwrap();
@@ -3317,7 +3318,8 @@ fn graph_history_json_flag_matches_format_json_and_conflicts_with_format() {
 }
 
 /// `graph history NOTANID` names the fact ID specifically, distinct from
-/// `--source`'s "invalid item ID" (review finding 5).
+/// `--source`'s "invalid item ID" — both parse a ULID, but a caller needs
+/// to know which argument was rejected.
 #[test]
 fn graph_history_invalid_fact_id_is_a_distinct_error() {
     let dir = TempDir::new().unwrap();
