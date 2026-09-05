@@ -269,10 +269,25 @@ showing last 0` and nothing follows.
 
 ```
 # Singularmem wake-up — claude-code/myproj, codex/myproj, cursor/myproj — 2 items, showing last 2
+# 2 memories for query: "wake-up:claude-code/myproj,codex/myproj,cursor/myproj"
+
+## memory 1 (score=0.0000)
+id: 01M1S3F0Q8W1J8Z5N0V4K2X9YB
+created: 2026-09-05T18:37:03.363997Z
 
 alpha decision
+---
+
+## memory 2 (score=0.0000)
+id: 01M1S3F0QAQ4T7H6M2C8D1R5ZE
+created: 2026-09-05T18:37:03.401212Z
+
 beta decision
+---
 ```
+
+(The body after the first line is the adapter's own rendering; `plain`
+shown here.)
 
 ### `memory_graph_add`
 

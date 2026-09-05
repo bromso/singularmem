@@ -76,6 +76,9 @@ fn handshake_and_retrieve_end_to_end() {
 
     // Spawn the MCP server.
     let mut child = Command::new(mcp_bin())
+        .env_remove("SINGULARMEM_DEFAULT_ADAPTER")
+        .env_remove("SINGULARMEM_PROJECT")
+        .env_remove("SINGULARMEM_READ_ONLY")
         .env("SINGULARMEM_STORE", store.to_str().unwrap())
         .env("SINGULARMEM_TEST_EMBEDDER", "mock")
         .stdin(Stdio::piped())
@@ -330,6 +333,9 @@ fn spawn_initialized_mcp(
     thread::JoinHandle<String>,
 ) {
     let mut child = Command::new(mcp_bin())
+        .env_remove("SINGULARMEM_DEFAULT_ADAPTER")
+        .env_remove("SINGULARMEM_PROJECT")
+        .env_remove("SINGULARMEM_READ_ONLY")
         .env("SINGULARMEM_STORE", store.to_str().unwrap())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
