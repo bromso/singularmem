@@ -12,9 +12,9 @@ description = "Singularmem retrieval adapter for Anthropic Claude (pure formatte
 workspace = true
 
 [dependencies]
-singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.20.0" }
 
 [dev-dependencies]
-singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
-singularmem-search = { path = "../singularmem-search", version = "0.16.0" }
+singularmem-core = { path = "../singularmem-core", version = "0.20.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.20.0" }
 jiff = { workspace = true }

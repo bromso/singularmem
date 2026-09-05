@@ -17,10 +17,10 @@ name = "singularmem-bench"
 path = "src/main.rs"
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
-singularmem-search = { path = "../singularmem-search", version = "0.16.0", features = ["testing"] }
-singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
-singularmem-ingest = { path = "../singularmem-ingest", version = "0.16.0" }
+singularmem-core = { path = "../singularmem-core", version = "0.20.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.20.0", features = ["testing"] }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.20.0" }
+singularmem-ingest = { path = "../singularmem-ingest", version = "0.20.0" }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
