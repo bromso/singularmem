@@ -346,3 +346,15 @@ No test loads a real embedding model.
   index for querying, the runner checks `doc_count()` on each against the
   number of items ingested and fails the question with an error naming
   the mismatch if they disagree.
+- Task 5 (Documentation): a first full-run attempt against commit
+  `8f18be5` surfaced 6 per-question errors — `singularmem-search`'s
+  Tantivy query parser rejected natural-language questions containing
+  colons or quoted apostrophes as syntax errors. This was a real defect
+  in `singularmem-search`, not a benchmark-tool bug, so it was fixed
+  there (lenient query-parsing fallback, commit `6e79632`) rather than
+  worked around in `singularmem-bench`; the published full runs in
+  `docs/benchmarks/longmemeval.md` are against `6e79632` and show
+  `errors 0`. The all-modes run's own "estimated total" (~99 min) came
+  in under the 3-hour budget in the spec's Performance section, so both
+  published tables are full, untruncated 500-question `_S` runs — no
+  `--limit` sampling was needed.

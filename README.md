@@ -9,7 +9,8 @@ a stable, vendor-neutral interface.
 > **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0) and
 > scoping (v0.18.0) — memory store, hybrid search (Tantivy + USearch),
 > provider adapters, MCP server, TypeScript SDK, bulk transcript ingestion,
-> and hierarchical item scoping. Constitution v0.2.0 ratified 2026-05-15.
+> and hierarchical item scoping, and a LongMemEval retrieval benchmark
+> (`singularmem-bench`). Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 
@@ -87,6 +88,12 @@ singularmem wake-up --project .
 
 See [docs/hooks.md](docs/hooks.md) for the full per-editor event table,
 config paths, and troubleshooting.
+
+## Benchmarks
+
+`singularmem-bench` measures retrieval quality (Recall@k, MRR) against
+LongMemEval. See [docs/benchmarks/longmemeval.md](docs/benchmarks/longmemeval.md)
+for the published numbers and how to reproduce them.
 
 ## Installing the CLI
 
