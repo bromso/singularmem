@@ -4,11 +4,14 @@
 //! If a future sub-project introduces a hidden dependency on a proprietary
 //! component for any of {ingest, get, list, export, revision-walk}, this
 //! test fails — either at compile time (missing import) or at assertion time.
+//!
+//! Split into three focused tests sharing one [`setup`] fixture: items +
+//! envelope shape, entity/fact lines, and backward-compatibility/determinism.
 
 use std::collections::HashSet;
 use std::io::Cursor;
 
-use singularmem_core::graph::{NewFact, NewObject};
+use singularmem_core::graph::{Fact, NewFact, NewObject};
 use singularmem_core::{Item, NewItem, Store};
 use tempfile::TempDir;
 
@@ -63,8 +66,26 @@ struct FactLine {
     recorded_at: String,
 }
 
-#[test]
-fn open_core_only_round_trip() {
+/// Shared fixture for the `open_core_only_round_trip_*` tests: a store
+/// seeded with a varied mix of items and graph facts, already exported to
+/// `buf` once. `_dir` and `store` are kept alive so
+/// [`open_core_only_round_trip_export_is_deterministic`] can export a
+/// second time from the same store.
+struct Setup {
+    _dir: TempDir,
+    store: Store,
+    originals: Vec<Item>,
+    plain: Item,
+    tagged: Item,
+    sourced: Item,
+    correction: Item,
+    triple_fact: Fact,
+    value_fact: Fact,
+    invalidated: Fact,
+    buf: Vec<u8>,
+}
+
+fn setup() -> Setup {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("store.db");
     let store = Store::open(&path).expect("open fresh");
@@ -132,8 +153,27 @@ fn open_core_only_round_trip() {
     let mut buf = Vec::new();
     store.export(&mut buf).expect("export");
 
+    Setup {
+        _dir: dir,
+        store,
+        originals,
+        plain,
+        tagged,
+        sourced,
+        correction,
+        triple_fact,
+        value_fact,
+        invalidated,
+        buf,
+    }
+}
+
+#[test]
+fn open_core_only_round_trip_items() {
+    let s = setup();
+
     // Manually re-parse the JSONL: skip meta line, parse items.
-    let text = String::from_utf8(buf.clone()).expect("utf8");
+    let text = String::from_utf8(s.buf.clone()).expect("utf8");
     let lines: Vec<&str> = text.lines().collect();
     // 1 meta + 6 items + 2 entities (singularmem, tantivy) + 3 fact revisions.
     assert_eq!(lines.len(), 12, "1 meta + 6 items + 2 entities + 3 facts");
@@ -170,19 +210,19 @@ fn open_core_only_round_trip() {
         .collect();
 
     // Assert exact equality with the original list.
-    assert_eq!(parsed_items, originals);
+    assert_eq!(parsed_items, s.originals);
 
     // Cross-check: the supersedes pointer survived.
     let correction_via_export = parsed_items
         .iter()
-        .find(|i| i.id == correction.id)
+        .find(|i| i.id == s.correction.id)
         .expect("correction in export");
-    assert_eq!(correction_via_export.supersedes, Some(plain.id));
+    assert_eq!(correction_via_export.supersedes, Some(s.plain.id));
 
     // Cross-check: the JSON metadata survived.
     let sourced_via_export = parsed_items
         .iter()
-        .find(|i| i.id == sourced.id)
+        .find(|i| i.id == s.sourced.id)
         .expect("sourced in export");
     assert_eq!(
         sourced_via_export.metadata,
@@ -196,7 +236,7 @@ fn open_core_only_round_trip() {
     // Cross-check: tag set survived (sorted-deduped).
     let tagged_via_export = parsed_items
         .iter()
-        .find(|i| i.id == tagged.id)
+        .find(|i| i.id == s.tagged.id)
         .expect("tagged in export");
     let tag_set: HashSet<&str> = tagged_via_export.tags.iter().map(String::as_str).collect();
     assert_eq!(tag_set, ["work", "decision"].into_iter().collect());
@@ -210,6 +250,14 @@ fn open_core_only_round_trip() {
     assert!(parsed_items
         .iter()
         .any(|i| i.scope.as_deref() == Some("rt/scope")));
+}
+
+#[test]
+fn open_core_only_round_trip_entities_and_facts() {
+    let s = setup();
+    let text = String::from_utf8(s.buf.clone()).expect("utf8");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 12, "1 meta + 6 items + 2 entities + 3 facts");
 
     // Entity lines: singularmem and tantivy. Both are resolved inside the
     // same `add_fact` call and so share one `created_at`, in which case the
@@ -258,14 +306,14 @@ fn open_core_only_round_trip() {
     }
     let fact_ids: HashSet<&str> = fact_lines.iter().map(|f| f.id.as_str()).collect();
     assert_eq!(fact_ids.len(), 3, "three distinct fact revisions");
-    assert!(fact_ids.contains(triple_fact.id.to_string().as_str()));
-    assert!(fact_ids.contains(value_fact.id.to_string().as_str()));
-    assert!(fact_ids.contains(invalidated.id.to_string().as_str()));
+    assert!(fact_ids.contains(s.triple_fact.id.to_string().as_str()));
+    assert!(fact_ids.contains(s.value_fact.id.to_string().as_str()));
+    assert!(fact_ids.contains(s.invalidated.id.to_string().as_str()));
 
     // The entity-object fact's `object` is `{"entity": {"id", "name"}}`.
     let triple_line = fact_lines
         .iter()
-        .find(|f| f.id == triple_fact.id.to_string())
+        .find(|f| f.id == s.triple_fact.id.to_string())
         .expect("triple fact line present");
     assert_eq!(triple_line.subject.name, "singularmem");
     assert_eq!(triple_line.predicate, "uses");
@@ -279,13 +327,13 @@ fn open_core_only_round_trip() {
     // its source item id.
     let value_line = fact_lines
         .iter()
-        .find(|f| f.id == value_fact.id.to_string())
+        .find(|f| f.id == s.value_fact.id.to_string())
         .expect("value fact line present");
     assert_eq!(value_line.object["value"], "battle-tested");
     assert!(value_line.object.get("entity").is_none());
     assert_eq!(
         value_line.source_item_id.as_deref(),
-        Some(sourced.id.to_string()).as_deref()
+        Some(s.sourced.id.to_string()).as_deref()
     );
     assert!((value_line.confidence - 0.9).abs() < f32::EPSILON);
 
@@ -293,14 +341,21 @@ fn open_core_only_round_trip() {
     // carries a `valid_to`.
     let invalidated_line = fact_lines
         .iter()
-        .find(|f| f.id == invalidated.id.to_string())
+        .find(|f| f.id == s.invalidated.id.to_string())
         .expect("invalidated fact line present");
     assert_eq!(
         invalidated_line.supersedes.as_deref(),
-        Some(triple_fact.id.to_string()).as_deref()
+        Some(s.triple_fact.id.to_string()).as_deref()
     );
     assert!(invalidated_line.valid_to.is_some());
     assert!(invalidated_line.valid_from.is_none());
+}
+
+#[test]
+fn open_core_only_round_trip_is_backward_compatible_and_deterministic() {
+    let s = setup();
+    let text = String::from_utf8(s.buf.clone()).expect("utf8");
+    let lines: Vec<&str> = text.lines().collect();
 
     // A loader that only understands `meta`/`item` and ignores every other
     // `_kind` (per the export-v2 rule) still reads all N items.
@@ -316,15 +371,17 @@ fn open_core_only_round_trip() {
             }
         })
         .collect();
-    assert_eq!(v1_style_items, originals);
+    assert_eq!(v1_style_items, s.originals);
 
     // Last sanity check: the export is deterministic byte-for-byte across
     // two runs of the same store. (Cannot include exported_at in this
     // assertion because it changes on each run.)
     let mut buf2 = Vec::new();
-    store.export(&mut Cursor::new(&mut buf2)).expect("export 2");
+    s.store
+        .export(&mut Cursor::new(&mut buf2))
+        .expect("export 2");
     // Strip the meta lines (they contain timestamps); compare the rest.
-    let lines1: Vec<&str> = std::str::from_utf8(&buf).unwrap().lines().collect();
+    let lines1: Vec<&str> = std::str::from_utf8(&s.buf).unwrap().lines().collect();
     let lines2: Vec<&str> = std::str::from_utf8(&buf2).unwrap().lines().collect();
     assert_eq!(&lines1[1..], &lines2[1..]);
 }

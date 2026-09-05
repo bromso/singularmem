@@ -234,37 +234,48 @@ fn supersede_is_atomic_and_tolerates_missing_old() {
     assert_eq!(new.subject.name, "b");
 }
 
+/// Seed a store with three facts spanning two scopes
+/// (`claude-code/singularmem` and `claude-code/other`) for the
+/// direction/scope/predicate/timeline/entities tests below.
+fn seed_direction_and_scope_facts() -> (TempDir, Store) {
+    let (dir, graph_store) = store();
+    let mut owns_fact = NewFact::triple("jonas", "owns", "singularmem");
+    owns_fact.scope = Some("claude-code/singularmem".into());
+    graph_store.add_fact(owns_fact).unwrap();
+    let mut uses_fact = NewFact::triple("singularmem", "uses", "tantivy");
+    uses_fact.scope = Some("claude-code/singularmem".into());
+    uses_fact.valid_from = Some(ts("2026-05-16"));
+    graph_store.add_fact(uses_fact).unwrap();
+    let mut other_uses_fact = NewFact::triple("other", "uses", "tantivy");
+    other_uses_fact.scope = Some("claude-code/other".into());
+    graph_store.add_fact(other_uses_fact).unwrap();
+    (dir, graph_store)
+}
+
 #[test]
 fn directions_scopes_predicates_timeline_entities() {
-    let (_d, s) = store();
-    let mut f = NewFact::triple("jonas", "owns", "singularmem");
-    f.scope = Some("claude-code/singularmem".into());
-    s.add_fact(f).unwrap();
-    let mut g = NewFact::triple("singularmem", "uses", "tantivy");
-    g.scope = Some("claude-code/singularmem".into());
-    g.valid_from = Some(ts("2026-05-16"));
-    s.add_fact(g).unwrap();
-    let mut h = NewFact::triple("other", "uses", "tantivy");
-    h.scope = Some("claude-code/other".into());
-    s.add_fact(h).unwrap();
-    let q = |dir| GraphQuery {
-        direction: dir,
+    let (_dir, graph_store) = seed_direction_and_scope_facts();
+    let query_with_direction = |direction| GraphQuery {
+        direction,
         ..Default::default()
     };
     assert_eq!(
-        s.query_entity("singularmem", &q(Direction::Outgoing))
+        graph_store
+            .query_entity("singularmem", &query_with_direction(Direction::Outgoing))
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        s.query_entity("singularmem", &q(Direction::Incoming))
+        graph_store
+            .query_entity("singularmem", &query_with_direction(Direction::Incoming))
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        s.query_entity("singularmem", &q(Direction::Both))
+        graph_store
+            .query_entity("singularmem", &query_with_direction(Direction::Both))
             .unwrap()
             .len(),
         2
@@ -273,14 +284,18 @@ fn directions_scopes_predicates_timeline_entities() {
         scope: Some(ScopeFilter::descendants("claude-code/singularmem").unwrap()),
         ..Default::default()
     };
-    assert_eq!(s.query_predicate("uses", &scoped).unwrap().len(), 1);
     assert_eq!(
-        s.query_predicate("uses", &GraphQuery::default())
+        graph_store.query_predicate("uses", &scoped).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        graph_store
+            .query_predicate("uses", &GraphQuery::default())
             .unwrap()
             .len(),
         2
     );
-    let tl = s.timeline(Some("tantivy"), None).unwrap();
+    let tl = graph_store.timeline(Some("tantivy"), None).unwrap();
     assert_eq!(tl.len(), 2);
     assert!(tl.iter().all(|e| e.current));
     assert_eq!(
@@ -288,7 +303,7 @@ fn directions_scopes_predicates_timeline_entities() {
         Some(ts("2026-05-16")),
         "dated first, NULL valid_from last"
     );
-    let ents = s.entities(None, None).unwrap();
+    let ents = graph_store.entities(None, None).unwrap();
     assert_eq!(
         ents.iter()
             .map(|e| e.entity.name.as_str())
@@ -302,16 +317,20 @@ fn directions_scopes_predicates_timeline_entities() {
             .fact_count,
         2
     );
-    let st = s.graph_stats(None).unwrap();
+    let st = graph_store.graph_stats(None).unwrap();
     assert_eq!(
         (st.entities, st.open_facts, st.closed_facts, st.predicates),
         (4, 3, 0, 2)
     );
+}
 
-    // Scoped listing/stats/timeline: a scope filter narrows the facts, and
-    // with it the entities taking part in one.
+#[test]
+fn scoped_listing_stats_and_timeline_narrow_to_one_scope() {
+    // A scope filter narrows the facts, and with it the entities taking
+    // part in one.
+    let (_dir, graph_store) = seed_direction_and_scope_facts();
     let other = ScopeFilter::descendants("claude-code/other").unwrap();
-    let scoped_ents = s.entities(Some(&other), None).unwrap();
+    let scoped_ents = graph_store.entities(Some(&other), None).unwrap();
     assert_eq!(
         scoped_ents
             .iter()
@@ -328,7 +347,7 @@ fn directions_scopes_predicates_timeline_entities() {
         1,
         "only the in-scope fact counts"
     );
-    let scoped_stats = s.graph_stats(Some(&other)).unwrap();
+    let scoped_stats = graph_store.graph_stats(Some(&other)).unwrap();
     assert_eq!(
         (
             scoped_stats.entities,
@@ -338,25 +357,30 @@ fn directions_scopes_predicates_timeline_entities() {
         ),
         (2, 1, 0, 1)
     );
-    assert_eq!(s.timeline(None, Some(&other)).unwrap().len(), 1);
+    assert_eq!(graph_store.timeline(None, Some(&other)).unwrap().len(), 1);
 }
 
 #[test]
 fn provenance_and_read_only() {
-    let d = TempDir::new().unwrap();
-    let p = d.path().join("s.db");
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("s.db");
     let item = {
-        let s = Store::open(&p).unwrap();
-        s.ingest(NewItem::text("we picked tantivy")).unwrap()
+        let ingest_store = Store::open(&path).unwrap();
+        ingest_store
+            .ingest(NewItem::text("we picked tantivy"))
+            .unwrap()
     };
-    let s = Store::open(&p).unwrap();
-    let mut f = NewFact::triple("singularmem", "uses", "tantivy");
-    f.source_item_id = Some(item.id);
-    assert_eq!(s.add_fact(f).unwrap().source_item_id, Some(item.id));
-    let mut g = NewFact::triple("x", "y", "z");
-    g.source_item_id = Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap());
+    let graph_store = Store::open(&path).unwrap();
+    let mut uses_fact = NewFact::triple("singularmem", "uses", "tantivy");
+    uses_fact.source_item_id = Some(item.id);
+    assert_eq!(
+        graph_store.add_fact(uses_fact).unwrap().source_item_id,
+        Some(item.id)
+    );
+    let mut bad_source_fact = NewFact::triple("x", "y", "z");
+    bad_source_fact.source_item_id = Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap());
     assert!(matches!(
-        s.add_fact(g),
+        graph_store.add_fact(bad_source_fact),
         Err(Error::Validation {
             field: "source_item_id",
             ..
@@ -366,14 +390,14 @@ fn provenance_and_read_only() {
     bad.valid_from = Some(ts("2026-09-01"));
     bad.valid_to = Some(ts("2026-08-01"));
     assert!(matches!(
-        s.add_fact(bad),
+        graph_store.add_fact(bad),
         Err(Error::Validation {
             field: "valid_window",
             ..
         })
     ));
-    let ro =
-        Store::open_with_options(&p, singularmem_core::StoreOptions { read_only: true }).unwrap();
+    let ro = Store::open_with_options(&path, singularmem_core::StoreOptions { read_only: true })
+        .unwrap();
     assert!(matches!(
         ro.add_fact(NewFact::triple("q", "r", "s")),
         Err(Error::ReadOnly { .. })

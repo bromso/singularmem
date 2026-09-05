@@ -60,6 +60,35 @@ fn make_v3(dir: &TempDir) -> std::path::PathBuf {
     path
 }
 
+/// Read back `(type, name, sql)` for every non-`sqlite_%` object in
+/// `sqlite_master`, with the `sql` column's whitespace stripped so two
+/// schemas written with different formatting still compare equal. Used by
+/// [`fresh_and_migrated_v4_schemas_are_identical`].
+fn schema(path: &std::path::Path) -> Vec<(String, String, String)> {
+    let conn = Connection::open(path).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT type, name, sql FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| {
+            let sql: Option<String> = r.get(2)?;
+            let stripped: String = sql
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            Ok((r.get(0)?, r.get(1)?, stripped))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    drop(stmt);
+    rows
+}
+
 #[test]
 fn v1_store_migrates_to_v3_on_open() {
     let dir = TempDir::new().unwrap();
@@ -581,31 +610,6 @@ fn fresh_and_migrated_v4_schemas_are_identical() {
     let store = Store::open(&migrated).unwrap();
     assert_eq!(store.format_version().unwrap(), "4");
     drop(store);
-
-    fn schema(path: &std::path::Path) -> Vec<(String, String, String)> {
-        let conn = Connection::open(path).unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT type, name, sql FROM sqlite_master \
-                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
-            )
-            .unwrap();
-        let rows = stmt
-            .query_map([], |r| {
-                let sql: Option<String> = r.get(2)?;
-                let stripped: String = sql
-                    .unwrap_or_default()
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect();
-                Ok((r.get(0)?, r.get(1)?, stripped))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        drop(stmt);
-        rows
-    }
 
     let fresh_schema = schema(&fresh);
     let migrated_schema = schema(&migrated);
