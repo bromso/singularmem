@@ -10,6 +10,6 @@
 pub const FORMAT_VERSION: &str = "4";
 
 /// Marker constant for the JSONL export schema (`_singularmem_format` field on
-/// the meta line of an export). See `docs/formats/store-v3.md` § "Export
-/// format — `export-v1`".
-pub const EXPORT_FORMAT: &str = "export-v1";
+/// the meta line of an export). See `docs/formats/store-v4.md` § "Export —
+/// `export-v2`".
+pub const EXPORT_FORMAT: &str = "export-v2";

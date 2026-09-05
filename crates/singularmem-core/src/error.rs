@@ -132,7 +132,7 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// JSON serialisation or deserialisation failed (e.g. while emitting export-v1).
+    /// JSON serialisation or deserialisation failed (e.g. while emitting export-v2).
     #[error("JSON error during {context}: {source}")]
     Json {
         /// Short tag naming what the library was doing when JSON failed.

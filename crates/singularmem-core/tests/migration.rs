@@ -4,6 +4,7 @@
 //! and asserts each is upgraded in place with all data intact.
 
 use rusqlite::Connection;
+use singularmem_core::graph::NewFact;
 use singularmem_core::{Error, Store, StoreOptions};
 use tempfile::TempDir;
 
@@ -613,4 +614,59 @@ fn fresh_and_migrated_v4_schemas_are_identical() {
         "the fresh store really did create the v4 tables"
     );
     assert_eq!(fresh_schema, migrated_schema);
+}
+
+/// Acceptance criterion 6 for the graph: a raw-`rusqlite` loader — no
+/// Singularmem code — reads a fact out of a store this binary migrated
+/// 3 → 4, using exactly the head and as-of SQL documented in
+/// `docs/formats/store-v4.md` § "Revisions and the two time axes".
+#[test]
+fn third_party_loader_reads_graph_from_migrated_store() {
+    let dir = TempDir::new().unwrap();
+    let path = make_v3(&dir);
+
+    let store = Store::open(&path).expect("open migrates 3 -> 4");
+    assert_eq!(store.format_version().unwrap(), "4");
+    store
+        .add_fact(NewFact::triple("singularmem", "uses", "tantivy"))
+        .unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+
+    // Head SQL from store-v4.md: the open, non-superseded revision of the
+    // (subject, predicate) pair.
+    let rows: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT s.name, f.predicate FROM facts f \
+             JOIN entities s ON s.id = f.subject_id \
+             WHERE f.valid_to IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM facts g WHERE g.supersedes = f.id)",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("singularmem".to_string(), "uses".to_string())],
+        "exactly one open head fact, unaffected by the migration"
+    );
+
+    // As-of SQL from store-v4.md, with T inside the (unbounded, unbounded)
+    // window every freshly-added fact starts in: still matches.
+    let as_of_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM facts f \
+             JOIN entities s ON s.id = f.subject_id \
+             WHERE s.name = 'singularmem' AND f.predicate = 'uses' \
+               AND NOT EXISTS (SELECT 1 FROM facts g WHERE g.supersedes = f.id) \
+               AND (f.valid_from IS NULL OR f.valid_from <= '2026-09-05T00:00:00Z') \
+               AND (f.valid_to IS NULL OR '2026-09-05T00:00:00Z' < f.valid_to)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(as_of_rows, 1, "T inside the open window still matches");
 }

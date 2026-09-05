@@ -168,7 +168,7 @@ fn export_first_line_is_meta() {
         .clone();
     let text = String::from_utf8(out).unwrap();
     let first = text.lines().next().expect("at least one line");
-    assert!(first.contains("\"_singularmem_format\":\"export-v1\""));
+    assert!(first.contains("\"_singularmem_format\":\"export-v2\""));
 }
 
 #[test]

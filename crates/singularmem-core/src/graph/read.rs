@@ -638,6 +638,28 @@ impl Store {
         load_fact(&conn, id)?.ok_or(Error::FactIdNotFound { id })
     }
 
+    /// Every fact revision in the store — every row, not just heads —
+    /// ordered by `recorded_at` ascending then id. Used by
+    /// [`Store::export`](crate::store::Store::export) for `export-v2`'s
+    /// `fact` lines; spec: `docs/formats/store-v4.md` § "Export —
+    /// `export-v2`".
+    ///
+    /// # Errors
+    /// `Error::Sqlite` on database error.
+    ///
+    /// # Panics
+    /// Panics if the connection `Mutex` is poisoned.
+    pub(crate) fn all_facts_chronological(&self) -> Result<Vec<Fact>> {
+        let sql = format!("{FACT_SELECT} ORDER BY f.recorded_at ASC, f.id ASC");
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        select_facts(
+            &conn,
+            &sql,
+            &[],
+            "reading all fact revisions chronologically",
+        )
+    }
+
     /// The entity with this name (normalised), if it exists. Entities are
     /// store-global, so there is at most one per normalised name.
     ///
