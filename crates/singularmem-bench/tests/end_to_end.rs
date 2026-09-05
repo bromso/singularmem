@@ -54,6 +54,11 @@ fn lexical_hits_on_the_fixture_are_exact() {
             r.id,
             r.ingest_ms
         );
+        assert!(
+            r.items_ingested > 0,
+            "{}: items_ingested should count actually-ingested items",
+            r.id
+        );
     }
     // q1..q4 hit at rank 1; q5 is a lexical miss; q6_abs is an abstention.
     assert_eq!(results[0].hits[&SearchMode::Lexical][0], "s1a");
@@ -105,7 +110,7 @@ fn hit_lists_are_distinct_sessions_bounded_by_max_k() {
                 "{mode}: unknown session {h}"
             );
         }
-        assert!(r.query_ms.contains_key(&mode));
+        assert!(r.query_us.contains_key(&mode));
     }
 }
 

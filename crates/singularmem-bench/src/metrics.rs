@@ -68,7 +68,11 @@ pub struct QuestionResult {
     pub evidence: Vec<String>,
     pub hits: BTreeMap<SearchMode, Vec<String>>,
     pub ingest_ms: u64,
-    pub query_ms: BTreeMap<SearchMode, u64>,
+    /// Number of items (post-chunking) actually ingested for this
+    /// question — the length of the `Vec<Item>` `Store::ingest_many`
+    /// returned, not the raw turn count.
+    pub items_ingested: usize,
+    pub query_us: BTreeMap<SearchMode, u64>,
     pub error: Option<String>,
 }
 
@@ -79,7 +83,8 @@ pub struct ModeMetrics {
     pub mrr: f64,
     /// Scored questions.
     pub n: usize,
-    pub queries_per_s: f64,
+    /// Retrieval call throughput; excludes ingestion.
+    pub retrieve_queries_per_s: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +106,7 @@ struct Acc {
     hit_at: BTreeMap<usize, usize>,
     rr_sum: f64,
     n: usize,
-    query_ms: u64,
+    query_us: u64,
 }
 
 impl Acc {
@@ -110,16 +115,16 @@ impl Acc {
             hit_at: ks.iter().map(|&k| (k, 0)).collect(),
             rr_sum: 0.0,
             n: 0,
-            query_ms: 0,
+            query_us: 0,
         }
     }
 
-    // Counts and elapsed milliseconds stay far below 2^53, so the f64
+    // Counts and elapsed microseconds stay far below 2^53, so the f64
     // conversions below cannot lose precision.
     #[allow(clippy::cast_precision_loss)]
-    fn add(&mut self, rank: Option<usize>, query_ms: u64) {
+    fn add(&mut self, rank: Option<usize>, query_us: u64) {
         self.n += 1;
-        self.query_ms += query_ms;
+        self.query_us += query_us;
         if let Some(r) = rank {
             self.rr_sum += 1.0 / r as f64;
             for (k, count) in &mut self.hit_at {
@@ -130,7 +135,7 @@ impl Acc {
         }
     }
 
-    // Counts and elapsed milliseconds stay far below 2^53, so the f64
+    // Counts and elapsed microseconds stay far below 2^53, so the f64
     // conversions below cannot lose precision.
     #[allow(clippy::cast_precision_loss)]
     fn finish(self) -> ModeMetrics {
@@ -143,10 +148,10 @@ impl Acc {
                 .collect(),
             mrr: self.rr_sum / n,
             n: self.n,
-            queries_per_s: if self.query_ms == 0 {
+            retrieve_queries_per_s: if self.query_us == 0 {
                 0.0
             } else {
-                n / (self.query_ms as f64 / 1000.0)
+                n / (self.query_us as f64 / 1_000_000.0)
             },
         }
     }
@@ -172,17 +177,17 @@ pub fn summarise(results: &[QuestionResult], ks: &[usize]) -> Summary {
         }
         for (mode, hits) in &r.hits {
             let rank = first_hit_rank(hits, &r.evidence);
-            let ms = r.query_ms.get(mode).copied().unwrap_or(0);
+            let us = r.query_us.get(mode).copied().unwrap_or(0);
             overall
                 .entry(*mode)
                 .or_insert_with(|| Acc::new(ks))
-                .add(rank, ms);
+                .add(rank, us);
             by_type
                 .entry(r.kind.clone())
                 .or_default()
                 .entry(*mode)
                 .or_insert_with(|| Acc::new(ks))
-                .add(rank, ms);
+                .add(rank, us);
         }
     }
 

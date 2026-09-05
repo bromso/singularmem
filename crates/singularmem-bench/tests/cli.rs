@@ -49,12 +49,7 @@ fn lexical_run_prints_markdown_report_and_json() {
     assert_eq!(doc["config"]["ks"], serde_json::json!([1, 5]));
     assert_eq!(doc["questions"].as_array().unwrap().len(), 6);
     assert_eq!(doc["summary"]["abstentions"], 1);
-    // Kept as `assert!(... == 64)` (the brief's verbatim assertion form)
-    // rather than `assert_eq!`; the lint is purely cosmetic here.
-    #[allow(clippy::manual_assert_eq)]
-    {
-        assert!(doc["dataset"]["sha256"].as_str().unwrap().len() == 64);
-    }
+    assert_eq!(doc["dataset"]["sha256"].as_str().unwrap().len(), 64);
     assert!(doc["commit"].is_string());
 }
 
@@ -170,11 +165,26 @@ fn bad_k_and_bad_mode_are_usage_errors() {
 }
 
 #[test]
-fn filter_that_leaves_nothing_exits_1() {
+fn unknown_question_type_is_a_usage_error() {
+    // There is no known question-type value absent from the fixture (it
+    // has all six), so a filter that leaves nothing can no longer come
+    // from a typo'd-but-plausible type name — clap rejects it before the
+    // run starts.
     bench()
         .arg("longmemeval")
         .arg(fixture())
         .args(["--modes", "lexical", "--question-type", "brand-new-type"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("brand-new-type"));
+}
+
+#[test]
+fn limit_zero_exits_1_with_no_questions() {
+    bench()
+        .arg("longmemeval")
+        .arg(fixture())
+        .args(["--modes", "lexical", "--limit", "0"])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("no questions"));

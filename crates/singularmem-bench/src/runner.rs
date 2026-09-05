@@ -27,6 +27,24 @@ pub struct RunConfig {
 }
 
 impl RunConfig {
+    /// Build a `RunConfig`, sorting and deduplicating `ks` and rejecting an
+    /// empty `ks` or a `k == 0` — the invariant the `ks` field doc promises.
+    ///
+    /// # Errors
+    /// Returns a message naming the problem when `ks` is empty (after
+    /// dedup) or contains a `0`.
+    pub fn new(modes: Vec<SearchMode>, mut ks: Vec<usize>) -> Result<Self, String> {
+        ks.sort_unstable();
+        ks.dedup();
+        if ks.is_empty() {
+            return Err("ks must not be empty".to_string());
+        }
+        if ks.contains(&0) {
+            return Err("k must be >= 1, got 0".to_string());
+        }
+        Ok(Self { modes, ks })
+    }
+
     fn max_k(&self) -> usize {
         self.ks.iter().copied().max().unwrap_or(1)
     }
@@ -89,13 +107,14 @@ pub fn run_question_in(
         evidence: q.evidence.iter().cloned().collect(),
         hits: BTreeMap::new(),
         ingest_ms: 0,
-        query_ms: BTreeMap::new(),
+        items_ingested: 0,
+        query_us: BTreeMap::new(),
         error: None,
     };
     result.evidence.sort();
     if let Err(e) = evaluate(q, cfg, embedder, scratch_root, &mut result) {
         result.hits.clear();
-        result.query_ms.clear();
+        result.query_us.clear();
         result.error = Some(e);
     }
     result
@@ -131,6 +150,7 @@ fn evaluate(
         &sem_path,
     )?;
     out.ingest_ms = ingest_ms;
+    out.items_ingested = n_ingested;
 
     // --- query ----------------------------------------------------------
     let store = Store::open(&store_path).map_err(|e| format!("reopening store: {e}"))?;
@@ -172,6 +192,11 @@ fn evaluate(
         let retriever = Retriever::new(&store, &searcher);
         let opts = RetrieveOptions {
             max_blocks: fetch,
+            // Semantic cosine similarity can be negative, so a floor of
+            // 0.0 does real work there, culling anti-correlated
+            // candidates; BM25 and RRF scores are always non-negative, so
+            // this floor never excludes anything in the lexical or hybrid
+            // columns — it only ever affects the semantic column.
             min_score: 0.0,
             search: HybridSearchOptions {
                 limit: fetch,
@@ -184,7 +209,7 @@ fn evaluate(
         let ctx = retriever
             .retrieve(&q.text, &opts)
             .map_err(|e| format!("{mode} retrieval: {e}"))?;
-        let ms = t.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let us = t.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
 
         let mut hits: Vec<String> = Vec::new();
         for block in &ctx.blocks {
@@ -202,7 +227,7 @@ fn evaluate(
             }
         }
         out.hits.insert(mode, hits);
-        out.query_ms.insert(mode, ms);
+        out.query_us.insert(mode, us);
     }
     Ok(())
 }
@@ -249,10 +274,14 @@ fn ingest_question(
         .enumerate()
         .flat_map(|(session_index, session)| items_for(q, session_index, session))
         .collect();
-    let n_ingested = items.len();
-    store
+    // `n_ingested` is the length of the `Vec<Item>` `ingest_many` actually
+    // returned, not the pre-chunking count computed above: the two agree
+    // whenever the call succeeds, but the return value is the ground truth
+    // for "items actually ingested" that `ingest_items_per_s` needs.
+    let n_ingested = store
         .ingest_many(items)
-        .map_err(|e| format!("ingesting: {e}"))?;
+        .map_err(|e| format!("ingesting: {e}"))?
+        .len();
     let ingest_ms = t0.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     // `store` (and the hooks) drop here, closing the SQLite connection so
     // the indexes can be reopened cleanly for querying.
@@ -329,7 +358,24 @@ fn verify_doc_counts(
 
 #[cfg(test)]
 mod tests {
-    use super::verify_doc_counts;
+    use super::{verify_doc_counts, RunConfig};
+    use crate::metrics::SearchMode;
+
+    #[test]
+    fn run_config_new_sorts_and_dedups_ks() {
+        let cfg = RunConfig::new(vec![SearchMode::Lexical], vec![5, 1, 5, 10, 1]).unwrap();
+        assert_eq!(cfg.ks, vec![1, 5, 10]);
+    }
+
+    #[test]
+    fn run_config_new_rejects_empty_ks() {
+        assert!(RunConfig::new(vec![SearchMode::Lexical], vec![]).is_err());
+    }
+
+    #[test]
+    fn run_config_new_rejects_zero_k() {
+        assert!(RunConfig::new(vec![SearchMode::Lexical], vec![0, 1]).is_err());
+    }
 
     #[test]
     fn verify_doc_counts_passes_when_all_counts_match() {

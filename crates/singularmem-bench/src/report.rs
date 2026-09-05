@@ -121,8 +121,8 @@ pub fn render_markdown(r: &Report<'_>) -> String {
         let _ = write!(header, " R@{k} |");
         rule.push_str("---|");
     }
-    header.push_str(" MRR | q/s |");
-    rule.push_str("---|---|");
+    header.push_str(" MRR |");
+    rule.push_str("---|");
     let _ = writeln!(out, "{header}\n{rule}");
     for mode in &m.modes {
         let Some(mm) = s.overall.get(mode) else {
@@ -133,31 +133,34 @@ pub fn render_markdown(r: &Report<'_>) -> String {
         for k in &m.ks {
             let _ = write!(row, " {} |", fmt3(mm.recall.get(k).copied().unwrap_or(0.0)));
         }
-        let _ = write!(row, " {} | {:.1} |", fmt3(mm.mrr), mm.queries_per_s);
+        let _ = write!(row, " {} |", fmt3(mm.mrr));
         let _ = writeln!(out, "{row}");
     }
 
-    // By-type table at the middle k.
-    let mid_k = m.ks[m.ks.len() / 2];
-    let _ = writeln!(out, "\n## R@{mid_k} by question type\n");
-    let mut header = String::from("| type | n |");
-    let mut rule = String::from("|---|---|");
-    for mode in &m.modes {
-        let _ = write!(header, " {mode} |");
-        rule.push_str("---|");
-    }
-    let _ = writeln!(out, "{header}\n{rule}");
-    for (kind, modes) in &s.by_type {
-        let n = modes.values().next().map_or(0, |mm| mm.n);
-        let mut row = format!("| {kind} | {n} |");
+    // By-type table at the middle k. `m.ks` is non-empty by construction
+    // (`RunConfig::new` rejects an empty `ks`), but guard anyway so a
+    // `Report` built by hand (as in tests) can't panic on the index below.
+    if let Some(&mid_k) = m.ks.get(m.ks.len() / 2) {
+        let _ = writeln!(out, "\n## R@{mid_k} by question type\n");
+        let mut header = String::from("| type | n |");
+        let mut rule = String::from("|---|---|");
         for mode in &m.modes {
-            let cell = modes
-                .get(mode)
-                .and_then(|mm| mm.recall.get(&mid_k))
-                .map_or_else(|| "n/a".to_string(), |v| fmt3(*v));
-            let _ = write!(row, " {cell} |");
+            let _ = write!(header, " {mode} |");
+            rule.push_str("---|");
         }
-        let _ = writeln!(out, "{row}");
+        let _ = writeln!(out, "{header}\n{rule}");
+        for (kind, modes) in &s.by_type {
+            let n = modes.values().next().map_or(0, |mm| mm.n);
+            let mut row = format!("| {kind} | {n} |");
+            for mode in &m.modes {
+                let cell = modes
+                    .get(mode)
+                    .and_then(|mm| mm.recall.get(&mid_k))
+                    .map_or_else(|| "n/a".to_string(), |v| fmt3(*v));
+                let _ = write!(row, " {cell} |");
+            }
+            let _ = writeln!(out, "{row}");
+        }
     }
     out
 }

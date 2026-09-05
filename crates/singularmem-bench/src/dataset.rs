@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// `LongMemEval` question categories. Unknown strings are preserved in
 /// [`QuestionType::Other`] so a new dataset revision still loads.
@@ -151,20 +152,35 @@ struct RawQuestion {
 /// not the expected array, [`Error::Shape`] when a question's parallel
 /// haystack arrays disagree in length.
 pub fn load(path: &Path) -> Result<Vec<Question>, Error> {
+    load_with_digest(path).map(|(qs, _sha256)| qs)
+}
+
+/// Load a `LongMemEval` file, also returning the sha256 (lowercase hex) of
+/// the bytes actually read.
+///
+/// Hashing the same byte buffer that is then parsed — rather than
+/// re-reading the file afterwards to hash it — means the digest can never
+/// drift from what was parsed, and the file is read from disk exactly once.
+///
+/// # Errors
+/// Same as [`load`].
+pub fn load_with_digest(path: &Path) -> Result<(Vec<Question>, String), Error> {
     let shown = path.display().to_string();
-    let file = std::fs::File::open(path).map_err(|source| Error::Io {
+    let bytes = std::fs::read(path).map_err(|source| Error::Io {
         path: shown.clone(),
         source,
     })?;
-    let reader = std::io::BufReader::new(file);
-    let raw: Vec<RawQuestion> = serde_json::from_reader(reader).map_err(|source| Error::Json {
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let raw: Vec<RawQuestion> = serde_json::from_slice(&bytes).map_err(|source| Error::Json {
         path: shown,
         source,
     })?;
-    raw.into_iter()
+    let questions = raw
+        .into_iter()
         .enumerate()
         .map(|(i, q)| convert(i, q))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((questions, sha256))
 }
 
 fn convert(index: usize, raw: RawQuestion) -> Result<Question, Error> {

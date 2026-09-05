@@ -17,7 +17,7 @@ fn result(
         hits.iter().map(ToString::to_string).collect::<Vec<_>>(),
     );
     let mut q = BTreeMap::new();
-    q.insert(SearchMode::Lexical, 100_u64);
+    q.insert(SearchMode::Lexical, 100_000_u64);
     QuestionResult {
         id: id.into(),
         kind,
@@ -25,7 +25,8 @@ fn result(
         evidence: evidence.iter().map(ToString::to_string).collect(),
         hits: h,
         ingest_ms: 10,
-        query_ms: q,
+        items_ingested: 1,
+        query_us: q,
         error: error.map(ToString::to_string),
     }
 }
@@ -67,8 +68,8 @@ fn recall_and_mrr_by_hand() {
     assert!((m.recall[&1] - 1.0 / 3.0).abs() < 1e-9);
     assert!((m.recall[&5] - 2.0 / 3.0).abs() < 1e-9);
     assert!((m.mrr - (1.0 + 1.0 / 3.0) / 3.0).abs() < 1e-9);
-    // 3 queries in 300 ms -> 10 q/s
-    assert!((m.queries_per_s - 10.0).abs() < 1e-9);
+    // 3 queries x 100_000 us = 300_000 us total -> 10 q/s
+    assert!((m.retrieve_queries_per_s - 10.0).abs() < 1e-9);
 
     let multi = &s.by_type[&QuestionType::MultiSession][&SearchMode::Lexical];
     assert_eq!(multi.n, 2);

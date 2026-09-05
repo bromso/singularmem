@@ -9,7 +9,6 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
-use sha2::{Digest, Sha256};
 use singularmem_bench::dataset::{self, Question, QuestionType};
 use singularmem_bench::metrics::{summarise, QuestionResult, SearchMode};
 use singularmem_bench::report::{render_markdown, to_json, Report, RunMeta};
@@ -59,7 +58,17 @@ struct LongMemEvalArgs {
     #[arg(long)]
     limit: Option<usize>,
     /// Only questions of this type (repeatable)
-    #[arg(long = "question-type")]
+    #[arg(
+        long = "question-type",
+        value_parser = [
+            "single-session-user",
+            "single-session-assistant",
+            "single-session-preference",
+            "multi-session",
+            "temporal-reasoning",
+            "knowledge-update",
+        ]
+    )]
     question_type: Vec<String>,
     /// Shuffle seed used with --limit; 0 keeps file order
     #[arg(long, default_value_t = 0)]
@@ -110,11 +119,6 @@ fn build_embedder(model: EmbeddingModel) -> Result<SharedEmbedder, String> {
         .map_err(|e| {
             format!("loading embedding model failed: {e}; use --modes lexical to skip embeddings")
         })
-}
-
-fn sha256_of(path: &std::path::Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn git_commit() -> String {
@@ -174,24 +178,21 @@ fn run_longmemeval(args: &LongMemEvalArgs) -> Result<bool, String> {
     let started = Instant::now();
     let started_at = jiff::Timestamp::now().to_string();
 
-    let all = dataset::load(&args.file).map_err(|e| e.to_string())?;
+    // Hash the bytes that are actually parsed, in one read, so the reported
+    // sha256 can never drift from what was loaded.
+    let (all, dataset_sha256) = dataset::load_with_digest(&args.file).map_err(|e| e.to_string())?;
     let total = all.len();
     let qs = select(all, args);
     if qs.is_empty() {
         return Err("no questions left after --limit/--question-type filtering".into());
     }
 
-    let mut ks: Vec<usize> = args
+    let ks: Vec<usize> = args
         .ks
         .iter()
         .map(|&k| usize::try_from(k).unwrap_or(usize::MAX))
         .collect();
-    ks.sort_unstable();
-    ks.dedup();
-    let cfg = RunConfig {
-        modes: args.modes.clone(),
-        ks: ks.clone(),
-    };
+    let cfg = RunConfig::new(args.modes.clone(), ks)?;
 
     let needs_embedder = cfg.modes.iter().any(|m| m.needs_embedder());
     let embedder = if needs_embedder {
@@ -209,8 +210,13 @@ fn run_longmemeval(args: &LongMemEvalArgs) -> Result<bool, String> {
     let n = qs.len();
     for (i, q) in qs.iter().enumerate() {
         let r = run_question(q, &cfg, embedder.as_ref());
-        items_ingested += q.haystack.iter().map(|s| s.turns.len()).sum::<usize>();
-        ingest_ms_total += r.ingest_ms;
+        // Errored questions may have ingested nothing (or ingested and then
+        // failed at query time) — exclude them from both the numerator and
+        // the denominator so a handful of failures can't skew the rate.
+        if r.error.is_none() {
+            items_ingested += r.items_ingested;
+            ingest_ms_total += r.ingest_ms;
+        }
         if !args.quiet {
             let secs = started.elapsed().as_secs_f64();
             eprintln!("{}", progress_line(i, n, &r, secs));
@@ -222,17 +228,17 @@ fn run_longmemeval(args: &LongMemEvalArgs) -> Result<bool, String> {
         results.push(r);
     }
 
-    let summary = summarise(&results, &ks);
+    let summary = summarise(&results, &cfg.ks);
     let wall_secs = started.elapsed().as_secs_f64();
     let meta = RunMeta {
         tool: "singularmem-bench".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         commit: git_commit(),
         dataset_path: args.file.display().to_string(),
-        dataset_sha256: sha256_of(&args.file)?,
+        dataset_sha256,
         dataset_questions: total,
         modes: cfg.modes,
-        ks,
+        ks: cfg.ks,
         model: model_id,
         limit: args.limit,
         question_type: args
