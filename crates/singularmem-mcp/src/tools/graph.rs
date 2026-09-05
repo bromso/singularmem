@@ -1,10 +1,13 @@
 //! `memory_graph_*` tools — the temporal knowledge graph's MCP surface.
 //!
-//! Six tools mirror the CLI's `graph` verbs: `add`/`invalidate`/`supersede`
+//! Eight tools mirror the CLI's `graph` verbs: `add`/`invalidate`/`supersede`
 //! are writers (hidden and rejected in `--read-only` mode, exactly like
-//! `memory_ingest`); `query`/`timeline`/`stats` are readers. Spec:
+//! `memory_ingest`); `query`/`timeline`/`stats`/`entities`/`history` are
+//! readers, always listed. Spec:
 //! `docs/superpowers/specs/2026-09-05-knowledge-graph-14-design.md`
-//! § "Wire (MCP)".
+//! § "Wire (MCP)" and
+//! `docs/superpowers/specs/2026-09-05-mcp-surface-16-design.md`
+//! §§ "`memory_graph_entities` tool" / "`memory_graph_history` tool".
 
 use std::fmt::Write as _;
 use std::str::FromStr;
