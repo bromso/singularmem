@@ -6,10 +6,12 @@ or agent accumulates over time — conversations, files, decisions,
 embeddings, provenance — and bridges them to any LLM provider through
 a stable, vendor-neutral interface.
 
-> **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0) and
-> scoping (v0.18.0) — memory store, hybrid search (Tantivy + USearch),
-> provider adapters, MCP server, TypeScript SDK, bulk transcript ingestion,
-> and hierarchical item scoping. Constitution v0.2.0 ratified 2026-05-15.
+> **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0),
+> scoping (v0.18.0), and a temporal knowledge graph (v0.19.0) — memory
+> store, hybrid search (Tantivy + USearch), provider adapters, MCP server,
+> TypeScript SDK, bulk transcript ingestion, hierarchical item scoping,
+> and an append-only entity/fact graph with point-in-time queries.
+> Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 

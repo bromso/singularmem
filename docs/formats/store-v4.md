@@ -1,15 +1,17 @@
-# Singularmem Store Format — v3
-
-> Superseded by [store-v4.md](store-v4.md) (first shipped in v0.19.0).
-> `store-v4.md` adds the temporal knowledge graph (`entities`/`facts`
-> tables) and `export-v2`; the `items`/`item_tags` schema and `export-v1`
-> shape described below are unchanged in v4.
+# Singularmem Store Format — v4
 
 This document specifies the on-disk format of a Singularmem memory store
-at `format_version = 3`. **A third-party tool that reads this document and
+at `format_version = 4`. **A third-party tool that reads this document and
 has access to a SQLite library can write a complete loader without
 referencing any Singularmem source code.** That property is a
 constitutional requirement (Principle III.b).
+
+Format v4 adds the temporal knowledge graph — the `entities` and `facts`
+tables — on top of everything `items`/`item_tags` already provided. The
+graph is append-only: a fact is never mutated after insertion, only
+superseded by a new revision (see "Revisions and the two time axes"
+below). `facts.scope` is the only scope on the graph — entities are
+store-global, so the same entity name is one node everywhere.
 
 ## File layout
 
@@ -59,6 +61,49 @@ CREATE INDEX idx_items_supersedes ON items(supersedes) WHERE supersedes IS NOT N
 CREATE INDEX idx_item_tags_tag ON item_tags(tag);
 CREATE UNIQUE INDEX idx_items_external_id ON items(external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX idx_items_scope ON items(scope) WHERE scope IS NOT NULL;
+```
+
+### Graph tables
+
+Added in `format_version = 4`. DDL verbatim from `crates/singularmem-core/src/schema.rs`:
+
+```sql
+CREATE TABLE entities (
+    id               TEXT PRIMARY KEY NOT NULL,
+    name             TEXT NOT NULL,
+    normalised_name  TEXT NOT NULL,
+    kind             TEXT,
+    created_at       TEXT NOT NULL,
+    CHECK (length(name) > 0)
+) STRICT;
+CREATE UNIQUE INDEX idx_entities_identity ON entities(normalised_name);
+
+CREATE TABLE facts (
+    id              TEXT PRIMARY KEY NOT NULL,
+    subject_id      TEXT NOT NULL,
+    predicate       TEXT NOT NULL,
+    object_id       TEXT,
+    object_value    TEXT,
+    valid_from      TEXT,
+    valid_to        TEXT,
+    confidence      REAL NOT NULL DEFAULT 1.0,
+    source_item_id  TEXT,
+    scope           TEXT,
+    supersedes      TEXT,
+    recorded_at     TEXT NOT NULL,
+    FOREIGN KEY (subject_id) REFERENCES entities(id),
+    FOREIGN KEY (object_id) REFERENCES entities(id),
+    FOREIGN KEY (source_item_id) REFERENCES items(id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (supersedes) REFERENCES facts(id) DEFERRABLE INITIALLY DEFERRED,
+    CHECK ((object_id IS NULL) <> (object_value IS NULL)),
+    CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+) STRICT;
+CREATE INDEX idx_facts_subject   ON facts(subject_id);
+CREATE INDEX idx_facts_object    ON facts(object_id) WHERE object_id IS NOT NULL;
+CREATE INDEX idx_facts_predicate ON facts(predicate);
+CREATE INDEX idx_facts_supersedes ON facts(supersedes) WHERE supersedes IS NOT NULL;
+CREATE INDEX idx_facts_scope     ON facts(scope) WHERE scope IS NOT NULL;
 ```
 
 ### Column semantics
@@ -134,11 +179,144 @@ interpolating `?1` directly into the pattern as shown above (which is
 illustrative only). An **exact-match** filter instead compares
 `scope = ?1` with no `LIKE` at all.
 
+**`entities.id`** — 26-character ULID (same shape as `items.id`), minted
+when the entity is first created.
+
+**`entities.name`** — UTF-8 text, non-empty (`CHECK (length(name) > 0)`).
+The display form: the name exactly as first written.
+
+**`entities.normalised_name`** — The entity's identity. Two writes that
+normalise to the same string resolve to one row; `idx_entities_identity`
+is a unique index on this column, so it is impossible for two entities to
+share a normalised name. Entities are **store-global**: there is no scope
+column here, so `tantivy` written under any scope is the same node.
+Normalisation (`singularmem_core::graph::normalise::entity_name`): NFC,
+trim, lowercase, internal whitespace runs collapsed to a single `_`,
+apostrophes (`'`) stripped; the result must be 1–256 bytes, else
+`Error::Validation { field: "entity" }` and nothing is written.
+
+**`entities.kind`** — Nullable free-form text. Set on first creation
+(e.g. `--subject-kind`/`--object-kind`) and immutable afterwards: a later
+write that names a *different* kind for an existing entity is
+`Error::Validation { field: "kind" }`; a later write that omits the kind
+is accepted and leaves the stored kind unchanged. Entities are never
+deleted.
+
+**`entities.created_at`** — RFC 3339 timestamp, same shape as
+`items.created_at`.
+
+**`facts.id`** — 26-character ULID. Identifies one specific *revision*,
+not a stable "fact slot" — see "Revisions and the two time axes" below.
+
+**`facts.subject_id`** / **`facts.object_id`** — Foreign keys into
+`entities.id`. `object_id` is `NULL` when the fact's object is a literal
+value rather than another entity (see `object_value` below); the `CHECK`
+constraint enforces that exactly one of `object_id`/`object_value` is
+set.
+
+**`facts.predicate`** — Normalised text identifying the relationship,
+e.g. `uses`. Normalisation
+(`singularmem_core::graph::normalise::predicate`) applies the same rule
+as entity names (NFC, trim, lowercase, whitespace runs → `_`, apostrophes
+stripped) plus the additional constraint that the result matches
+`[a-z0-9_]+`, 1–64 bytes; anything else is
+`Error::Validation { field: "predicate" }`.
+
+**`facts.object_value`** — Nullable text: the fact's object when it is a
+literal value, not an entity. Stored trimmed, so surrounding whitespace on
+one write cannot fork a triple's identity from another's.
+
+**`facts.valid_from`** / **`facts.valid_to`** — Nullable RFC 3339
+timestamps bounding the fact's *validity window* (not when the row was
+written — that is `recorded_at`). `NULL valid_from` means "since
+unknown"; `NULL valid_to` means "still valid" (open). Input may be a bare
+date (`2026-05-16`, expanded to `T00:00:00Z`) or a full timestamp; stored
+canonical. `CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >=
+valid_from)` rejects an inverted window at the database level; the
+application also rejects it before ever preparing the statement.
+
+**`facts.confidence`** — `REAL`, `[0.0, 1.0]` (`CHECK` and
+application-level validation both enforce the range), default `1.0`.
+
+**`facts.source_item_id`** — Nullable foreign key into `items.id`
+(`DEFERRABLE INITIALLY DEFERRED`), the item this fact was extracted from,
+if any. A write naming an item that does not exist in the store is
+`Error::Validation { field: "source_item_id" }`.
+
+**`facts.scope`** — Nullable hierarchical scope path, same validation and
+normalisation as `items.scope`. This is the **only** scope on the graph:
+entities are store-global (no `entities.scope` column), so scope narrows
+which *facts* a query sees, never which entity a name resolves to.
+
+**`facts.supersedes`** — Nullable foreign key into `facts.id`
+(`DEFERRABLE INITIALLY DEFERRED`). Non-null on every revision except the
+first in a chain; see "Revisions and the two time axes" below.
+
+**`facts.recorded_at`** — RFC 3339 timestamp: when this specific revision
+was appended (append time — the second of the two time axes, distinct
+from `valid_from`/`valid_to`).
+
+### Revisions and the two time axes
+
+A fact's **chain** is the sequence of rows linked by `supersedes`; the
+**head** of a chain is its newest revision — the one no other row's
+`supersedes` points at. `invalidate`/`supersede` never modify an existing
+row: they append a new one pointing `supersedes` at the row they close.
+Every read in the reference implementation builds its `WHERE` clause from
+one shared predicate (`fact_where` in
+`crates/singularmem-core/src/graph/read.rs`) so these rules live in
+exactly one place; the SQL fragments below are copied from it verbatim.
+
+**Head** (no `recorded_at` given — "believed now"):
+
+```sql
+(NOT EXISTS (SELECT 1 FROM facts g WHERE g.supersedes = f.id))
+```
+
+**Believed at `R`** (`--recorded-at R`): for each chain, the newest
+revision recorded at or before `R`; chains whose first revision is after
+`R` are invisible:
+
+```sql
+(f.recorded_at <= ? AND NOT EXISTS
+ (SELECT 1 FROM facts g WHERE g.supersedes = f.id AND g.recorded_at <= ?))
+```
+
+(`?` is bound to `R` both times.)
+
+**Open fact** (default, no `--as-of`): a head with `valid_to IS NULL`:
+
+```sql
+(f.valid_to IS NULL)
+```
+
+**Valid at `T`** (`--as-of T`): a head matching the half-open window
+`[valid_from, valid_to)`, with `NULL` meaning "since unknown" /
+"still valid":
+
+```sql
+((f.valid_from IS NULL OR f.valid_from <= ?)
+ AND (f.valid_to IS NULL OR ? < f.valid_to))
+```
+
+(`?` is bound to `T` both times.) A revision whose `valid_from` is `NULL`
+is valid at *any* instant before its `valid_to` — `NULL` means "since
+unknown", not "not yet", so it satisfies `valid_from IS NULL` regardless
+of how far back `T` reaches.
+
+The head clause and the open/as-of clause are combined with `AND`;
+`--recorded-at` replaces the head clause with the believed-at-`R` form
+above, and — if `--as-of` is *also* given — the as-of clause still
+applies on top of it, otherwise the open-fact clause does. A `facts.scope`
+filter (same descendant-inclusive/exact-match shapes as `items.scope`,
+rebound to the `facts` table) narrows further, `AND`-joined with whichever
+of the above applies.
+
 ### `singularmem_meta` key registry
 
 | Key | Type | Required? | Purpose |
 |---|---|---|---|
-| `format_version` | string (`"3"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
+| `format_version` | string (`"4"`) | yes | Format version marker. Loaders MUST refuse to operate on a value they do not recognise. |
 | `created_at` | RFC 3339 | yes | Wall-clock time the store file was first created. |
 
 Future format versions may add keys; readers MUST ignore unknown keys
@@ -157,7 +335,7 @@ maximum version `M`:
   error. It MUST NOT attempt to operate on a newer format.
 
 The Singularmem reference implementation in `crates/singularmem-core`
-supports maximum version `3` from v0.18.0 onward.
+supports maximum version `4` from v0.19.0 onward.
 
 ## Migration 1 → 2
 
@@ -206,6 +384,38 @@ with a migration-required error. The store must be opened writable at
 least once to migrate; after that, subsequent read-only opens succeed
 against the now-`3` store.
 
+## Migration 3 → 4
+
+A store opened writable at `format_version = 3` is migrated in place to
+`4` by executing exactly the "Graph tables" DDL above (`CREATE TABLE
+entities`, its unique index, `CREATE TABLE facts`, and its four indexes)
+followed by:
+
+```sql
+UPDATE singularmem_meta SET value = '4' WHERE key = 'format_version';
+```
+
+all in a single transaction. Transactional shape is identical to
+Migrations 1 → 2 and 2 → 3: `BEGIN IMMEDIATE` (taking the write lock up
+front), then `format_version` is re-read immediately after the lock is
+acquired — if a concurrent writer already moved the store past `3` while
+this connection was waiting, the migration is a no-op (rolled back,
+nothing to commit, `Ok(())` returned); otherwise the DDL and the meta
+update run and commit together. Any failure (e.g. a pre-existing object
+with a colliding name) rolls the whole transaction back, leaving the
+store at `format_version = 3` with neither `entities` nor `facts`
+present.
+
+A store found at `format_version = 1` is migrated through the full chain
+— `1 → 2`, then `2 → 3`, then `3 → 4` — as three migrations run back to
+back by the loader, each its own transaction.
+
+A **read-only** open of a store still at `format_version = 1`, `2`, or `3`
+MUST NOT migrate (a read-only connection cannot take a write lock) — it
+fails with a migration-required error. The store must be opened writable
+at least once to migrate; after that, subsequent read-only opens succeed
+against the now-`4` store.
+
 ## In-place mutation: the two sanctioned `UPDATE`s
 
 Every other row in `items` is append-only once inserted — this format
@@ -247,40 +457,69 @@ the old item remains in the store (readable by its own `id`, just with
 `external_id = NULL`); a scope change is simply the row's current value
 of `items.scope`.
 
-## Export format — `export-v1`
+`entities` and `facts` add no further sanctioned `UPDATE`s: `entities`
+gets exactly one (`kind`, filling in a previously-`NULL` value — see
+"`entities.kind`" above) and `facts` gets none at all. Every fact is
+append-only, full stop: `invalidate`/`supersede` always `INSERT` a new
+revision, never touch an existing row. A loader can therefore treat every
+`facts` row as immutable once observed.
+
+## Export format — `export-v2`
 
 The `singularmem export` CLI verb (and `Store::export` library method)
 emit JSONL on stdout. Format:
 
 ```jsonl
-{"_singularmem_format":"export-v1","_kind":"meta","store_format_version":"3","exported_at":"2026-05-16T12:34:56.000000000Z"}
+{"_singularmem_format":"export-v2","_kind":"meta","store_format_version":"4","exported_at":"2026-09-05T12:34:56.000000000Z"}
 {"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","tags":["work","decision"],"metadata":{"project":"alpha"}}
 {"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","external_id":"file:/a.rs","scope":"claude-code/singularmem"}
+{"_kind":"entity","id":"01J...","name":"singularmem","normalised_name":"singularmem","created_at":"2026-09-05T12:00:00.000000000Z"}
+{"_kind":"entity","id":"01J...","name":"tantivy","normalised_name":"tantivy","kind":"crate","created_at":"2026-09-05T12:00:00.000000000Z"}
+{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"uses","object":{"entity":{"id":"01J...","name":"tantivy"}},"confidence":1.0,"scope":"claude-code/singularmem","recorded_at":"2026-09-05T12:00:00.000000000Z"}
+{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"confidence_note","object":{"value":"battle-tested"},"confidence":0.9,"source_item_id":"01J...","recorded_at":"2026-09-05T12:01:00.000000000Z"}
 ```
 
 Rules:
 
 - The first line is always a meta record naming the format
-  (`"_singularmem_format":"export-v1"`); the export format itself is
+  (`"_singularmem_format":"export-v2"`); the export format itself is
   unversioned by the store's `format_version` — only `store_format_version`
-  inside the meta line changes, and it is now `"3"`.
-- Each subsequent line is one item, encoded as a single-line JSON object.
+  inside the meta line changes, and it is now `"4"`.
+- Line kinds, in order: `meta` (exactly one), `item` (zero or more),
+  `entity` (zero or more), `fact` (zero or more — one line per fact
+  **revision**, not one per chain: an invalidated or superseded fact
+  contributes every revision in its chain, each as its own line).
+- **Loaders MUST ignore any `_kind` they do not recognise.** This is how
+  the format grows: a v1-style loader that only understands `meta`/`item`
+  still reads every item out of an `export-v2` file correctly, simply
+  skipping the `entity` and `fact` lines it does not understand.
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
-- Items are emitted in `created_at` ascending order. Given a
-  deterministic store, the export is byte-identical across runs.
-- Only `_kind`, `id`, `content` and `created_at` are always present.
-- `supersedes`, `source`, `tags`, `metadata`, `external_id`, and `scope`
-  are **omitted** when they carry no information: `supersedes`, `source`,
-  `external_id` and `scope` when null, `tags` when the item has no tags,
-  `metadata` when it is the empty object. A reader MUST treat an absent
-  field as that empty value (`null`, `[]`, `{}`) rather than as an error
-  — the first item line above has no `supersedes` and no `source`, the
-  second has no `tags` and no `metadata`.
-- `external_id` and `scope` are therefore present only on items that have
-  one; readers of `export-v1` written by a v1 or v2 store simply never
-  see those fields, so these are backward-compatible additions.
+- Items are emitted in `created_at` ascending order; entities in
+  `created_at` ascending order, then `id`; fact revisions in
+  `recorded_at` ascending order, then `id`. Given a deterministic store,
+  the export is byte-identical across runs (modulo `exported_at`).
+- Item shape is unchanged from `export-v1`; see its field-omission rules
+  above (`supersedes`, `source`, `tags`, `metadata`, `external_id`,
+  `scope` are omitted when they carry no information).
+- **Entity line** fields: `_kind` (`"entity"`), `id`, `name`,
+  `normalised_name`, `created_at` are always present; `kind` is
+  **omitted** when the entity has none (the first entity line above has
+  no `kind`, the second does).
+- **Fact line** fields: `_kind` (`"fact"`), `id`, `subject` (`{"id",
+  "name"}`), `predicate`, `object`, `confidence`, `recorded_at` are
+  always present. `object` is `{"entity": {"id", "name"}}` when the
+  object is another entity, or `{"value": "<text>"}` when it is a literal
+  — exactly one of the two keys is present. `valid_from`, `valid_to`,
+  `source_item_id`, `scope`, and `supersedes` are **omitted** when null;
+  a reader MUST treat an absent field as `null` rather than as an error.
+  A revision with `supersedes` present is a closing or replacing
+  revision, not the first in its chain.
 - Object key order in `metadata` follows insertion order from v0.18.0
   (previously alphabetical); loaders must not depend on key order.
+- A store with no facts (e.g. one migrated from v1–v3 that has never
+  called into the graph) exports zero `entity` and zero `fact` lines —
+  `export-v2` degrades to exactly the `export-v1` shape plus a bumped
+  `store_format_version`.
 
 ## Known limitations
 
@@ -307,15 +546,16 @@ papered over. Both are tracked for sub-project 12.
 
 1. Open the SQLite file.
 2. Read `singularmem_meta.format_version`. If not present, the file is
-   not a Singularmem store. Accept `"1"`, `"2"`, or `"3"`; refuse anything
-   else — see the migration ratchet above. When the value is `"2"` or
-   `"3"`, the `items.external_id` column exists (and the associated
-   partial unique index); when `"3"`, `items.scope` also exists (and its
-   partial index); when `"1"`, neither exists.
+   not a Singularmem store. Accept `"1"`, `"2"`, `"3"`, or `"4"`; refuse
+   anything else — see the migration ratchet above. When the value is
+   `"2"` or higher, `items.external_id` exists (and its partial unique
+   index); when `"3"` or higher, `items.scope` also exists (and its
+   partial index); when `"4"`, `entities` and `facts` also exist; when
+   `"1"`, none of these do.
 3. To list items, `SELECT id, content, created_at, supersedes, source,
    metadata FROM items ORDER BY created_at ASC` (add `external_id` to the
    column list at `format_version = 2` or higher; add `scope` at
-   `format_version = 3`).
+   `format_version = 3` or higher).
 4. For each item, fetch its tags: `SELECT tag FROM item_tags WHERE item_id
    = ? ORDER BY tag ASC`.
 5. To follow a supersedes chain, recursively `SELECT supersedes FROM
@@ -323,8 +563,40 @@ papered over. Both are tracked for sub-project 12.
 6. Parse `metadata` as JSON. The validity is guaranteed by the schema's
    `CHECK` constraint.
 
+At `format_version = 4`, the graph adds:
+
+7. To list entities: `SELECT id, name, normalised_name, kind, created_at
+   FROM entities ORDER BY created_at ASC, id ASC`.
+8. To read the **currently open facts** (the common case — "what does the
+   store believe right now"):
+
+   ```sql
+   SELECT f.id, s.id, s.name, f.predicate, f.object_id, o.name, f.object_value,
+          f.valid_from, f.valid_to, f.confidence, f.source_item_id,
+          f.scope, f.supersedes, f.recorded_at
+   FROM facts f
+   JOIN entities s ON f.subject_id = s.id
+   LEFT JOIN entities o ON f.object_id = o.id
+   WHERE (NOT EXISTS (SELECT 1 FROM facts g WHERE g.supersedes = f.id))
+     AND (f.valid_to IS NULL)
+   ```
+
+   `f.object_id`/`o.name` are `NULL` when the fact's object is a literal
+   value — read `f.object_value` instead; the schema's `CHECK` guarantees
+   exactly one of the two is set. See "Revisions and the two time axes" above for
+   the as-of and recorded-at variants of the `WHERE` clause, and to
+   understand why a fact's `id` identifies one revision, not a stable
+   "fact slot".
+9. To walk one fact's full history: start from any revision's `id`,
+   follow `supersedes` backward (`SELECT supersedes FROM facts WHERE id =
+   ?`) to the root, and forward (`SELECT id FROM facts WHERE supersedes =
+   ? ORDER BY recorded_at ASC, id ASC`) to the newest revision. More than
+   one row supersedes the same one only in a hand-edited or
+   externally-written store — the reference implementation's own writes
+   never fork a chain.
+
 A loader that follows these steps interoperates with any Singularmem
-store at `format_version = 1`, `2`, or `3` regardless of which binary
+store at `format_version = 1` through `4` regardless of which binary
 wrote it.
 
 ## Tantivy sidecar index (optional, format unstable across Tantivy versions)

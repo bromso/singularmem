@@ -51,7 +51,7 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
     /// Hierarchical scope path (e.g. `claude-code/singularmem`), normalised.
-    /// `None` for unscoped items. See `docs/formats/store-v3.md`.
+    /// `None` for unscoped items. See `docs/formats/store-v4.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }

@@ -278,7 +278,7 @@ impl Store {
 
     /// Move an item to `scope` (or clear it with `None`) without creating a
     /// revision. This is the store's second sanctioned in-place mutation
-    /// (`docs/formats/store-v3.md`). Index hooks are NOT notified: the Tantivy
+    /// (`docs/formats/store-v4.md`). Index hooks are NOT notified: the Tantivy
     /// document keeps its old scope until `singularmem reindex`, which the
     /// CLI `scope move` verb documents.
     ///
