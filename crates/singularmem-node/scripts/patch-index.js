@@ -18,6 +18,11 @@
  * 6. Implements `Store.ingest` which lifts `createdAt` on the returned Item.
  * 7. Forwards `Store.scopes` directly and implements `Store.setScope` which
  *    lifts `createdAt` on the returned Item (same as `ingest`).
+ * 8. Forwards the nine knowledge-graph methods (`addFact`, `queryEntity`,
+ *    `queryPredicate`, `invalidateFact`, `supersedeFact`, `timeline`,
+ *    `graphStats`, `entities`, `factHistory`) straight to the native
+ *    binding — graph timestamps cross as RFC 3339 strings, so there is
+ *    nothing to lift.
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -94,6 +99,47 @@ class Store {
 
   setScope(id, scope) {
     return this._native.setScope(id, scope).then(liftItem)
+  }
+
+  // ── Knowledge graph ────────────────────────────────────────────────────
+  // Plain forwards: graph timestamps are RFC 3339 strings on both sides,
+  // so no lifting is needed. Every one of these must exist here or the
+  // native method is invisible to callers of the wrapped \`Store\`.
+
+  addFact(fact) {
+    return this._native.addFact(fact)
+  }
+
+  queryEntity(name, options) {
+    return this._native.queryEntity(name, options)
+  }
+
+  queryPredicate(predicate, options) {
+    return this._native.queryPredicate(predicate, options)
+  }
+
+  invalidateFact(subject, predicate, object, options) {
+    return this._native.invalidateFact(subject, predicate, object, options)
+  }
+
+  supersedeFact(subject, predicate, oldObject, newObject, options) {
+    return this._native.supersedeFact(subject, predicate, oldObject, newObject, options)
+  }
+
+  timeline(entity, options) {
+    return this._native.timeline(entity, options)
+  }
+
+  graphStats(options) {
+    return this._native.graphStats(options)
+  }
+
+  entities(options) {
+    return this._native.entities(options)
+  }
+
+  factHistory(factId) {
+    return this._native.factHistory(factId)
   }
 }
 

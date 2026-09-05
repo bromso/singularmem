@@ -376,6 +376,47 @@ class Store {
   setScope(id, scope) {
     return this._native.setScope(id, scope).then(liftItem)
   }
+
+  // ── Knowledge graph ────────────────────────────────────────────────────
+  // Plain forwards: graph timestamps are RFC 3339 strings on both sides,
+  // so no lifting is needed. Every one of these must exist here or the
+  // native method is invisible to callers of the wrapped `Store`.
+
+  addFact(fact) {
+    return this._native.addFact(fact)
+  }
+
+  queryEntity(name, options) {
+    return this._native.queryEntity(name, options)
+  }
+
+  queryPredicate(predicate, options) {
+    return this._native.queryPredicate(predicate, options)
+  }
+
+  invalidateFact(subject, predicate, object, options) {
+    return this._native.invalidateFact(subject, predicate, object, options)
+  }
+
+  supersedeFact(subject, predicate, oldObject, newObject, options) {
+    return this._native.supersedeFact(subject, predicate, oldObject, newObject, options)
+  }
+
+  timeline(entity, options) {
+    return this._native.timeline(entity, options)
+  }
+
+  graphStats(options) {
+    return this._native.graphStats(options)
+  }
+
+  entities(options) {
+    return this._native.entities(options)
+  }
+
+  factHistory(factId) {
+    return this._native.factHistory(factId)
+  }
 }
 
 // Construct the frozen `adapters` namespace from the four native classes.

@@ -288,6 +288,187 @@ export interface ScopeCount {
   /** Number of items whose `scope` equals `path`. */
   count: number
 }
+/** A reference to a graph entity: its id and display name. */
+export interface EntityRef {
+  /** 26-character Crockford base32 ULID of the entity. */
+  id: string
+  /** The entity's display name, as first written. */
+  name: string
+}
+/**
+ * The object side of a fact: another entity, or a literal string value.
+ *
+ * **Exactly one of `entity` / `value` is set**; the other is absent
+ * (`undefined`, napi's rendering of `None` — the same convention as
+ * `Item.supersedes`).
+ */
+export interface FactObject {
+  /** Set when the object is another entity. */
+  entity?: EntityRef
+  /** Set when the object is a literal string value. */
+  value?: string
+}
+/**
+ * One revision of a fact: `subject predicate object`, with a validity
+ * window and provenance.
+ *
+ * Timestamps are RFC 3339 UTC strings (jiff `Display`), e.g.
+ * `"2026-05-16T00:00:00Z"`. An absent `validFrom` means "since unknown";
+ * an absent `validTo` means the fact is still open.
+ */
+export interface Fact {
+  /** 26-character Crockford base32 ULID of this revision. */
+  id: string
+  /** The entity this fact is about. */
+  subject: EntityRef
+  /** Normalised predicate, e.g. `"works_at"`. */
+  predicate: string
+  /** The fact's object: an entity or a literal value. */
+  object: FactObject
+  /** Start of the validity window; absent for "since unknown". */
+  validFrom?: string
+  /** End of the validity window; absent while the fact is open. */
+  validTo?: string
+  /** Confidence in `[0.0, 1.0]`. */
+  confidence: number
+  /** ULID of the item this fact was extracted from, if any. */
+  sourceItemId?: string
+  /** Scope path this fact was recorded under, if any. */
+  scope?: string
+  /** ULID of the prior revision this one supersedes, if any. */
+  supersedes?: string
+  /** When this revision was recorded (append time). */
+  recordedAt: string
+}
+/**
+ * Input to `Store.addFact`. Only `subject`, `predicate` and `object` are
+ * required.
+ */
+export interface NewFact {
+  /** The subject entity's display name (normalised at write time). */
+  subject: string
+  /** The predicate (normalised at write time). */
+  predicate: string
+  /** The object: an entity name, or a literal value when `objectIsValue`. */
+  object: string
+  /**
+   * When `true`, `object` is stored as a literal value rather than
+   * resolved to an entity. Default `false`.
+   */
+  objectIsValue?: boolean
+  /** Kind to set on the subject if it is created by this call. */
+  subjectKind?: string
+  /**
+   * Kind to set on the object entity if it is created by this call.
+   * Ignored when `objectIsValue` is `true`.
+   */
+  objectKind?: string
+  /** Start of the validity window: `YYYY-MM-DD` or RFC 3339. */
+  validFrom?: string
+  /** End of the validity window: `YYYY-MM-DD` or RFC 3339. */
+  validTo?: string
+  /** Confidence in `[0.0, 1.0]`. Default `1.0`. */
+  confidence?: number
+  /** ULID of the item this fact was extracted from. */
+  sourceItemId?: string
+  /** Scope path to record the fact under. */
+  scope?: string
+}
+/** Filters shared by `Store.queryEntity` and `Store.queryPredicate`. */
+export interface GraphQueryOptions {
+  /**
+   * Which side of the fact to match: `"outgoing"`, `"incoming"` or
+   * `"both"` (default). Ignored by `queryPredicate`.
+   */
+  direction?: string
+  /** Only facts valid at this instant: `YYYY-MM-DD` or RFC 3339. */
+  asOf?: string
+  /** Only facts believed as of this record time: `YYYY-MM-DD` or RFC 3339. */
+  recordedAt?: string
+  /** Restrict to this scope path. */
+  scope?: string
+  /**
+   * When `true`, `scope` matches exactly rather than including
+   * descendants. Default `false`.
+   */
+  scopeExact?: boolean
+}
+/** Options for `Store.invalidateFact` and `Store.supersedeFact`. */
+export interface FactChangeOptions {
+  /**
+   * When `true`, the object arguments are literal values rather than
+   * entity names. Applies to *both* objects of `supersedeFact`.
+   */
+  objectIsValue?: boolean
+  /**
+   * Instant the change takes effect: `YYYY-MM-DD` or RFC 3339.
+   * Defaults to now.
+   */
+  at?: string
+  /** Scope the affected fact was recorded under. */
+  scope?: string
+}
+/** Scope filter for `Store.timeline` and `Store.graphStats`. */
+export interface GraphScopeOptions {
+  /** Restrict to this scope path. */
+  scope?: string
+  /**
+   * When `true`, `scope` matches exactly rather than including
+   * descendants. Default `false`.
+   */
+  scopeExact?: boolean
+}
+/** Options for `Store.entities`. */
+export interface EntityListOptions {
+  /** Only entities with this exact `kind`. */
+  kind?: string
+  /** Only entities taking part in at least one fact in this scope. */
+  scope?: string
+  /**
+   * When `true`, `scope` matches exactly rather than including
+   * descendants. Default `false`.
+   */
+  scopeExact?: boolean
+}
+/** One row of `Store.timeline`: a fact head plus whether it is still open. */
+export interface TimelineEntry {
+  /** The fact revision. */
+  fact: Fact
+  /** `true` when this revision is the current, open head. */
+  current: boolean
+}
+/** Aggregate counts returned by `Store.graphStats`. */
+export interface GraphStats {
+  /** Total number of entities. */
+  entities: number
+  /** Number of open (currently valid) fact heads. */
+  openFacts: number
+  /** Number of closed fact heads. */
+  closedFacts: number
+  /** Number of distinct predicates in use. */
+  predicates: number
+}
+/** One row of `Store.entities`: an entity plus its head-fact count. */
+export interface EntitySummary {
+  /** 26-character Crockford base32 ULID of the entity. */
+  id: string
+  /** The entity's display name. */
+  name: string
+  /** Free-form kind, set when the entity was first created. */
+  kind?: string
+  /** Number of head facts where this entity is subject or object. */
+  factCount: number
+}
+/** Result of `Store.supersedeFact`. */
+export interface SupersedeResult {
+  /**
+   * The closing revision of the replaced fact; absent when no matching
+   * open fact existed (the new fact is still opened).
+   */
+  closed?: Fact
+  /** The newly opened fact. */
+  opened: Fact
+}
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
 /** Plain Markdown adapter. */
@@ -352,6 +533,131 @@ export declare class GeminiAdapter {
  * string property. See the README for the full list of possible codes.
  */
 export declare class Store {
+  /**
+   * Record a fact in the knowledge graph, creating its entities on demand.
+   *
+   * Idempotent: re-adding an identical open fact returns it unchanged.
+   * A triple that matches an open head but disagrees about the validity
+   * window or confidence is rejected — use `invalidateFact` or
+   * `supersedeFact` to change a standing fact.
+   *
+   * @param fact The fact to record (see `NewFact`).
+   * @returns The persisted `Fact` revision.
+   * @throws `{ code: "Validation" }` — bad entity name, predicate, confidence, timestamp, scope, kind, or a conflicting open head.
+   * @throws `{ code: "InvalidId" }` — `sourceItemId` is not a valid ULID.
+   * @throws `{ code: "ReadOnly" }` — the store was opened with `{ readOnly: true }`.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  addFact(fact: NewFact): Promise<Fact>
+  /**
+   * Facts touching the entity `name`, oldest recorded first.
+   *
+   * The name resolves across scopes; `options.scope` filters the facts.
+   * An unknown entity yields an empty array rather than an error.
+   *
+   * @param name The entity's name (normalised for lookup).
+   * @param options Direction, time-travel and scope filters (see `GraphQueryOptions`).
+   * @returns Matching `Fact` revisions.
+   * @throws `{ code: "Validation" }` — `name` does not normalise, or `direction` / `asOf` / `recordedAt` / `scope` is malformed.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  queryEntity(name: string, options?: GraphQueryOptions | undefined | null): Promise<Array<Fact>>
+  /**
+   * Every fact with `predicate`, oldest recorded first.
+   *
+   * `options.direction` is ignored — a predicate query has no side.
+   *
+   * @param predicate The predicate (normalised for lookup).
+   * @param options Time-travel and scope filters (see `GraphQueryOptions`).
+   * @returns Matching `Fact` revisions.
+   * @throws `{ code: "Validation" }` — `predicate` does not normalise, or `asOf` / `recordedAt` / `scope` is malformed.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  queryPredicate(predicate: string, options?: GraphQueryOptions | undefined | null): Promise<Array<Fact>>
+  /**
+   * End the open fact `subject —predicate→ object` by appending a closing
+   * revision. The original row is never modified.
+   *
+   * @param subject The subject entity's name.
+   * @param predicate The predicate.
+   * @param object The object: an entity name, or a literal when `options.objectIsValue`.
+   * @param options `objectIsValue`, `at` (default: now) and `scope` (see `FactChangeOptions`).
+   * @returns The closing `Fact` revision.
+   * @throws `{ code: "FactNotFound" }` — no open head matches the triple.
+   * @throws `{ code: "Validation" }` — `at` is malformed or precedes the fact's `validFrom`.
+   * @throws `{ code: "ReadOnly" }` — the store was opened with `{ readOnly: true }`.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  invalidateFact(subject: string, predicate: string, object: string, options?: FactChangeOptions | undefined | null): Promise<Fact>
+  /**
+   * Replace one fact with another in a single transaction: close
+   * `oldObject` at `options.at` and open `newObject` from the same
+   * instant.
+   *
+   * A missing old fact is tolerated: the result's `closed` is absent and
+   * the new fact is still opened. Any other failure rolls the whole thing
+   * back, so the old fact is never left closed without its replacement.
+   *
+   * `options.objectIsValue` applies to **both** objects.
+   *
+   * @param subject The subject entity's name.
+   * @param predicate The predicate.
+   * @param oldObject The object of the fact being replaced.
+   * @param newObject The object of the replacement fact.
+   * @param options `objectIsValue`, `at` (default: now) and `scope` (see `FactChangeOptions`).
+   * @returns `{ closed, opened }` — the closing revision (absent if there was none) and the new fact.
+   * @throws `{ code: "Validation" }` — `at` is malformed, or the new fact fails validation.
+   * @throws `{ code: "ReadOnly" }` — the store was opened with `{ readOnly: true }`.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  supersedeFact(subject: string, predicate: string, oldObject: string, newObject: string, options?: FactChangeOptions | undefined | null): Promise<SupersedeResult>
+  /**
+   * Head revisions — open and closed alike — ordered by `validFrom`
+   * ascending with "since unknown" (absent `validFrom`) first, then by
+   * record time, then by id. Capped at 500 rows.
+   *
+   * @param entity Restrict to facts touching this entity; omit for the whole graph.
+   * @param options Scope filter (see `GraphScopeOptions`).
+   * @returns `TimelineEntry` rows, each flagging whether it is still open.
+   * @throws `{ code: "Validation" }` — `entity` does not normalise, or `scope` is malformed.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  timeline(entity?: string | undefined | null, options?: GraphScopeOptions | undefined | null): Promise<Array<TimelineEntry>>
+  /**
+   * Entity, open-fact, closed-fact and distinct-predicate counts over head
+   * revisions. With a scope filter, only facts in scope are counted — and
+   * only entities taking part in one of them.
+   *
+   * @param options Scope filter (see `GraphScopeOptions`).
+   * @returns The aggregate counts.
+   * @throws `{ code: "Validation" }` — `scope` is malformed.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  graphStats(options?: GraphScopeOptions | undefined | null): Promise<GraphStats>
+  /**
+   * Entities sorted by normalised name, each with the number of head facts
+   * it takes part in.
+   *
+   * Entities are store-global; `options.scope` filters on **fact** scope,
+   * restricting both the counted facts and the entities returned.
+   *
+   * @param options `kind`, `scope` and `scopeExact` filters (see `EntityListOptions`).
+   * @returns One `EntitySummary` per entity, name ascending.
+   * @throws `{ code: "Validation" }` — `scope` is malformed.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  entities(options?: EntityListOptions | undefined | null): Promise<Array<EntitySummary>>
+  /**
+   * The revision chain containing `factId`, oldest first.
+   *
+   * @param factId A 26-character Crockford base32 ULID naming any revision in the chain.
+   * @returns Every revision of that fact, oldest first.
+   * @throws `{ code: "InvalidId" }` — `factId` is not a valid ULID.
+   * @throws `{ code: "FactIdNotFound" }` — no fact revision has that id.
+   * @throws `{ code: "AmbiguousFactRevision" }` — the chain forks; the library refuses to pick a branch.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  factHistory(factId: string): Promise<Array<Fact>>
   /**
    * Open (or create) a Singularmem store at the given filesystem path.
    *

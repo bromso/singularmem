@@ -10,6 +10,7 @@ extern crate napi_derive;
 
 mod adapters;
 mod error;
+mod graph;
 mod store;
 mod types;
 
@@ -18,6 +19,10 @@ pub use store::ListOptions;
 pub use store::Store;
 pub use store::StoreOptions;
 pub use types::Item;
+pub use types::{
+    EntityListOptions, EntityRef, EntitySummary, Fact, FactChangeOptions, FactObject,
+    GraphQueryOptions, GraphScopeOptions, GraphStats, NewFact, SupersedeResult, TimelineEntry,
+};
 pub use types::{MemoryBlock, NewItem, RetrievedContext, SearchHit, SearchResults};
 
 /// Returns the crate version. Used as a smoke-test export.
