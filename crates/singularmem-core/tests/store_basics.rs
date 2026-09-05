@@ -262,7 +262,7 @@ fn export_emits_meta_line_and_items_in_order() {
     assert_eq!(lines.len(), 3, "1 meta + 2 item lines");
 
     let meta: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(meta["_singularmem_format"], "export-v1");
+    assert_eq!(meta["_singularmem_format"], "export-v2");
     assert_eq!(meta["_kind"], "meta");
     assert_eq!(meta["store_format_version"], FORMAT_VERSION);
 

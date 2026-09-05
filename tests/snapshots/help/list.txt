@@ -1,0 +1,19 @@
+Enumerate items, optionally filtered by tag
+
+Usage: singularmem list [OPTIONS]
+
+Options:
+      --store <PATH>     Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
+                         Also settable via the `SINGULARMEM_STORE` environment variable — the only
+                         way to point a hook (which runs with a fixed, flag-less command line) at a
+                         non-default store
+      --tag <TAGS>       Filter to items containing every named tag (AND-semantics, repeatable)
+      --format <FORMAT>  Output format [default: table] [possible values: table, jsonl, ids]
+      --read-only        Open the store in read-only mode (refuses ingest)
+      --limit <LIMIT>    Cap the number of items returned
+      --no-index         Skip wiring up the Tantivy hook on open. Use for storage-only operations
+                         that don't need search, or when the Tantivy directory is intentionally
+                         absent
+      --scope <PATH>     Restrict to this scope and its descendants (e.g. `claude-code/myproj`)
+      --scope-exact      With --scope: match only that exact scope, not descendants
+  -h, --help             Print help

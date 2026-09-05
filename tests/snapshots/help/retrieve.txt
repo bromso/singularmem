@@ -1,0 +1,74 @@
+Retrieve memory blocks formatted for an LLM prompt
+
+Usage: singularmem retrieve [OPTIONS] [QUERIES]...
+
+Arguments:
+  [QUERIES]...
+          One or more query tokens. Multiple tokens are joined with a space before being passed to
+          the underlying hybrid search
+
+Options:
+  -a, --adapter <ADAPTER>
+          Which adapter to use for formatting. Defaults to `plain`. Sub-projects 3b/3c/3d add
+          `claude`, `openai`, `gemini` to the registry
+          
+          [default: plain]
+
+      --store <PATH>
+          Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also settable via
+          the `SINGULARMEM_STORE` environment variable — the only way to point a hook (which runs
+          with a fixed, flag-less command line) at a non-default store
+
+  -l, --limit <LIMIT>
+          Max memory blocks to include in the formatted output
+          
+          [default: 10]
+
+      --read-only
+          Open the store in read-only mode (refuses ingest)
+
+      --min-score <MIN_SCORE>
+          Minimum score for a hit to be included
+          
+          [default: 0.0]
+
+      --no-index
+          Skip wiring up the Tantivy hook on open. Use for storage-only operations that don't need
+          search, or when the Tantivy directory is intentionally absent
+
+  -m, --mode <MODE>
+          Underlying search mode (passed through to `HybridSearcher`)
+
+          Possible values:
+          - auto:     Use hybrid when both `.tantivy/` and `.vectors/` exist; degrade to whichever
+            single index is present; error when neither exists
+          - lexical:  Tantivy BM25 only
+          - semantic: `USearch` cosine only
+          - hybrid:   RRF-fused lexical + semantic; error if either is missing
+          
+          [default: auto]
+
+      --fetch-multiplier <FETCH_MULTIPLIER>
+          Per-ranker overfetch factor (hybrid only)
+          
+          [default: 3]
+
+      --rrf-k <RRF_K>
+          RRF damping constant (hybrid only)
+          
+          [default: 60]
+
+      --json
+          Emit `RetrievedContext` as JSON instead of adapter-formatted output
+
+      --show-elapsed
+          Print "Retrieved N blocks in Xms" to stderr after the formatted output
+
+      --scope <PATH>
+          Restrict to this scope and its descendants (e.g. `claude-code/myproj`)
+
+      --scope-exact
+          With --scope: match only that exact scope, not descendants
+
+  -h, --help
+          Print help (see a summary with '-h')

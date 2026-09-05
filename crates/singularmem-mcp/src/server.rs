@@ -18,11 +18,124 @@ use rmcp::{
 use serde_json::json;
 
 use crate::tools::{
-    handle_memory_get, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryIngestArgs, MemoryListArgs,
+    handle_memory_get, handle_memory_graph_add, handle_memory_graph_invalidate,
+    handle_memory_graph_query, handle_memory_graph_stats, handle_memory_graph_supersede,
+    handle_memory_graph_timeline, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
+    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryGraphAddArgs,
+    MemoryGraphInvalidateArgs, MemoryGraphQueryArgs, MemoryGraphStatsArgs,
+    MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs, MemoryIngestArgs, MemoryListArgs,
     MemoryRetrieveArgs, MemoryRevisionsArgs,
 };
 use crate::{Config, Error, Result};
+
+/// Parse `tools/call` JSON arguments into `T`, mapping a parse failure to
+/// `invalid_params`. Shared by every `dispatch_*` helper below.
+fn parse_call_args<T: serde::de::DeserializeOwned>(
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    tool: &str,
+) -> std::result::Result<T, McpError> {
+    let args_value = serde_json::Value::Object(arguments.unwrap_or_default());
+    serde_json::from_value(args_value).map_err(|e| {
+        McpError::invalid_params(format!("failed to parse {tool} arguments: {e}"), None)
+    })
+}
+
+/// Map a graph-writer error to an MCP error, given the tool name for the
+/// read-only message.
+fn map_graph_write_error(tool: &str, err: Error) -> McpError {
+    match err {
+        Error::ReadOnly => {
+            McpError::invalid_params(format!("server is read-only; {tool} is disabled"), None)
+        }
+        Error::InvalidId(msg) => McpError::invalid_params(format!("invalid item ID: {msg}"), None),
+        Error::Core(singularmem_core::Error::Validation { field, reason }) => {
+            McpError::invalid_params(format!("{field}: {reason}"), None)
+        }
+        Error::Core(singularmem_core::Error::FactNotFound {
+            subject,
+            predicate,
+            object,
+        }) => McpError::invalid_params(
+            format!("no open fact {subject} —{predicate}→ {object}"),
+            None,
+        ),
+        Error::Core(singularmem_core::Error::FactIdNotFound { id }) => {
+            McpError::invalid_params(format!("fact {id} not found"), None)
+        }
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+/// Map a graph-reader error to an MCP error (no `ReadOnly` case: readers
+/// always run, even in read-only mode).
+fn map_graph_read_error(err: Error) -> McpError {
+    match err {
+        Error::Core(singularmem_core::Error::Validation { field, reason }) => {
+            McpError::invalid_params(format!("{field}: {reason}"), None)
+        }
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+fn dispatch_memory_graph_add(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphAddArgs = parse_call_args(arguments, "memory_graph_add")?;
+    handle_memory_graph_add(args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(|e| map_graph_write_error("memory_graph_add", e))
+}
+
+fn dispatch_memory_graph_invalidate(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphInvalidateArgs = parse_call_args(arguments, "memory_graph_invalidate")?;
+    handle_memory_graph_invalidate(args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(|e| map_graph_write_error("memory_graph_invalidate", e))
+}
+
+fn dispatch_memory_graph_supersede(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphSupersedeArgs = parse_call_args(arguments, "memory_graph_supersede")?;
+    handle_memory_graph_supersede(args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(|e| map_graph_write_error("memory_graph_supersede", e))
+}
+
+fn dispatch_memory_graph_query(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphQueryArgs = parse_call_args(arguments, "memory_graph_query")?;
+    handle_memory_graph_query(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+fn dispatch_memory_graph_timeline(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphTimelineArgs = parse_call_args(arguments, "memory_graph_timeline")?;
+    handle_memory_graph_timeline(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+fn dispatch_memory_graph_stats(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphStatsArgs = parse_call_args(arguments, "memory_graph_stats")?;
+    handle_memory_graph_stats(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
 
 /// MCP server handler for Singularmem.
 ///
@@ -76,7 +189,8 @@ impl SingularmemServer {
             "memory_retrieve",
             "Retrieve memories from the user's local Singularmem store that are relevant to a \
              query. Returns formatted context the model can use to ground its response. \
-             Memories are private to this user and stored locally.",
+             Memories are private to this user and stored locally. For current facts (who \
+             owns what, which tool is used), call `memory_graph_query` first.",
             schema_obj,
         )
     }
@@ -102,9 +216,15 @@ impl ServerHandler for SingularmemServer {
             crate::tools::list::tool_descriptor(),
             crate::tools::revisions::tool_descriptor(),
             crate::tools::scopes::tool_descriptor(),
+            crate::tools::graph::tool_descriptor_query(),
+            crate::tools::graph::tool_descriptor_timeline(),
+            crate::tools::graph::tool_descriptor_stats(),
         ];
         if !self.config.read_only {
             tools.push(crate::tools::ingest::tool_descriptor());
+            tools.push(crate::tools::graph::tool_descriptor_add());
+            tools.push(crate::tools::graph::tool_descriptor_invalidate());
+            tools.push(crate::tools::graph::tool_descriptor_supersede());
         }
         std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
@@ -260,6 +380,14 @@ impl ServerHandler for SingularmemServer {
                     Err(other) => Err(McpError::internal_error(other.to_string(), None)),
                 }
             }
+            "memory_graph_add" => dispatch_memory_graph_add(&config, request.arguments),
+            "memory_graph_query" => dispatch_memory_graph_query(&config, request.arguments),
+            "memory_graph_invalidate" => {
+                dispatch_memory_graph_invalidate(&config, request.arguments)
+            }
+            "memory_graph_supersede" => dispatch_memory_graph_supersede(&config, request.arguments),
+            "memory_graph_timeline" => dispatch_memory_graph_timeline(&config, request.arguments),
+            "memory_graph_stats" => dispatch_memory_graph_stats(&config, request.arguments),
             _other => Err(McpError::method_not_found::<
                 rmcp::model::CallToolRequestMethod,
             >()),

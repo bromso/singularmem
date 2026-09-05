@@ -1,0 +1,58 @@
+Print the newest items across a project's editor scopes
+
+Usage: singularmem wake-up [OPTIONS]
+
+Options:
+      --scope <PATH>
+          Restrict to this scope and its descendants (repeatable; OR-ed). Defaults to the editor
+          scopes for `--project` (or the current directory) when omitted
+
+      --store <PATH>
+          Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also settable via
+          the `SINGULARMEM_STORE` environment variable — the only way to point a hook (which runs
+          with a fixed, flag-less command line) at a non-default store
+
+      --project <DIR>
+          Project directory whose basename derives the default scopes. Defaults to the current
+          directory. Ignored when `--scope` is given
+
+      --read-only
+          Open the store in read-only mode (refuses ingest)
+
+      --include-files
+          Also include the `files/<project>` scope in the default scope set
+
+      --no-index
+          Skip wiring up the Tantivy hook on open. Use for storage-only operations that don't need
+          search, or when the Tantivy directory is intentionally absent
+
+      --limit <LIMIT>
+          Newest items to include
+          
+          [default: 20]
+
+      --max-bytes <MAX_BYTES>
+          Rendered byte budget; oldest blocks are dropped first to fit (applies to the rendered
+          text; hook envelopes add a few bytes of JSON)
+          
+          [default: 8192]
+
+  -a, --adapter <ADAPTER>
+          Which adapter to use for formatting
+          
+          [default: plain]
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - text:        Header plus adapter-formatted blocks, on stdout
+          - json:        `{ scopes, total, shown, blocks, text }`
+          - claude-hook: Claude Code's `SessionStart` hook envelope
+          - codex-hook:  Codex's `SessionStart` hook envelope
+          - cursor-hook: Cursor's `SessionStart` hook envelope
+          
+          [default: text]
+
+  -h, --help
+          Print help (see a summary with '-h')

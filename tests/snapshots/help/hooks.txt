@@ -1,0 +1,19 @@
+Install, uninstall, or inspect editor hook wiring
+
+Usage: singularmem hooks [OPTIONS] <COMMAND>
+
+Commands:
+  install    Wire this editor's hooks to the current binary
+  uninstall  Remove this editor's hooks, leaving everything else untouched
+  status     Show whether hooks are installed for one editor, or all three
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --store <PATH>  Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also
+                      settable via the `SINGULARMEM_STORE` environment variable — the only way to
+                      point a hook (which runs with a fixed, flag-less command line) at a
+                      non-default store
+      --read-only     Open the store in read-only mode (refuses ingest)
+      --no-index      Skip wiring up the Tantivy hook on open. Use for storage-only operations that
+                      don't need search, or when the Tantivy directory is intentionally absent
+  -h, --help          Print help

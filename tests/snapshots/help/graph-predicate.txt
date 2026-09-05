@@ -1,0 +1,22 @@
+Facts with a predicate
+
+Usage: singularmem graph predicate [OPTIONS] <PREDICATE>
+
+Arguments:
+  <PREDICATE>  Predicate to look up facts for
+
+Options:
+      --as-of <TS>        Facts valid at this time (`YYYY-MM-DD` or RFC 3339)
+      --store <PATH>      Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
+                          Also settable via the `SINGULARMEM_STORE` environment variable — the only
+                          way to point a hook (which runs with a fixed, flag-less command line) at a
+                          non-default store
+      --read-only         Open the store in read-only mode (refuses ingest)
+      --recorded-at <TS>  What the store believed at this time (`YYYY-MM-DD` or RFC 3339)
+      --no-index          Skip wiring up the Tantivy hook on open. Use for storage-only operations
+                          that don't need search, or when the Tantivy directory is intentionally
+                          absent
+      --scope <PATH>      Restrict to this scope and its descendants (e.g. `claude-code/myproj`)
+      --scope-exact       With --scope: match only that exact scope, not descendants
+      --json              Print facts as a JSON array instead of one line each
+  -h, --help              Print help

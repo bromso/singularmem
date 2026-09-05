@@ -1,0 +1,23 @@
+Bulk-ingest Cursor chat history from its per-user `state.vscdb` stores (idempotent)
+
+Usage: singularmem ingest-cursor [OPTIONS]
+
+Options:
+      --cursor-dir <DIR>             Cursor's per-user directory (contains `globalStorage/` and
+                                     `workspaceStorage/`). Defaults to `SINGULARMEM_CURSOR_DIR`,
+                                     then to the per-OS Cursor `User` dir
+      --store <PATH>                 Path to the `SQLite` store file. Defaults to the per-user XDG
+                                     data dir. Also settable via the `SINGULARMEM_STORE` environment
+                                     variable — the only way to point a hook (which runs with a
+                                     fixed, flag-less command line) at a non-default store
+      --project <DIR>                Keep only conversations whose workspace folder equals DIR
+      --read-only                    Open the store in read-only mode (refuses ingest)
+      --conversation <CONVERSATION>  Keep only this composer (conversation) id
+      --no-index                     Skip wiring up the Tantivy hook on open. Use for storage-only
+                                     operations that don't need search, or when the Tantivy
+                                     directory is intentionally absent
+      --dry-run                      Parse and report; write nothing
+      --quiet                        Suppress per-file progress lines
+      --scope <PATH>                 Override the default `cursor/<project>` scope for every
+                                     ingested item
+  -h, --help                         Print help

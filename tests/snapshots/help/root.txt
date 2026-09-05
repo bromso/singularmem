@@ -1,0 +1,36 @@
+Local-first persistent memory layer for LLM workflows.
+
+Usage: singularmem [OPTIONS] <COMMAND>
+
+Commands:
+  ingest             Add a new item to the store
+  ingest-transcript  Bulk-ingest Claude Code JSONL transcripts (idempotent)
+  ingest-codex       Bulk-ingest `OpenAI` Codex CLI rollout JSONL files (idempotent)
+  ingest-cursor      Bulk-ingest Cursor chat history from its per-user `state.vscdb` stores
+                     (idempotent)
+  ingest-dir         Bulk-ingest a source tree, honouring .gitignore (idempotent)
+  get                Fetch one item by ID
+  list               Enumerate items, optionally filtered by tag
+  revisions          Show the supersedes chain for an item, newest-first
+  export             Emit the entire store as JSONL on stdout
+  search             Full-text search over the store
+  reindex            Rebuild the Tantivy index from the `SQLite` store
+  retrieve           Retrieve memory blocks formatted for an LLM prompt
+  semantic-search    \[DEPRECATED\] Semantic (vector) search. Use `search --mode semantic`
+  scope              Inspect and change item scopes
+  wake-up            Print the newest items across a project's editor scopes
+  hook               Run an editor hook event on stdin (never fails the calling editor)
+  hooks              Install, uninstall, or inspect editor hook wiring
+  graph              Record and query the temporal knowledge graph
+  help               Print this message or the help of the given subcommand(s)
+
+Options:
+      --store <PATH>  Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also
+                      settable via the `SINGULARMEM_STORE` environment variable — the only way to
+                      point a hook (which runs with a fixed, flag-less command line) at a
+                      non-default store
+      --read-only     Open the store in read-only mode (refuses ingest)
+      --no-index      Skip wiring up the Tantivy hook on open. Use for storage-only operations that
+                      don't need search, or when the Tantivy directory is intentionally absent
+  -h, --help          Print help
+  -V, --version       Print version

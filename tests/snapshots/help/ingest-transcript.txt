@@ -1,0 +1,24 @@
+Bulk-ingest Claude Code JSONL transcripts (idempotent)
+
+Usage: singularmem ingest-transcript [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  Transcript files or directories (searched recursively for *.jsonl). Defaults to
+              ~/.claude/projects
+
+Options:
+      --project <DIR>       Keep only messages whose working directory equals DIR
+      --store <PATH>        Path to the `SQLite` store file. Defaults to the per-user XDG data dir.
+                            Also settable via the `SINGULARMEM_STORE` environment variable — the
+                            only way to point a hook (which runs with a fixed, flag-less command
+                            line) at a non-default store
+      --include-sidechains  Keep subagent (sidechain) messages
+      --read-only           Open the store in read-only mode (refuses ingest)
+      --dry-run             Parse and report; write nothing
+      --no-index            Skip wiring up the Tantivy hook on open. Use for storage-only operations
+                            that don't need search, or when the Tantivy directory is intentionally
+                            absent
+      --quiet               Suppress per-file progress lines
+      --scope <PATH>        Override the default `claude-code/<project>` scope for every ingested
+                            item
+  -h, --help                Print help

@@ -6,11 +6,13 @@ or agent accumulates over time — conversations, files, decisions,
 embeddings, provenance — and bridges them to any LLM provider through
 a stable, vendor-neutral interface.
 
-> **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0) and
-> scoping (v0.18.0) — memory store, hybrid search (Tantivy + USearch),
-> provider adapters, MCP server, TypeScript SDK, bulk transcript ingestion,
-> hierarchical item scoping, and a LongMemEval retrieval benchmark
-> (`singularmem-bench`). Constitution v0.2.0 ratified 2026-05-15.
+> **Status:** v0.16.0, plus unreleased transcript ingestion (v0.17.0),
+> scoping (v0.18.0), and a temporal knowledge graph (v0.19.0) — memory
+> store, hybrid search (Tantivy + USearch), provider adapters, MCP server,
+> TypeScript SDK, bulk transcript ingestion, hierarchical item scoping,
+> an append-only entity/fact graph with point-in-time queries, and a
+> LongMemEval retrieval benchmark (`singularmem-bench`).
+> Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
 
@@ -88,6 +90,32 @@ singularmem wake-up --project .
 
 See [docs/hooks.md](docs/hooks.md) for the full per-editor event table,
 config paths, and troubleshooting.
+
+## Knowledge graph
+
+Alongside verbatim memory, the store keeps a temporal knowledge graph:
+entities and the facts that relate them.
+
+```bash
+singularmem graph add Singularmem uses Tantivy --from 2026-05-16
+singularmem graph supersede Singularmem uses Tantivy Meilisearch --at 2026-09-01
+singularmem graph query Singularmem
+singularmem graph query Singularmem --as-of 2026-06-01
+singularmem graph timeline Singularmem
+singularmem graph stats
+```
+
+Facts are append-only: `supersede` and `invalidate` never rewrite a row,
+they append a revision, so nothing you once recorded is lost.
+
+Each fact carries two independent time axes — when it was *true*
+(`--from`/`--to`, read back with `--as-of`) and when you *recorded* it
+(read back with `--recorded-at`) — which is what lets the graph answer
+both "what was true in June" and "what did we believe in June".
+
+Fact extraction is your agent's job; nothing here calls an LLM. See
+[docs/formats/store-v4.md](docs/formats/store-v4.md) for the tables, the
+query rules, and the export shape.
 
 ## Benchmarks
 

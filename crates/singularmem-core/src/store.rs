@@ -203,7 +203,7 @@ impl Store {
                     found: "<missing>".to_string(),
                     max_supported: FORMAT_VERSION,
                 })?;
-            if version == "1" || version == "2" {
+            if version == "1" || version == "2" || version == "3" {
                 return Err(Error::Migration {
                     from: version,
                     to: FORMAT_VERSION,
@@ -230,8 +230,13 @@ impl Store {
                 Some(v) if v == "1" => {
                     schema::migrate_1_to_2(&mut conn)?;
                     schema::migrate_2_to_3(&mut conn)?;
+                    schema::migrate_3_to_4(&mut conn)?;
                 }
-                Some(v) if v == "2" => schema::migrate_2_to_3(&mut conn)?,
+                Some(v) if v == "2" => {
+                    schema::migrate_2_to_3(&mut conn)?;
+                    schema::migrate_3_to_4(&mut conn)?;
+                }
+                Some(v) if v == "3" => schema::migrate_3_to_4(&mut conn)?,
                 Some(other) => {
                     return Err(Error::UnsupportedFormatVersion {
                         found: other,

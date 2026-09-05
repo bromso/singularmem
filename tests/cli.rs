@@ -168,7 +168,7 @@ fn export_first_line_is_meta() {
         .clone();
     let text = String::from_utf8(out).unwrap();
     let first = text.lines().next().expect("at least one line");
-    assert!(first.contains("\"_singularmem_format\":\"export-v1\""));
+    assert!(first.contains("\"_singularmem_format\":\"export-v2\""));
 }
 
 #[test]
@@ -2892,4 +2892,563 @@ fn store_env_var_is_honoured_and_flag_wins() {
         .success()
         .stdout(predicate::str::contains("via flag"))
         .stdout(predicate::str::contains("via env").not());
+}
+
+/// Run `singularmem --store db_s <args>`.
+fn graph_cmd(db: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+    let mut full = vec!["--store", db];
+    full.extend_from_slice(args);
+    singularmem().args(full).assert()
+}
+
+/// Run and return trimmed stdout, asserting success.
+fn graph_stdout(db: &str, args: &[&str]) -> String {
+    String::from_utf8(graph_cmd(db, args).success().get_output().stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn graph_add_query_supersede_history_and_axes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let item = graph_stdout(db_s, &["ingest", "--content", "we picked tantivy"]);
+
+    let fact = graph_stdout(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "Singularmem",
+            "uses",
+            "Tantivy",
+            "--source",
+            &item,
+            "--scope",
+            "claude-code/singularmem",
+            "--from",
+            "2026-05-16",
+        ],
+    );
+    assert_eq!(fact.len(), 26);
+    // Same triple, same window: idempotent, down to the id.
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "--scope",
+            "claude-code/singularmem",
+            "--from",
+            "2026-05-16",
+        ],
+    )
+    .success()
+    .stdout(format!("{fact}\n"));
+
+    graph_cmd(db_s, &["graph", "query", "singularmem", "--with-sources"])
+        .success()
+        .stdout(predicate::str::contains("Singularmem —uses→ Tantivy"))
+        .stdout(predicate::str::contains("open"))
+        .stdout(predicate::str::contains("we picked tantivy"));
+
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "supersede",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "meilisearch",
+            "--at",
+            "2026-09-01",
+            "--scope",
+            "claude-code/singularmem",
+        ],
+    )
+    .success();
+    graph_cmd(
+        db_s,
+        &["graph", "query", "singularmem", "--as-of", "2026-08-01"],
+    )
+    .success()
+    .stdout(predicate::str::contains("Tantivy"))
+    .stdout(predicate::str::contains("meilisearch").not());
+    graph_cmd(
+        db_s,
+        &["graph", "query", "singularmem", "--as-of", "2026-09-02"],
+    )
+    .success()
+    .stdout(predicate::str::contains("meilisearch"))
+    .stdout(predicate::str::contains("Tantivy").not());
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "query",
+            "singularmem",
+            "--recorded-at",
+            "2020-01-01",
+        ],
+    )
+    .success()
+    .stdout("");
+
+    let hist = graph_stdout(db_s, &["graph", "history", &fact, "--format", "ids"]);
+    assert_eq!(hist.lines().count(), 2);
+    let tl = graph_stdout(db_s, &["graph", "timeline", "singularmem", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&tl).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    graph_cmd(db_s, &["graph", "stats"])
+        .success()
+        .stdout(predicate::str::contains("open facts: 1"))
+        .stdout(predicate::str::contains("closed facts: 1"));
+    graph_cmd(db_s, &["graph", "entities", "--json"])
+        .success()
+        .stdout(predicate::str::contains("\"fact_count\""));
+}
+
+#[test]
+fn graph_errors_and_read_only() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "a", "bad-pred", "b"])
+        .code(1)
+        .stderr(predicate::str::contains("predicate"));
+    graph_cmd(db_s, &["graph", "invalidate", "a", "p", "b"])
+        .code(2)
+        .stderr(predicate::str::contains("no open fact"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--confidence", "1.5"],
+    )
+    .code(1);
+    graph_cmd(db_s, &["graph", "add", "a", "p", "b"]).success();
+    graph_cmd(db_s, &["--read-only", "graph", "add", "a", "p", "c"])
+        .code(2)
+        .stderr(predicate::str::contains("read-only"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "Rust 1.80", "--value", "--json"],
+    )
+    .success()
+    .stdout(predicate::str::contains("\"value\":\"Rust 1.80\""));
+}
+
+/// Every timestamp flag (`--from`/`--to`/`--at`/`--as-of`/`--recorded-at`)
+/// must name itself in a bad-value error, not just say "validation failed
+/// for timestamp" — otherwise a script with two time flags cannot tell
+/// which one it got wrong.
+#[test]
+fn graph_timestamp_errors_name_the_flag() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "a", "p", "b"]).success();
+
+    graph_cmd(db_s, &["graph", "add", "x", "p", "y", "--from", "notadate"])
+        .code(1)
+        .stderr(predicate::str::contains("--from"));
+    graph_cmd(db_s, &["graph", "add", "x", "p", "y", "--to", "notadate"])
+        .code(1)
+        .stderr(predicate::str::contains("--to"));
+    graph_cmd(
+        db_s,
+        &["graph", "invalidate", "a", "p", "b", "--at", "notadate"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("--at"));
+    graph_cmd(
+        db_s,
+        &["graph", "supersede", "a", "p", "b", "c", "--at", "notadate"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("--at"));
+    graph_cmd(db_s, &["graph", "query", "a", "--as-of", "notadate"])
+        .code(1)
+        .stderr(predicate::str::contains("--as-of"));
+    graph_cmd(db_s, &["graph", "query", "a", "--recorded-at", "notadate"])
+        .code(1)
+        .stderr(predicate::str::contains("--recorded-at"));
+}
+
+/// `graph predicate`, human and `--json`, plus `--as-of` filtering.
+#[test]
+fn graph_predicate_human_json_and_as_of() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "alice",
+            "knows",
+            "bob",
+            "--from",
+            "2026-01-01",
+        ],
+    )
+    .success();
+    graph_cmd(db_s, &["graph", "add", "carol", "knows", "alice"]).success();
+
+    graph_cmd(db_s, &["graph", "predicate", "knows"])
+        .success()
+        .stdout(predicate::str::contains("alice —knows→ bob"))
+        .stdout(predicate::str::contains("carol —knows→ alice"));
+
+    let json = graph_stdout(db_s, &["graph", "predicate", "knows", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+
+    // alice —knows→ bob only starts being valid on 2026-01-01; as-of a year
+    // earlier must exclude it but keep the window-less carol fact.
+    graph_cmd(
+        db_s,
+        &["graph", "predicate", "knows", "--as-of", "2025-01-01"],
+    )
+    .success()
+    .stdout(predicate::str::contains("carol —knows→ alice"))
+    .stdout(predicate::str::contains("alice —knows→ bob").not());
+}
+
+/// `graph invalidate`'s success path: exit 0, the fact stops showing up in
+/// `graph query`, and `graph history --json` grows to two revisions.
+#[test]
+fn graph_invalidate_closes_fact_and_extends_history() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fact = graph_stdout(db_s, &["graph", "add", "singularmem", "uses", "sqlite"]);
+
+    graph_cmd(db_s, &["graph", "query", "singularmem"])
+        .success()
+        .stdout(predicate::str::contains("sqlite"));
+
+    graph_cmd(
+        db_s,
+        &["graph", "invalidate", "singularmem", "uses", "sqlite"],
+    )
+    .success()
+    .stdout(predicate::str::contains("singularmem —uses→ sqlite"));
+
+    graph_cmd(db_s, &["graph", "query", "singularmem"])
+        .success()
+        .stdout("");
+
+    let json = graph_stdout(db_s, &["graph", "history", &fact, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+}
+
+/// `graph query --direction outgoing|incoming|both` with one incoming and
+/// one outgoing fact seeded on the queried entity.
+#[test]
+fn graph_query_direction_filters_by_side() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "alice", "knows", "bob"]).success();
+    graph_cmd(db_s, &["graph", "add", "carol", "knows", "alice"]).success();
+
+    graph_cmd(
+        db_s,
+        &["graph", "query", "alice", "--direction", "outgoing"],
+    )
+    .success()
+    .stdout(predicate::str::contains("alice —knows→ bob"))
+    .stdout(predicate::str::contains("carol —knows→ alice").not());
+
+    graph_cmd(
+        db_s,
+        &["graph", "query", "alice", "--direction", "incoming"],
+    )
+    .success()
+    .stdout(predicate::str::contains("carol —knows→ alice"))
+    .stdout(predicate::str::contains("alice —knows→ bob").not());
+
+    graph_cmd(db_s, &["graph", "query", "alice", "--direction", "both"])
+        .success()
+        .stdout(predicate::str::contains("alice —knows→ bob"))
+        .stdout(predicate::str::contains("carol —knows→ alice"));
+}
+
+/// `--scope-exact` on `query`: a fact recorded on a descendant scope is
+/// included under the plain (subtree) filter but excluded once `--scope`'s
+/// exact match is requested.
+#[test]
+fn graph_query_scope_exact_excludes_descendant_scope() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "--scope",
+            "claude-code/singularmem",
+        ],
+    )
+    .success();
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "singularmem",
+            "uses",
+            "meilisearch",
+            "--scope",
+            "claude-code/singularmem/search",
+        ],
+    )
+    .success();
+
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "query",
+            "singularmem",
+            "--scope",
+            "claude-code/singularmem",
+        ],
+    )
+    .success()
+    .stdout(predicate::str::contains("tantivy"))
+    .stdout(predicate::str::contains("meilisearch"));
+
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "query",
+            "singularmem",
+            "--scope",
+            "claude-code/singularmem",
+            "--scope-exact",
+        ],
+    )
+    .success()
+    .stdout(predicate::str::contains("tantivy"))
+    .stdout(predicate::str::contains("meilisearch").not());
+}
+
+/// `graph entities --kind` restricts to entities created with that kind.
+#[test]
+fn graph_entities_kind_filter() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "dave",
+            "works_at",
+            "acme",
+            "--object-kind",
+            "company",
+        ],
+    )
+    .success();
+    graph_cmd(db_s, &["graph", "add", "dave", "knows", "erin"]).success();
+
+    let out = graph_stdout(db_s, &["graph", "entities", "--kind", "company"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1);
+    let fields: Vec<&str> = lines[0].split('\t').collect();
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[1], "acme");
+    assert_eq!(fields[2], "company");
+    assert_eq!(fields[3], "1");
+}
+
+/// `graph history --format table` and `--format ids`.
+#[test]
+fn graph_history_format_table_and_ids() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fact = graph_stdout(db_s, &["graph", "add", "a", "p", "b"]);
+
+    graph_cmd(db_s, &["graph", "history", &fact, "--format", "table"])
+        .success()
+        .stdout(predicate::str::contains("a —p→ b"));
+
+    let ids = graph_stdout(db_s, &["graph", "history", &fact, "--format", "ids"]);
+    assert_eq!(ids, fact);
+}
+
+/// `graph history --json` is a shortcut for `--format json` (spec's literal
+/// `graph history <FACT_ID> [--json]`), and conflicts with an explicit
+/// `--format ids`.
+#[test]
+fn graph_history_json_flag_matches_format_json_and_conflicts_with_format() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fact = graph_stdout(db_s, &["graph", "add", "a", "p", "b"]);
+
+    let via_json_flag = graph_stdout(db_s, &["graph", "history", &fact, "--json"]);
+    let via_format_json = graph_stdout(db_s, &["graph", "history", &fact, "--format", "json"]);
+    assert_eq!(via_json_flag, via_format_json);
+    let v: serde_json::Value = serde_json::from_str(&via_json_flag).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+
+    graph_cmd(
+        db_s,
+        &["graph", "history", &fact, "--json", "--format", "ids"],
+    )
+    .code(2)
+    .stderr(predicate::str::contains("cannot be used with"));
+}
+
+/// `graph history NOTANID` names the fact ID specifically, distinct from
+/// `--source`'s "invalid item ID" — both parse a ULID, but a caller needs
+/// to know which argument was rejected.
+#[test]
+fn graph_history_invalid_fact_id_is_a_distinct_error() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "history", "NOTANID"])
+        .code(1)
+        .stderr(predicate::str::contains("invalid fact ID"))
+        .stderr(predicate::str::contains("invalid item ID").not());
+}
+
+/// A second `graph add` for a standing triple is idempotent only when the
+/// validity window matches; a differing one is refused rather than dropped.
+#[test]
+fn graph_add_refuses_a_divergent_window_for_a_standing_fact() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fact = graph_stdout(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-05-16"],
+    );
+
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-05-16"],
+    )
+    .success()
+    .stdout(format!("{fact}\n"));
+
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-06-01"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("a —p→ b"))
+    .stderr(predicate::str::contains("use supersede or invalidate"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--confidence", "0.5"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("use supersede or invalidate"));
+
+    graph_cmd(db_s, &["graph", "stats"])
+        .success()
+        .stdout(predicate::str::contains("open facts: 1"));
+}
+
+/// `graph timeline`'s human output marks the open head `[current]` and every
+/// other revision `[closed]`, ordered by `valid_from` with "valid since
+/// unknown" (`NULL`) first.
+#[test]
+fn graph_timeline_human_output_marks_current_and_closed() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "singularmem", "uses", "tantivy"]).success();
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "supersede",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "meilisearch",
+        ],
+    )
+    .success();
+
+    let out = graph_stdout(db_s, &["graph", "timeline", "singularmem"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with("[closed] "), "{out}");
+    assert!(lines[0].contains("tantivy"), "{out}");
+    assert!(lines[1].starts_with("[current] "), "{out}");
+    assert!(lines[1].contains("meilisearch"), "{out}");
+}
+
+/// `graph supersede`'s human output: the closed fact's line, then the new
+/// fact's line.
+#[test]
+fn graph_supersede_prints_closed_then_new_fact_lines() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "a", "p", "old"]).success();
+
+    let out = graph_stdout(db_s, &["graph", "supersede", "a", "p", "old", "new"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("a —p→ old"));
+    assert!(lines[1].contains("a —p→ new"));
+}
+
+/// `graph supersede` with no prior open fact: only the new fact is printed
+/// (id included via `render_fact`), and the library's warning about the
+/// missing old fact reaches stderr.
+#[test]
+fn graph_supersede_warns_when_no_prior_open_fact() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+
+    let out = graph_stdout(db_s, &["graph", "supersede", "a", "p", "old", "new"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("a —p→ new"));
+
+    graph_cmd(db_s, &["graph", "supersede", "x", "p", "old", "new2"])
+        .success()
+        .stderr(predicate::str::contains("no open fact to close"));
+}
+
+/// `graph invalidate`'s human output: exactly one line, the closed fact
+/// (its `valid_to` is no longer `open`).
+#[test]
+fn graph_invalidate_prints_the_closed_fact_line() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "a", "p", "b"]).success();
+
+    let out = graph_stdout(db_s, &["graph", "invalidate", "a", "p", "b"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1);
+    // The closed fact — `valid_to` is a real timestamp now, not the
+    // open-ended "open".
+    assert!(lines[0].contains("a —p→ b"));
+    assert!(!lines[0].contains("open"));
 }
