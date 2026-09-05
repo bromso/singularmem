@@ -327,4 +327,47 @@ allowlist, so its findings are folded in here alongside Task 5's own.
    checks, and the choice mirrors `handle_memory_wakeup`'s MCP-side
    `resolve_project` → `find_adapter` sequence.
 
+8. **`Wakeup.shown` is the post-`limit` count, not the post-`maxBytes`
+   count this spec's field doc originally suggested.**
+   `singularmem_retrieve::wakeup::build` sets `shown` to the number of
+   items left after `limit` and dedup, before any byte-budget trimming;
+   `render`'s header is recomputed per iteration of the budgeting loop
+   (`header_for`) and reports the count that actually survived
+   `max_bytes` separately. Both the MCP tool and the Node binding return
+   `w.shown` as-is (it matches `singularmem wake-up --format json`'s
+   `shown` field, the established contract), so the fix here is
+   documentation only: `Wakeup.shown`'s doc comment in
+   `crates/singularmem-node/src/types.rs`, the node README, and this
+   note, all now say "items considered after `limit`" and point to the
+   header inside `text` for the post-budget count.
+
+9. **`resolve_project`'s `current_dir()` failure gets its own error,
+   `Error::NoProject`.** The whole-branch review found that a failed
+   `std::env::current_dir()` (no `project` argument, no server
+   `--project`) was misreported as `Error::InvalidProject("<cwd>: ...")`
+   — "project <cwd>: ... is not a directory" is not an honest description
+   of "there is no cwd to fall back to". `crates/singularmem-mcp/src/
+   error.rs` adds `Error::NoProject(String)` ("cannot determine a project
+   directory: {0}"), mapped to `invalid_params` in `map_wakeup_error` and
+   unit-tested in `server.rs`.
+
+10. **`get_prompt` validates the `wake-up` prompt's `project` argument's
+    type.** A non-string `project` (e.g. a JSON number) was silently
+    treated as absent, defaulting to the server's `--project`/cwd instead
+    of rejecting. `server.rs`'s `get_prompt` now returns `invalid_params`
+    ("prompt argument 'project' must be a string") for a present,
+    non-string `project`, covered by the wire test
+    `prompt_get_rejects_a_non_string_project_argument` in
+    `tests/mcp_handshake.rs`.
+
+11. **Acceptance criteria 2 and 3 (`memory_wakeup` output equals
+    `singularmem wake-up`'s output; `prompts/get wake-up` returns that
+    same text) had no test until this pass.** The wire test
+    `wakeup_wire_output_matches_cli_stdout_and_the_prompt` in
+    `tests/mcp_handshake.rs` seeds a store via the `singularmem` CLI,
+    captures `singularmem wake-up --project <dir> --adapter plain`'s
+    stdout, then asserts it equals `tools/call memory_wakeup {project:
+    <dir>}`'s text byte-for-byte, and that `prompts/get wake-up
+    {project: <dir>}`'s one user message equals that same text.
+
 No napi method or field names changed from what this section documents.
