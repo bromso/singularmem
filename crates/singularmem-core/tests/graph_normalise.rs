@@ -12,6 +12,9 @@ fn entity_names_normalise() {
     assert_eq!(entity_name("Jonas's  Laptop").unwrap(), "jonass_laptop");
     assert_eq!(entity_name("Tantivy").unwrap(), "tantivy");
     assert_eq!(entity_name("café").unwrap(), "café"); // NFC, lowercase, non-ASCII allowed
+                                                      // Decomposed "cafe" + U+0301 COMBINING ACUTE normalises to the same
+                                                      // string as the precomposed spelling, so both name one entity.
+    assert_eq!(entity_name("cafe\u{301}").unwrap(), "café");
     assert!(matches!(
         entity_name("   "),
         Err(Error::Validation {

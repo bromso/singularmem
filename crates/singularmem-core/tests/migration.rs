@@ -563,3 +563,55 @@ fn read_only_v3_refuses_to_migrate() {
         Err(Error::Migration { .. })
     ));
 }
+
+/// A store migrated 3 → 4 ends up with exactly the schema a fresh v4 store
+/// is created with: same tables, same indexes, same definitions. Compared
+/// Compared with whitespace stripped: the v1 fixture above writes its DDL
+/// more compactly than `schema.rs` does and `sqlite_master.sql` preserves
+/// the original text verbatim, so the layout differs while the schema —
+/// every table, index, column, and constraint — must not.
+#[test]
+fn fresh_and_migrated_v4_schemas_are_identical() {
+    let fresh_dir = TempDir::new().unwrap();
+    let fresh = fresh_dir.path().join("fresh.db");
+    drop(Store::open(&fresh).unwrap());
+
+    let migrated_dir = TempDir::new().unwrap();
+    let migrated = make_v3(&migrated_dir);
+    let store = Store::open(&migrated).unwrap();
+    assert_eq!(store.format_version().unwrap(), "4");
+    drop(store);
+
+    fn schema(path: &std::path::Path) -> Vec<(String, String, String)> {
+        let conn = Connection::open(path).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                let sql: Option<String> = r.get(2)?;
+                let stripped: String = sql
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                Ok((r.get(0)?, r.get(1)?, stripped))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        drop(stmt);
+        rows
+    }
+
+    let fresh_schema = schema(&fresh);
+    let migrated_schema = schema(&migrated);
+    assert!(
+        fresh_schema.iter().any(|(_, name, _)| name == "facts"),
+        "the fresh store really did create the v4 tables"
+    );
+    assert_eq!(fresh_schema, migrated_schema);
+}
