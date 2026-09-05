@@ -104,8 +104,8 @@
     "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
     "haystack_sessions": [
       [
-        {"role": "user", "content": "The builders finished remodelling our cooking area in January."},
-        {"role": "assistant", "content": "Glad the remodel is complete."}
+        {"role": "user", "content": "Builders finished remodelling our cooking area in January."},
+        {"role": "assistant", "content": "Glad your remodel turned out well."}
       ],
       [
         {"role": "user", "content": "Which planet has the most moons?"},
