@@ -57,13 +57,7 @@ pub fn handle_memory_retrieve(
     config: &Config,
 ) -> Result<MemoryRetrieveOutput> {
     // 1. Resolve adapter (request arg → server default).
-    let adapter_name = args.adapter.as_deref().unwrap_or(&config.default_adapter);
-    let adapter: &dyn Adapter = config
-        .known_adapters
-        .iter()
-        .find(|a| a.name() == adapter_name)
-        .map(std::convert::AsRef::as_ref)
-        .ok_or_else(|| Error::UnknownAdapter(adapter_name.to_string()))?;
+    let adapter: &dyn Adapter = crate::tools::util::find_adapter(config, args.adapter.as_deref())?;
 
     // 2. Clamp limit to [1, 50] per spec.
     let limit = args.limit.unwrap_or(10).clamp(1, 50);

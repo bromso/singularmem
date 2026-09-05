@@ -1,8 +1,9 @@
 //! Shared helpers used by tool handlers.
 
 use singularmem_core::{ScopeFilter, Store, StoreOptions};
+use singularmem_retrieve::Adapter;
 
-use crate::{Config, Result};
+use crate::{Config, Error, Result};
 
 /// Open the store for read-side handlers, honouring `config.read_only`.
 /// When read-only, `SQLite` is opened with `read_only=true` as a third
@@ -53,6 +54,24 @@ pub fn scope_filter(scope: Option<&str>, exact: Option<bool>) -> Result<Option<S
         Some(p) if exact.unwrap_or(false) => Ok(Some(ScopeFilter::exact(p)?)),
         Some(p) => Ok(Some(ScopeFilter::descendants(p)?)),
     }
+}
+
+/// Resolve the adapter named by `name`, falling back to
+/// `config.default_adapter` when absent. Shared by `memory_retrieve` and
+/// `memory_wakeup`.
+///
+/// # Errors
+///
+/// Returns [`crate::Error::UnknownAdapter`] when the wanted name is not one
+/// of `config.known_adapters`.
+pub fn find_adapter<'a>(config: &'a Config, name: Option<&str>) -> Result<&'a dyn Adapter> {
+    let wanted = name.unwrap_or(&config.default_adapter);
+    config
+        .known_adapters
+        .iter()
+        .map(AsRef::as_ref)
+        .find(|a| a.name() == wanted)
+        .ok_or_else(|| Error::UnknownAdapter(wanted.to_string()))
 }
 
 #[cfg(test)]

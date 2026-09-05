@@ -268,7 +268,7 @@ showing last 0` and nothing follows.
 **Example response:**
 
 ```
-# Singularmem wake-up — claude-code/myproj — 2 items, showing last 2
+# Singularmem wake-up — claude-code/myproj, codex/myproj, cursor/myproj — 2 items, showing last 2
 
 alpha decision
 beta decision

@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use rmcp::model::{Tool, ToolAnnotations};
 use serde::Deserialize;
 use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions};
-use singularmem_retrieve::Adapter;
 
-use crate::tools::util::open_store_for_reading;
+use crate::tools::util::{find_adapter, open_store_for_reading};
 use crate::{Config, Error, Result};
 
 const DEFAULT_LIMIT: usize = 20;
@@ -68,15 +67,15 @@ pub fn tool_descriptor() -> Tool {
 /// Resolve the project directory per the spec's order and validate it.
 ///
 /// # Errors
-/// [`Error::InvalidProject`] when the path is not an existing directory.
+/// [`Error::NoProject`] when no `project` argument or server `--project` is
+/// set and `std::env::current_dir()` fails; [`Error::InvalidProject`] when
+/// the resolved path is not an existing directory.
 pub fn resolve_project(arg: Option<&str>, config: &Config) -> Result<PathBuf> {
     let dir: PathBuf = match arg {
         Some(p) => PathBuf::from(p),
         None => match &config.project {
             Some(p) => p.clone(),
-            None => {
-                std::env::current_dir().map_err(|e| Error::InvalidProject(format!("<cwd>: {e}")))?
-            }
+            None => std::env::current_dir().map_err(|e| Error::NoProject(e.to_string()))?,
         },
     };
     if !dir.is_dir() {
@@ -85,20 +84,11 @@ pub fn resolve_project(arg: Option<&str>, config: &Config) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn find_adapter<'a>(config: &'a Config, name: Option<&str>) -> Result<&'a dyn Adapter> {
-    let wanted = name.unwrap_or(&config.default_adapter);
-    config
-        .known_adapters
-        .iter()
-        .map(AsRef::as_ref)
-        .find(|a| a.name() == wanted)
-        .ok_or_else(|| Error::UnknownAdapter(wanted.to_string()))
-}
-
 /// Handle `tools/call` for `memory_wakeup`.
 ///
 /// # Errors
-/// [`Error::InvalidProject`], [`Error::UnknownAdapter`], or store errors.
+/// [`Error::NoProject`], [`Error::InvalidProject`], [`Error::UnknownAdapter`],
+/// or store errors.
 pub fn handle_memory_wakeup(
     args: &MemoryWakeupArgs,
     config: &Config,

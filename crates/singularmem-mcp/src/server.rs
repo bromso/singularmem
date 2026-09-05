@@ -172,6 +172,10 @@ fn map_wakeup_error(err: Error) -> McpError {
         Error::InvalidProject(p) => {
             McpError::invalid_params(format!("project {p} is not a directory"), None)
         }
+        Error::NoProject(reason) => McpError::invalid_params(
+            format!("cannot determine a project directory: {reason}"),
+            None,
+        ),
         Error::UnknownAdapter(name) => McpError::invalid_params(
             format!("unknown adapter '{name}'; known adapters: plain, claude, openai, gemini"),
             None,
@@ -493,10 +497,16 @@ impl ServerHandler for SingularmemServer {
            + '_ {
         let config = Arc::clone(&self.config);
         std::future::ready(if request.name == crate::prompts::WAKE_UP {
-            let project = request
-                .arguments
-                .and_then(|m| m.get("project").and_then(Value::as_str).map(str::to_string));
-            crate::prompts::get(&config, project.as_deref()).map_err(map_wakeup_error)
+            match request.arguments.as_ref().and_then(|m| m.get("project")) {
+                None => crate::prompts::get(&config, None).map_err(map_wakeup_error),
+                Some(Value::String(s)) => {
+                    crate::prompts::get(&config, Some(s.as_str())).map_err(map_wakeup_error)
+                }
+                Some(_) => Err(McpError::invalid_params(
+                    "prompt argument 'project' must be a string",
+                    None,
+                )),
+            }
         } else {
             Err(McpError::invalid_params(
                 format!("prompt not found: {}", request.name),
@@ -562,4 +572,38 @@ pub async fn serve(config: Config) -> Result<()> {
     service.waiting().await.map_err(std::io::Error::other)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::ErrorCode;
+
+    #[test]
+    fn map_wakeup_error_no_project_is_invalid_params_and_names_the_reason() {
+        let err = map_wakeup_error(Error::NoProject("some io error".to_string()));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("cannot determine a project directory"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("some io error"), "{}", err.message);
+    }
+
+    #[test]
+    fn map_resource_error_not_found_is_resource_not_found() {
+        let err = map_resource_error(crate::resources::ResourceError::NotFound(
+            "nope".to_string(),
+        ));
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn map_resource_error_other_is_internal_error() {
+        let err = map_resource_error(crate::resources::ResourceError::Other(
+            Error::UnknownAdapter("gpt".to_string()),
+        ));
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+    }
 }

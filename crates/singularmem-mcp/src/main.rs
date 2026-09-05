@@ -7,9 +7,10 @@
 //! constitution names the MCP server as an open-core deliverable
 //! (Open / Closed Split, line 245).
 //!
-//! Sub-project 4a ships the foundation + one read tool
-//! (`memory_retrieve`). Sub-project 4b will add `memory_ingest` and
-//! utility tools.
+//! As of sub-project 16, the server exposes 15 tools (11 in
+//! `--read-only` mode): the original read/write memory tools, eight
+//! `memory_graph_*` knowledge-graph tools, and `memory_wakeup`, plus a
+//! `wake-up` prompt and a `singularmem://memory/{id}` resource template.
 //!
 //! See `docs/superpowers/specs/2026-05-18-mcp-server-4a-design.md`
 //! for the design rationale.

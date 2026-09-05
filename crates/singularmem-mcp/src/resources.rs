@@ -88,10 +88,7 @@ pub fn read(config: &Config, uri: &str) -> Result<ReadResourceResult, ResourceEr
         tags,
         item.content
     );
-    let mut contents = ResourceContents::text(text, uri.to_string());
-    if let ResourceContents::TextResourceContents { mime_type, .. } = &mut contents {
-        *mime_type = Some("text/plain".into());
-    }
+    let contents = ResourceContents::text(text, uri.to_string()).with_mime_type("text/plain");
     Ok(ReadResourceResult::new(vec![contents]))
 }
 

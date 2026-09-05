@@ -147,7 +147,7 @@ fn handshake_and_retrieve_end_to_end() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     );
 
-    // Step 3: tools/list — assert 5 tools are registered.
+    // Step 3: tools/list — assert 15 tools are registered.
     send(
         &mut stdin,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
@@ -296,9 +296,9 @@ fn handshake_and_retrieve_end_to_end() {
     );
     let resp = recv_response(&mut reader);
     assert_eq!(resp["id"], 9);
-    assert!(
-        resp.get("error").is_some(),
-        "expected an error for unknown resource id: {resp}"
+    assert_eq!(
+        resp["error"]["code"], -32002,
+        "expected resource_not_found (-32002) for unknown resource id: {resp}"
     );
 
     // Step 6: close stdin, wait for exit, check stderr was clean.
@@ -309,6 +309,234 @@ fn handshake_and_retrieve_end_to_end() {
         "MCP server exited with non-zero status: {exit:?}"
     );
 
+    let stderr_output = stderr_handle.join().expect("stderr thread");
+    assert!(
+        !stderr_output.contains("panic"),
+        "stderr contains 'panic': {stderr_output}"
+    );
+}
+
+/// Spawn the MCP server against `store` with the given env, send the
+/// `initialize` handshake + `initialized` notification, and return the
+/// child plus its stdin/stdout ready for further messages. The returned
+/// `JoinHandle` drains stderr continuously so the child never blocks on a
+/// full pipe buffer.
+fn spawn_initialized_mcp(
+    store: &Path,
+) -> (
+    std::process::Child,
+    std::process::ChildStdin,
+    BufReader<std::process::ChildStdout>,
+    thread::JoinHandle<String>,
+) {
+    let mut child = Command::new(mcp_bin())
+        .env("SINGULARMEM_STORE", store.to_str().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn singularmem-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    let stderr_handle = thread::spawn(move || {
+        let mut sink = String::new();
+        let mut r = BufReader::new(stderr);
+        loop {
+            let mut line = String::new();
+            match r.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => sink.push_str(&line),
+            }
+        }
+        sink
+    });
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"test","version":"0"}}}}}}"#
+    )
+    .expect("write initialize");
+    stdin.flush().expect("flush stdin");
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .expect("read initialize response");
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .expect("write initialized notification");
+    stdin.flush().expect("flush stdin");
+
+    (child, stdin, reader, stderr_handle)
+}
+
+fn send_msg(stdin: &mut std::process::ChildStdin, msg: &str) {
+    writeln!(stdin, "{msg}").expect("write to mcp stdin");
+    stdin.flush().expect("flush stdin");
+}
+
+fn recv_msg(reader: &mut BufReader<std::process::ChildStdout>) -> serde_json::Value {
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line).expect("read from mcp stdout");
+    assert!(bytes > 0, "EOF reading response");
+    serde_json::from_str(line.trim()).expect("parse JSON response")
+}
+
+/// Acceptance criteria 2 and 3: `memory_wakeup`'s `tools/call` output must
+/// equal `singularmem wake-up`'s own stdout byte-for-byte, and `prompts/get
+/// wake-up`'s single user message must equal that same text.
+#[test]
+fn wakeup_wire_output_matches_cli_stdout_and_the_prompt() {
+    let dir = TempDir::new().unwrap();
+    let store = dir.path().join("store.db");
+
+    // A real directory with a fixed, lowercase basename — mkdtemp's random
+    // suffix can include uppercase letters, but scope paths are lowercased
+    // on write (`singularmem_core::scope::validate`) while the basename
+    // wake-up reads is raw, so a random uppercase basename would exercise
+    // an unrelated mismatch (see the Node wakeup test's identical note).
+    let project_root = TempDir::new().unwrap();
+    let project = project_root.path().join("proj-parity");
+    std::fs::create_dir(&project).unwrap();
+    let project_str = project.to_str().unwrap();
+
+    // Three items in the project's claude-code scope, one elsewhere.
+    for content in ["alpha decision", "beta decision", "gamma decision"] {
+        let status = Command::new(singularmem_bin())
+            .args([
+                "--store",
+                store.to_str().unwrap(),
+                "ingest",
+                "--content",
+                content,
+                "--scope",
+                "claude-code/proj-parity",
+            ])
+            .status()
+            .expect("singularmem ingest");
+        assert!(status.success(), "ingest failed");
+    }
+    let status = Command::new(singularmem_bin())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "ingest",
+            "--content",
+            "unrelated note",
+            "--scope",
+            "claude-code/other-project",
+        ])
+        .status()
+        .expect("singularmem ingest");
+    assert!(status.success(), "ingest failed");
+
+    // 1. The CLI's own `wake-up` output — the source of truth.
+    let cli_output = Command::new(singularmem_bin())
+        .args([
+            "--store",
+            store.to_str().unwrap(),
+            "wake-up",
+            "--project",
+            project_str,
+            "--adapter",
+            "plain",
+        ])
+        .output()
+        .expect("singularmem wake-up");
+    assert!(
+        cli_output.status.success(),
+        "wake-up failed: {cli_output:?}"
+    );
+    let cli_text = String::from_utf8(cli_output.stdout).expect("utf8 stdout");
+    assert!(
+        cli_text.contains("alpha decision") && cli_text.contains("gamma decision"),
+        "sanity check on seeded content: {cli_text}"
+    );
+
+    // 2. The same project, through the MCP server's `tools/call`.
+    let (mut child, mut stdin, mut reader, stderr_handle) = spawn_initialized_mcp(&store);
+
+    let project_json = serde_json::to_string(project_str).unwrap();
+    send_msg(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_wakeup","arguments":{{"project":{project_json}}}}}}}"#
+        ),
+    );
+    let resp = recv_msg(&mut reader);
+    let tool_text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected tool text block: {resp}"))
+        .to_string();
+
+    // 3. And through `prompts/get wake-up`.
+    send_msg(
+        &mut stdin,
+        &format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{{"name":"wake-up","arguments":{{"project":{project_json}}}}}}}"#
+        ),
+    );
+    let resp = recv_msg(&mut reader);
+    let prompt_text = resp["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected prompt text: {resp}"))
+        .to_string();
+
+    drop(stdin);
+    let exit = child.wait().expect("wait for mcp process");
+    assert!(
+        exit.success(),
+        "MCP server exited with non-zero status: {exit:?}"
+    );
+    let stderr_output = stderr_handle.join().expect("stderr thread");
+    assert!(
+        !stderr_output.contains("panic"),
+        "stderr contains 'panic': {stderr_output}"
+    );
+
+    assert_eq!(
+        tool_text, cli_text,
+        "memory_wakeup tool output must equal `singularmem wake-up` stdout byte-for-byte"
+    );
+    assert_eq!(
+        prompt_text, tool_text,
+        "prompts/get wake-up must return the same text as the memory_wakeup tool"
+    );
+}
+
+/// `prompts/get wake-up` with a non-string `project` argument is
+/// `invalid_params`, not a silently-ignored default.
+#[test]
+fn prompt_get_rejects_a_non_string_project_argument() {
+    let dir = TempDir::new().unwrap();
+    // Never opened: the non-string `project` is rejected before the store
+    // is touched, so the path need not exist.
+    let store = dir.path().join("store.db");
+
+    let (mut child, mut stdin, mut reader, stderr_handle) = spawn_initialized_mcp(&store);
+
+    send_msg(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"wake-up","arguments":{"project":123}}}"#,
+    );
+    let resp = recv_msg(&mut reader);
+    assert_eq!(
+        resp["error"]["code"], -32602,
+        "expected invalid_params (-32602) for a non-string project: {resp}"
+    );
+
+    drop(stdin);
+    let exit = child.wait().expect("wait for mcp process");
+    assert!(
+        exit.success(),
+        "MCP server exited with non-zero status: {exit:?}"
+    );
     let stderr_output = stderr_handle.join().expect("stderr thread");
     assert!(
         !stderr_output.contains("panic"),

@@ -26,7 +26,7 @@ use singularmem_core::{FactId, ItemId};
 use crate::tools::util::{open_store_for_reading, open_store_for_writing, scope_filter};
 use crate::{Config, Error, Result};
 
-/// Shared handler output: a single text block. All six `memory_graph_*`
+/// Shared handler output: a single text block. All eight `memory_graph_*`
 /// handlers use this — none needs structured fields beyond the rendered
 /// text.
 #[derive(Debug, Clone)]
