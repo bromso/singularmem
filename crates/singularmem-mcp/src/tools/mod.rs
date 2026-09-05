@@ -9,6 +9,7 @@ pub mod list;
 pub mod retrieve;
 pub mod revisions;
 pub mod scopes;
+pub mod wakeup;
 
 pub use crate::tools::get::{handle_memory_get, MemoryGetArgs, MemoryGetOutput};
 pub use crate::tools::graph::{
@@ -26,3 +27,4 @@ pub use crate::tools::revisions::{
     handle_memory_revisions, MemoryRevisionsArgs, MemoryRevisionsOutput,
 };
 pub use crate::tools::scopes::{handle_memory_scopes, MemoryScopesOutput};
+pub use crate::tools::wakeup::{handle_memory_wakeup, MemoryWakeupArgs, MemoryWakeupOutput};

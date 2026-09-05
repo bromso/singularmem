@@ -51,6 +51,12 @@ struct Args {
     /// tools open the store with `SQLite` read-only mode.
     #[arg(long, env = "SINGULARMEM_READ_ONLY", default_value_t = false)]
     read_only: bool,
+
+    /// Default project directory for `memory_wakeup` and the `wake-up`
+    /// prompt when a call omits `project`. Falls back to the server's
+    /// working directory.
+    #[arg(long, env = "SINGULARMEM_PROJECT", value_name = "DIR")]
+    project: Option<PathBuf>,
 }
 
 /// Adapter choices recognised at startup. Mirrors the registered
@@ -133,7 +139,8 @@ async fn main() -> std::process::ExitCode {
         store_path,
         args.default_adapter.as_str().to_string(),
         args.read_only,
-    );
+    )
+    .with_project(args.project);
 
     match singularmem_mcp::serve(config).await {
         Ok(()) => std::process::ExitCode::SUCCESS,

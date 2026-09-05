@@ -143,8 +143,8 @@ fn handshake_and_retrieve_end_to_end() {
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        12,
-        "expected 12 tools (6 original + 6 memory_graph_*), got: {tools:?}"
+        13,
+        "expected 13 tools (6 original + 6 memory_graph_* + memory_wakeup), got: {tools:?}"
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     for expected in &[
@@ -154,6 +154,7 @@ fn handshake_and_retrieve_end_to_end() {
         "memory_revisions",
         "memory_ingest",
         "memory_scopes",
+        "memory_wakeup",
         "memory_graph_add",
         "memory_graph_query",
         "memory_graph_invalidate",

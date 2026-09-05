@@ -19,6 +19,9 @@ pub struct Config {
     /// and rejects direct calls to it. Read tools open the store with
     /// `SQLite` read-only mode as a third safety layer.
     pub read_only: bool,
+    /// Default project directory for wake-up; `None` means the
+    /// server's cwd.
+    pub project: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for Config {
@@ -29,6 +32,7 @@ impl std::fmt::Debug for Config {
             .field("default_adapter", &self.default_adapter)
             .field("known_adapters", &adapter_names)
             .field("read_only", &self.read_only)
+            .field("project", &self.project)
             .finish()
     }
 }
@@ -48,7 +52,15 @@ impl Config {
                 Box::new(singularmem_adapter_gemini::GeminiAdapter),
             ],
             read_only,
+            project: None,
         }
+    }
+
+    /// Set the default wake-up project directory.
+    #[must_use]
+    pub fn with_project(mut self, project: Option<PathBuf>) -> Self {
+        self.project = project;
+        self
     }
 }
 

@@ -8,23 +8,24 @@ use std::sync::Arc;
 
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
+        Implementation, ListPromptsResult, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
     transport::stdio,
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::tools::{
     handle_memory_get, handle_memory_graph_add, handle_memory_graph_invalidate,
     handle_memory_graph_query, handle_memory_graph_stats, handle_memory_graph_supersede,
     handle_memory_graph_timeline, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryGraphAddArgs,
-    MemoryGraphInvalidateArgs, MemoryGraphQueryArgs, MemoryGraphStatsArgs,
+    handle_memory_revisions, handle_memory_scopes, handle_memory_wakeup, MemoryGetArgs,
+    MemoryGraphAddArgs, MemoryGraphInvalidateArgs, MemoryGraphQueryArgs, MemoryGraphStatsArgs,
     MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs, MemoryIngestArgs, MemoryListArgs,
-    MemoryRetrieveArgs, MemoryRevisionsArgs,
+    MemoryRetrieveArgs, MemoryRevisionsArgs, MemoryWakeupArgs,
 };
 use crate::{Config, Error, Result};
 
@@ -137,6 +138,30 @@ fn dispatch_memory_graph_stats(
         .map_err(map_graph_read_error)
 }
 
+/// Map a `memory_wakeup` / `wake-up` prompt error to an MCP error.
+fn map_wakeup_error(err: Error) -> McpError {
+    match err {
+        Error::InvalidProject(p) => {
+            McpError::invalid_params(format!("project {p} is not a directory"), None)
+        }
+        Error::UnknownAdapter(name) => McpError::invalid_params(
+            format!("unknown adapter '{name}'; known adapters: plain, claude, openai, gemini"),
+            None,
+        ),
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+fn dispatch_memory_wakeup(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryWakeupArgs = parse_call_args(arguments, "memory_wakeup")?;
+    handle_memory_wakeup(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_wakeup_error)
+}
+
 /// MCP server handler for Singularmem.
 ///
 /// Implements `list_tools` (returning the `memory_retrieve` descriptor) and
@@ -190,7 +215,8 @@ impl SingularmemServer {
             "Retrieve memories from the user's local Singularmem store that are relevant to a \
              query. Returns formatted context the model can use to ground its response. \
              Memories are private to this user and stored locally. For current facts (who \
-             owns what, which tool is used), call `memory_graph_query` first.",
+             owns what, which tool is used), call `memory_graph_query` first. \
+             For a session's opening context, call `memory_wakeup` instead.",
             schema_obj,
         )
     }
@@ -198,9 +224,17 @@ impl SingularmemServer {
 
 impl ServerHandler for SingularmemServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("singularmem-mcp", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(Implementation::new(
+            "singularmem-mcp",
+            env!("CARGO_PKG_VERSION"),
+        ))
     }
 
     fn list_tools(
@@ -216,6 +250,7 @@ impl ServerHandler for SingularmemServer {
             crate::tools::list::tool_descriptor(),
             crate::tools::revisions::tool_descriptor(),
             crate::tools::scopes::tool_descriptor(),
+            crate::tools::wakeup::tool_descriptor(),
             crate::tools::graph::tool_descriptor_query(),
             crate::tools::graph::tool_descriptor_timeline(),
             crate::tools::graph::tool_descriptor_stats(),
@@ -388,9 +423,43 @@ impl ServerHandler for SingularmemServer {
             "memory_graph_supersede" => dispatch_memory_graph_supersede(&config, request.arguments),
             "memory_graph_timeline" => dispatch_memory_graph_timeline(&config, request.arguments),
             "memory_graph_stats" => dispatch_memory_graph_stats(&config, request.arguments),
+            "memory_wakeup" => dispatch_memory_wakeup(&config, request.arguments),
             _other => Err(McpError::method_not_found::<
                 rmcp::model::CallToolRequestMethod,
             >()),
+        })
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListPromptsResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        std::future::ready(Ok(
+            ListPromptsResult::with_all_items(crate::prompts::list()),
+        ))
+    }
+
+    fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<GetPromptResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let config = Arc::clone(&self.config);
+        std::future::ready(if request.name == crate::prompts::WAKE_UP {
+            let project = request
+                .arguments
+                .and_then(|m| m.get("project").and_then(Value::as_str).map(str::to_string));
+            crate::prompts::get(&config, project.as_deref()).map_err(map_wakeup_error)
+        } else {
+            Err(McpError::invalid_params(
+                format!("prompt not found: {}", request.name),
+                None,
+            ))
         })
     }
 }

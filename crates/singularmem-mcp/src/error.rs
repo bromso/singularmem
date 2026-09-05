@@ -44,4 +44,8 @@ pub enum Error {
         /// Why it was rejected.
         reason: String,
     },
+
+    /// `memory_wakeup` / `wake-up` project argument is not a directory.
+    #[error("project {0} is not a directory")]
+    InvalidProject(String),
 }
