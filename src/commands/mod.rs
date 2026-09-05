@@ -538,7 +538,7 @@ pub fn canonicalize_project(project: Option<&PathBuf>) -> Option<PathBuf> {
 /// running total. Shared by `commands::bulk`'s multi-file ingest verbs and
 /// `commands::hooks`'s Codex hook, which scans (and so accumulates over)
 /// more than one rollout file per event.
-pub fn accumulate(total: &mut singularmem_ingest::Report, r: singularmem_ingest::Report) {
+pub const fn accumulate(total: &mut singularmem_ingest::Report, r: singularmem_ingest::Report) {
     total.ingested += r.ingested;
     total.skipped_existing += r.skipped_existing;
     total.skipped_filtered += r.skipped_filtered;

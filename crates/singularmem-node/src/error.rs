@@ -247,7 +247,12 @@ pub unsafe fn create_js_error(
     // N-API failures here leave the pointer as null_mut(); napi-rs handles
     // a null Error value gracefully in JsError::into_value.
     let _ = unsafe {
-        napi::sys::napi_create_string_utf8(raw_env, code.as_ptr().cast(), code.len(), &mut code_val)
+        napi::sys::napi_create_string_utf8(
+            raw_env,
+            code.as_ptr().cast(),
+            code.len(),
+            &raw mut code_val,
+        )
     };
     let mut msg_val = ptr::null_mut();
     let _ = unsafe {
@@ -255,11 +260,11 @@ pub unsafe fn create_js_error(
             raw_env,
             message.as_ptr().cast(),
             message.len(),
-            &mut msg_val,
+            &raw mut msg_val,
         )
     };
     let mut js_err = ptr::null_mut();
-    let _ = unsafe { napi::sys::napi_create_error(raw_env, code_val, msg_val, &mut js_err) };
+    let _ = unsafe { napi::sys::napi_create_error(raw_env, code_val, msg_val, &raw mut js_err) };
     js_err
 }
 

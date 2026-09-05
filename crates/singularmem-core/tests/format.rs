@@ -195,9 +195,9 @@ fn open_core_only_round_trip_items() {
         })
         .collect();
     let mut expected_kinds = vec!["meta".to_string()];
-    expected_kinds.extend(std::iter::repeat("item".to_string()).take(6));
-    expected_kinds.extend(std::iter::repeat("entity".to_string()).take(2));
-    expected_kinds.extend(std::iter::repeat("fact".to_string()).take(3));
+    expected_kinds.extend(std::iter::repeat_n("item".to_string(), 6));
+    expected_kinds.extend(std::iter::repeat_n("entity".to_string(), 2));
+    expected_kinds.extend(std::iter::repeat_n("fact".to_string(), 3));
     assert_eq!(kinds, expected_kinds);
 
     // Parse each item line as a serde-deserialised Item to prove the wire
