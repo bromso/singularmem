@@ -119,11 +119,21 @@ ingest 56.4 items/s  wall 73:29
 | knowledge-update | 72 | 1.000 | 1.000 | 1.000 |
 ```
 
-Retrieval calls themselves are sub-millisecond per question in both
-runs above; wall time is dominated by ingestion, not retrieval — 2320.6
-items/s and a 02:09 wall for the lexical-only run vs. 56.4 items/s and a
-73:29 wall once semantic/hybrid re-embed every haystack turn per
-question (both figures from each run's header above).
+Retrieval calls take a few milliseconds per question (the runs above
+recorded them at millisecond granularity: roughly 1 ms lexical, 4–5 ms
+semantic and hybrid on average; later runs record `query_us` in
+microseconds). Wall time is dominated by ingestion, not retrieval —
+2320.6 items/s and a 02:09 wall for the lexical-only run vs. 56.4
+items/s and a 73:29 wall once semantic/hybrid re-embed every haystack
+turn per question (both figures from each run's header above); 470
+retrievals at ~5 ms is about 2 s of a 73-minute run.
+
+Reproducibility note: after these runs, `Query::parse` in
+`singularmem-search` was tightened (commit after `6e79632`) so that an
+identifier-like `field:value` prefix naming an unknown field is an error
+instead of being dropped. No question in `longmemeval_s` contains such a
+prefix (checked over all 500 questions), so a rerun at the current
+commit produces the same `errors 0`.
 
 The two runs both scored 470/500 questions (30 abstention questions
 excluded, 0 errors). Full per-question hit lists were written to
@@ -199,7 +209,4 @@ remaining spread), and compare `bge-small-en` against
 `all-mini-lm-l6-v2` for the semantic and hybrid rows since embedding
 quality is the more likely lever than fusion parameters at this recall
 level. (Over-fetching more candidates before truncation — raising the
-retrieval `fetch_multiplier`, currently `max(ks) * 4` — was considered
-and ruled out: every miss in these runs already had ten distinct
-sessions within the top-40 blocks fetched per question, so fetching
-even more candidates cannot change which sessions land in the top-10.)
+retrieval `fetch_multiplier`, currently `max(For the lexical and semantic columns this lever is exhausted: every missed question already reached ten distinct sessions within the top-40 blocks fetched, so fetching more candidates cannot change their top-10. Hybrid fuses two truncated lists with RRF, so a deeper fetch can still reorder its top-10 slightly.)

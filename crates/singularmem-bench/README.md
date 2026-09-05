@@ -59,7 +59,7 @@ names, per question (`questions[]`) and per mode in the summary
 
 | Field | Meaning |
 |---|---|
-| `questions[].query_us` | Retrieval wall time per mode, in **microseconds** (not milliseconds — retrieval calls are sub-millisecond, so a millisecond field would round almost everything to `0`). |
+| `questions[].query_us` | Retrieval wall time per mode, in **microseconds** (not milliseconds — retrieval calls take single-digit milliseconds, so a millisecond field would quantise them badly). |
 | `questions[].items_ingested` | Items (post-chunking) actually ingested for that question — the length of the `Vec<Item>` `Store::ingest_many` returned. |
 | `summary...[mode].retrieve_queries_per_s` | Retrieval call throughput for that mode, excluding ingestion. Not printed in the Markdown table (see below) — read it from here. |
 | `ingest_items_per_s` (top level) | Ingestion throughput across all scored questions; excludes errored questions from both the item count and the elapsed time. |

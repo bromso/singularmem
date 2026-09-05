@@ -77,3 +77,15 @@ fn unknown_field_is_still_an_error() {
         assert!(Query::parse(q).is_err(), "{q:?} names an unknown field");
     }
 }
+
+#[test]
+fn clock_times_and_ratios_are_prose_not_fields() {
+    // Tantivy reads `10:30` as field `10` with value `30`; that "field" is
+    // not an identifier, so it is natural language and parses leniently.
+    for q in [
+        "What time did I say the meeting was, 10:30 or 11:00?",
+        "I have a meeting at 3:00pm about the 2:1 ratio",
+    ] {
+        Query::parse(q).unwrap_or_else(|e| panic!("{q:?} should parse leniently: {e}"));
+    }
+}

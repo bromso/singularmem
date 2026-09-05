@@ -50,6 +50,17 @@ pub struct Query {
     pub(crate) inner: Box<dyn TantivyQuery>,
 }
 
+/// True when `name` could plausibly be a field the caller meant to address:
+/// an ASCII identifier (letter or `_` first, then letters, digits, `_`).
+/// Anything else — `10` from `10:30`, `2` from `2:1` — is prose.
+fn looks_like_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Query {
     /// Parse a Tantivy QueryParser-style query string. Default search fields are
     /// `content` and `source` (bare terms match either); `tags` requires the
@@ -60,17 +71,17 @@ impl Query {
     /// the parser falls back to Tantivy's lenient mode, which keeps every
     /// clause it could read and drops the malformed ones — not only stray
     /// operators, but anything the strict parser couldn't make sense of.
-    /// The fallback only applies to genuine syntax errors; a strict error
-    /// that only exists because the query is otherwise well-formed (for
-    /// example, a `field:` prefix that names a field the schema doesn't
-    /// have) is returned as-is rather than silently reinterpreted.
+    /// The fallback applies to genuine syntax errors and to `field:` prefixes
+    /// whose "field name" cannot be an identifier — `10:30`, `2:1` — which
+    /// only occur in prose. A `field:` prefix that does look like an
+    /// identifier but names a field the schema doesn't have (`titel:foo`)
+    /// is returned as an error rather than silently reinterpreted.
     ///
     /// # Errors
-    /// Returns `Error::QueryParse` when the strict parse fails for a reason
-    /// other than a syntax error (an unknown field, an unindexed field,
-    /// etc.), or when the strict parse is a syntax error but not a single
-    /// searchable term survives lenient parsing — for example an input made
-    /// of operators alone.
+    /// Returns `Error::QueryParse` when the strict parse fails because of an
+    /// unknown or unindexed identifier-like field, or when the input is a
+    /// syntax error but not a single searchable term survives lenient
+    /// parsing — for example an input made of operators alone.
     pub fn parse(query_str: &str) -> Result<Self> {
         let (schema, fields) = build_schema();
         // Construct a throwaway in-RAM index tied to the schema. The actual Index
@@ -80,7 +91,11 @@ impl Query {
         let strict = parser.parse_query(query_str);
         let inner = match strict {
             Ok(q) => q,
-            Err(strict_err @ QueryParserError::SyntaxError(_)) => {
+            Err(strict_err)
+                if matches!(strict_err, QueryParserError::SyntaxError(_))
+                    || matches!(&strict_err, QueryParserError::FieldDoesNotExist(name)
+                        if !looks_like_identifier(name)) =>
+            {
                 let (lenient, dropped) = parser.parse_query_lenient(query_str);
                 let mut terms = 0usize;
                 lenient.query_terms(&mut |_, _| terms += 1);
