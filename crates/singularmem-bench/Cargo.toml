@@ -1,0 +1,35 @@
+[package]
+name = "singularmem-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Retrieval-quality benchmark harness for Singularmem (LongMemEval)."
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "singularmem-bench"
+path = "src/main.rs"
+
+[dependencies]
+singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-search = { path = "../singularmem-search", version = "0.16.0", features = ["testing"] }
+singularmem-retrieve = { path = "../singularmem-retrieve", version = "0.16.0" }
+singularmem-ingest = { path = "../singularmem-ingest", version = "0.16.0" }
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jiff = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
