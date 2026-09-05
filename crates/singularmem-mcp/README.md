@@ -369,8 +369,8 @@ facts, closed facts, and distinct predicates.
 
 ```
 entities: 2
-open_facts: 1
-closed_facts: 1
+open facts: 1
+closed facts: 1
 predicates: 1
 ```
 

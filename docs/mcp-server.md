@@ -59,7 +59,7 @@ of the existing `singularmem` CLI). Three reasons:
 3. **Optional install.** Users who want only the CLI can
    `cargo install singularmem` and skip the MCP server entirely.
 
-## Available tools (14)
+## Available tools
 
 - **`memory_retrieve`** — semantic + lexical hybrid retrieval against
   the local store, returning adapter-formatted prompt-ready blocks.

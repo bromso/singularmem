@@ -1,7 +1,5 @@
 //! Shared helpers used by tool handlers.
 
-use std::path::Path;
-
 use singularmem_core::{ScopeFilter, Store, StoreOptions};
 
 use crate::{Config, Result};
@@ -34,8 +32,8 @@ pub fn open_store_for_reading(config: &Config) -> Result<Store> {
 ///
 /// Returns whatever error `Store::open` raises (e.g., I/O, malformed
 /// `SQLite` file).
-pub fn open_store_for_writing(store_path: &Path) -> Result<Store> {
-    Ok(Store::open(store_path)?)
+pub fn open_store_for_writing(config: &Config) -> Result<Store> {
+    Ok(Store::open(&config.store_path)?)
 }
 
 /// Build a [`ScopeFilter`] from a tool's `scope` / `scope_exact` arguments.

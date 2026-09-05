@@ -196,7 +196,8 @@ fn render_fact(f: &Fact) -> String {
     )
 }
 
-/// Render a list of facts, one per line, or `"No facts."` when empty.
+/// Render a list of facts, one per line, or `"No facts."` when empty. No
+/// trailing newline, matching the other handlers' text output.
 fn render_facts(facts: &[Fact]) -> String {
     if facts.is_empty() {
         return "No facts.".to_string();
@@ -205,11 +206,12 @@ fn render_facts(facts: &[Fact]) -> String {
     for fact in facts {
         writeln!(text, "{}", render_fact(fact)).expect("write to String is infallible");
     }
+    text.pop(); // drop the trailing '\n' left by the last writeln!
     text
 }
 
 /// Render a timeline, one entry per line prefixed `[current]`/`[closed]`,
-/// or `"No facts."` when empty.
+/// or `"No facts."` when empty. No trailing newline.
 fn render_timeline(entries: &[TimelineEntry]) -> String {
     if entries.is_empty() {
         return "No facts.".to_string();
@@ -220,13 +222,16 @@ fn render_timeline(entries: &[TimelineEntry]) -> String {
         writeln!(text, "[{tag}] {}", render_fact(&entry.fact))
             .expect("write to String is infallible");
     }
+    text.pop(); // drop the trailing '\n' left by the last writeln!
     text
 }
 
-/// Render graph stats as a four-line block.
+/// Render graph stats as a four-line block, mirroring the CLI's `graph
+/// stats` human format exactly (`src/commands/graph.rs`'s `cmd_stats`). No
+/// trailing newline.
 fn render_stats(s: &GraphStats) -> String {
     format!(
-        "entities: {}\nopen_facts: {}\nclosed_facts: {}\npredicates: {}\n",
+        "entities: {}\nopen facts: {}\nclosed facts: {}\npredicates: {}",
         s.entities, s.open_facts, s.closed_facts, s.predicates
     )
 }
@@ -240,9 +245,23 @@ fn build_object(raw: String, is_value: Option<bool>, kind: Option<String>) -> Ne
     }
 }
 
-/// Parse an optional timestamp argument with [`parse_point`].
-fn parse_optional_point(raw: Option<&str>) -> Result<Option<Timestamp>> {
-    Ok(raw.map(parse_point).transpose()?)
+/// Parse an optional timestamp argument with [`parse_point`], renaming a
+/// validation failure's `field` from `parse_point`'s generic `"timestamp"`
+/// to `arg_name` (e.g. `"valid_from"`, `"at"`, `"as_of"`) so the error names
+/// the actual tool argument that was rejected.
+fn parse_optional_point(raw: Option<&str>, arg_name: &'static str) -> Result<Option<Timestamp>> {
+    raw.map(parse_point)
+        .transpose()
+        .map_err(|e| match e {
+            singularmem_core::Error::Validation { reason, .. } => {
+                singularmem_core::Error::Validation {
+                    field: arg_name,
+                    reason,
+                }
+            }
+            other => other,
+        })
+        .map_err(Error::Core)
 }
 
 /// Parse the `direction` argument, defaulting to [`Direction::Both`].
@@ -448,8 +467,8 @@ pub fn handle_memory_graph_add(
         return Err(Error::ReadOnly);
     }
     let object = build_object(args.object, args.object_is_value, args.object_kind);
-    let valid_from = parse_optional_point(args.valid_from.as_deref())?;
-    let valid_to = parse_optional_point(args.valid_to.as_deref())?;
+    let valid_from = parse_optional_point(args.valid_from.as_deref(), "valid_from")?;
+    let valid_to = parse_optional_point(args.valid_to.as_deref(), "valid_to")?;
     let source_item_id = args
         .source_item_id
         .as_deref()
@@ -469,7 +488,7 @@ pub fn handle_memory_graph_add(
         scope: args.scope,
     };
 
-    let store = open_store_for_writing(&config.store_path)?;
+    let store = open_store_for_writing(config)?;
     let fact = store.add_fact(new_fact)?;
     Ok(MemoryGraphOutput {
         text: render_fact(&fact),
@@ -487,9 +506,20 @@ pub fn handle_memory_graph_query(
     args: &MemoryGraphQueryArgs,
     config: &Config,
 ) -> Result<MemoryGraphOutput> {
+    // Validate the entity/predicate XOR before touching the store at all.
+    if matches!(
+        (args.entity.as_deref(), args.predicate.as_deref()),
+        (None, None) | (Some(_), Some(_))
+    ) {
+        return Err(Error::Core(singularmem_core::Error::Validation {
+            field: "query",
+            reason: "exactly one of entity or predicate is required".to_string(),
+        }));
+    }
+
     let scope = scope_filter(args.scope.as_deref(), args.scope_exact)?;
-    let as_of = parse_optional_point(args.as_of.as_deref())?;
-    let recorded_at = parse_optional_point(args.recorded_at.as_deref())?;
+    let as_of = parse_optional_point(args.as_of.as_deref(), "as_of")?;
+    let recorded_at = parse_optional_point(args.recorded_at.as_deref(), "recorded_at")?;
     let direction = parse_direction(args.direction.as_deref())?;
     let q = GraphQuery {
         scope,
@@ -503,10 +533,7 @@ pub fn handle_memory_graph_query(
         (Some(entity), None) => store.query_entity(entity, &q)?,
         (None, Some(predicate)) => store.query_predicate(predicate, &q)?,
         (None, None) | (Some(_), Some(_)) => {
-            return Err(Error::Core(singularmem_core::Error::Validation {
-                field: "query",
-                reason: "exactly one of entity or predicate is required".to_string(),
-            }));
+            unreachable!("validated above: exactly one of entity/predicate is present")
         }
     };
 
@@ -530,9 +557,9 @@ pub fn handle_memory_graph_invalidate(
         return Err(Error::ReadOnly);
     }
     let object = build_object(args.object, args.object_is_value, None);
-    let at = parse_optional_point(args.at.as_deref())?;
+    let at = parse_optional_point(args.at.as_deref(), "at")?;
 
-    let store = open_store_for_writing(&config.store_path)?;
+    let store = open_store_for_writing(config)?;
     let closed = store.invalidate_fact(
         &args.subject,
         &args.predicate,
@@ -561,9 +588,9 @@ pub fn handle_memory_graph_supersede(
     }
     let old = build_object(args.old_object, args.object_is_value, None);
     let new = build_object(args.new_object, args.object_is_value, None);
-    let at = parse_optional_point(args.at.as_deref())?;
+    let at = parse_optional_point(args.at.as_deref(), "at")?;
 
-    let store = open_store_for_writing(&config.store_path)?;
+    let store = open_store_for_writing(config)?;
     let (closed, opened) = store.supersede_fact(
         &args.subject,
         &args.predicate,
@@ -577,7 +604,7 @@ pub fn handle_memory_graph_supersede(
         .as_ref()
         .map_or_else(|| "none".to_string(), render_fact);
     Ok(MemoryGraphOutput {
-        text: format!("closed: {closed_text}\nopened: {}\n", render_fact(&opened)),
+        text: format!("closed: {closed_text}\nopened: {}", render_fact(&opened)),
     })
 }
 
@@ -994,10 +1021,84 @@ mod tests {
             "expected four lines: {}",
             out.text
         );
-        assert!(out.text.contains("entities: "), "{}", out.text);
-        assert!(out.text.contains("open_facts: "), "{}", out.text);
-        assert!(out.text.contains("closed_facts: "), "{}", out.text);
-        assert!(out.text.contains("predicates: "), "{}", out.text);
-        assert!(out.text.contains("open_facts: 1"), "{}", out.text);
+        // Mirror the CLI's human format exactly (src/commands/graph.rs
+        // cmd_stats): "entities: N" / "open facts: N" / "closed facts: N" /
+        // "predicates: N".
+        assert_eq!(
+            out.text, "entities: 2\nopen facts: 1\nclosed facts: 0\npredicates: 1",
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn add_bad_valid_to_names_the_argument() {
+        let (_dir, config) = fresh_config(false);
+        let r = handle_memory_graph_add(
+            MemoryGraphAddArgs {
+                valid_to: Some("not-a-timestamp".to_string()),
+                ..add_args("singularmem", "uses", "tantivy")
+            },
+            &config,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(Error::Core(singularmem_core::Error::Validation {
+                    field: "valid_to",
+                    ..
+                }))
+            ),
+            "expected Validation{{field: 'valid_to'}}, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn query_bad_as_of_names_the_argument() {
+        let (_dir, config) = seeded();
+        let r = handle_memory_graph_query(
+            &MemoryGraphQueryArgs {
+                as_of: Some("not-a-timestamp".to_string()),
+                ..query_args(Some("singularmem"), None)
+            },
+            &config,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(Error::Core(singularmem_core::Error::Validation {
+                    field: "as_of",
+                    ..
+                }))
+            ),
+            "expected Validation{{field: 'as_of'}}, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn supersede_bad_at_names_the_argument() {
+        let (_dir, config) = seeded();
+        let r = handle_memory_graph_supersede(
+            MemoryGraphSupersedeArgs {
+                subject: "singularmem".to_string(),
+                predicate: "uses".to_string(),
+                old_object: "tantivy".to_string(),
+                new_object: "meilisearch".to_string(),
+                object_is_value: None,
+                at: Some("not-a-timestamp".to_string()),
+                scope: None,
+            },
+            &config,
+        );
+        assert!(
+            matches!(
+                r,
+                Err(Error::Core(singularmem_core::Error::Validation {
+                    field: "at",
+                    ..
+                }))
+            ),
+            "expected Validation{{field: 'at'}}, got {r:?}"
+        );
     }
 }
