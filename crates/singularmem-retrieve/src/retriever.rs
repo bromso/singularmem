@@ -196,8 +196,8 @@ mod tests {
         let searcher = HybridSearcher::new(&lex, &sem);
         let retriever = Retriever::new(&store, &searcher);
         // The struct fields are public; we can observe the borrowed references.
-        assert!(std::ptr::eq(retriever.store, &store));
-        assert!(std::ptr::eq(retriever.searcher, &searcher));
+        assert!(std::ptr::eq(retriever.store, &raw const store));
+        assert!(std::ptr::eq(retriever.searcher, &raw const searcher));
     }
 
     use singularmem_core::NewItem;
