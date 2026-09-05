@@ -90,7 +90,9 @@ pub(crate) enum CliError {
     Usage(String),
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
-    #[error("invalid JSON for --metadata: {0}")]
+    /// A JSON argument did not parse. Generic on purpose: several commands
+    /// take JSON, and `serde_json::Error` already carries line and column.
+    #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("invalid item ID: {0}")]
     InvalidId(#[from] ulid::DecodeError),

@@ -21,6 +21,7 @@ Options:
       --scope <PATH>           Restrict to this scope and its descendants (e.g.
                                `claude-code/myproj`)
       --scope-exact            With --scope: match only that exact scope, not descendants
-      --with-sources           Also print each fact's source item's first line
+      --with-sources           Also print each fact's source item's first line (ignored with
+                               `--json`)
       --json                   Print facts as a JSON array instead of one line each
   -h, --help                   Print help

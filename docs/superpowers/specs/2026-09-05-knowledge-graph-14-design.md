@@ -314,7 +314,31 @@ is deferred to 16.
    as-of rule as `(valid_from IS NULL OR valid_from <= T)`. This is
    spec-consistent; the implementation plan's test expected an empty result
    and was corrected, not the code.
-3. **`AmbiguousFactRevision { candidates }`**, an error variant beyond the
+3. **Export line shapes.** Entity lines carry `normalised_name` alongside
+   `name`, so a loader can reproduce the store's identity rule without
+   reimplementing normalisation. Fact objects are tagged: an entity object
+   is `{"entity": {"id", "name"}}` and a literal is `{"value": "…"}`,
+   exactly one key present — rather than the flat `object`/`object_value`
+   pair the SQL schema uses. Both are specified in
+   `docs/formats/store-v4.md` § "Export format (`export-v2`)".
+4. **Graph timestamps are stored at fixed nine-digit precision**
+   (`YYYY-MM-DDTHH:MM:SS.fffffffffZ`, UTC, 30 characters) in
+   `entities.created_at` and `facts.valid_from`/`valid_to`/`recorded_at`.
+   `jiff::Timestamp`'s `Display` trims trailing zeros, which made SQLite's
+   text comparison non-chronological within a second (`'.'` < `'Z'`, so
+   `'…00.788Z' <= '…00Z'`) and inverted `--recorded-at`/`--as-of` answers.
+   `graph::time::to_sql` pads every stored and every bound value; reads
+   still parse liberally. `items.created_at` keeps its v2 variable-width
+   form and must be parsed, not string-compared.
+5. **`add` refuses a divergent request** rather than silently returning the
+   standing head. The spec called `add` idempotent for a matching triple;
+   the implementation restricts that to a request whose `valid_from`,
+   `valid_to`, and `confidence` also match. A triple that matches but
+   carries a different window or confidence is
+   `Validation { field: "fact" }` naming `supersede`/`invalidate`, because
+   returning the head would discard what the caller asked for and a second
+   open head would fork the chain.
+6. **`AmbiguousFactRevision { candidates }`**, an error variant beyond the
    set this spec's § "Error handling" first listed. `fact_history`'s
    forward walk returns it when more than one revision supersedes the same
    one — a forked chain the library refuses to resolve by guessing

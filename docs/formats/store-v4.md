@@ -188,7 +188,10 @@ illustrative only). An **exact-match** filter instead compares
 when the entity is first created.
 
 **`entities.name`** — UTF-8 text, non-empty (`CHECK (length(name) > 0)`).
-The display form: the name exactly as first written.
+The display form: the name as first written, with leading and trailing
+whitespace trimmed. Nothing else about it is changed — case, internal
+spacing, and punctuation are preserved, and a later write spelling the
+name differently does not update it (see `normalised_name`).
 
 **`entities.normalised_name`** — The entity's identity. Two writes that
 normalise to the same string resolve to one row; `idx_entities_identity`
@@ -266,8 +269,17 @@ entities are store-global (no `entities.scope` column), so scope narrows
 which *facts* a query sees, never which entity a name resolves to.
 
 **`facts.supersedes`** — Nullable foreign key into `facts.id`
-(`DEFERRABLE INITIALLY DEFERRED`). Non-null on every revision except the
-first in a chain; see "Revisions and the two time axes" below.
+(`DEFERRABLE INITIALLY DEFERRED`), pointing at the revision this one
+*closes*. It is set **only** on a closing revision — the row an
+`invalidate` (or the first half of a `supersede`) appends to end a fact's
+validity. A fact opened by `add`, and the replacement fact a `supersede`
+opens, are both roots of their own chains and have `supersedes = NULL`.
+So a `supersede` appends **two** rows in **two** chains: a closing
+revision of the old fact, and a brand-new root for the new one — the two
+are linked by nothing but their shared subject/predicate and the instant
+where one window ends and the other begins. `timeline` is how that
+transition is seen; `supersedes` alone will not show it. See "Revisions
+and the two time axes" below.
 
 **`facts.recorded_at`** — RFC 3339 timestamp: when this specific revision
 was appended (append time — the second of the two time axes, distinct
@@ -407,7 +419,9 @@ against the now-`3` store.
 
 A store opened writable at `format_version = 3` is migrated in place to
 `4` by executing exactly the "Graph tables" DDL above (`CREATE TABLE
-entities`, its unique index, `CREATE TABLE facts`, and its four indexes)
+entities`, its unique index, `CREATE TABLE facts`, and its five indexes
+— `idx_facts_subject`, `idx_facts_object`, `idx_facts_predicate`,
+`idx_facts_supersedes`, `idx_facts_scope`)
 followed by:
 
 ```sql
@@ -455,8 +469,9 @@ implementation:
    The successor row carries `supersedes = <old>` and the `external_id`
    the old row just gave up.
 
-2. **`set_scope`** — available from v0.18.0 (this format version).
-   `Store::set_scope` reassigns an item's scope after ingest:
+2. **`set_scope`** — available from v0.18.0, alongside the `items.scope`
+   column that format version 3 introduced; it is not new in this format
+   version. `Store::set_scope` reassigns an item's scope after ingest:
 
    ```sql
    UPDATE items SET scope = ? WHERE id = ?;
@@ -489,13 +504,13 @@ The `singularmem export` CLI verb (and `Store::export` library method)
 emit JSONL on stdout. Format:
 
 ```jsonl
-{"_singularmem_format":"export-v2","_kind":"meta","store_format_version":"4","exported_at":"2026-09-05T12:34:56.000000000Z"}
+{"_singularmem_format":"export-v2","_kind":"meta","store_format_version":"4","exported_at":"2026-09-05T12:34:56.271043Z"}
 {"_kind":"item","id":"01J...","content":"...","created_at":"2026-05-16T...","tags":["work","decision"],"metadata":{"project":"alpha"}}
 {"_kind":"item","id":"01J...","content":"...","created_at":"...","supersedes":"01J...","source":"claude-conversation:abc","external_id":"file:/a.rs","scope":"claude-code/singularmem"}
-{"_kind":"entity","id":"01J...","name":"singularmem","normalised_name":"singularmem","created_at":"2026-09-05T12:00:00.000000000Z"}
-{"_kind":"entity","id":"01J...","name":"tantivy","normalised_name":"tantivy","kind":"crate","created_at":"2026-09-05T12:00:00.000000000Z"}
-{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"uses","object":{"entity":{"id":"01J...","name":"tantivy"}},"confidence":1.0,"scope":"claude-code/singularmem","recorded_at":"2026-09-05T12:00:00.000000000Z"}
-{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"confidence_note","object":{"value":"battle-tested"},"confidence":0.9,"source_item_id":"01J...","recorded_at":"2026-09-05T12:01:00.000000000Z"}
+{"_kind":"entity","id":"01J...","name":"singularmem","normalised_name":"singularmem","created_at":"2026-09-05T12:00:00.118204Z"}
+{"_kind":"entity","id":"01J...","name":"tantivy","normalised_name":"tantivy","kind":"crate","created_at":"2026-09-05T12:00:00.118204Z"}
+{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"uses","object":{"entity":{"id":"01J...","name":"tantivy"}},"confidence":1.0,"scope":"claude-code/singularmem","recorded_at":"2026-09-05T12:00:00.118204Z"}
+{"_kind":"fact","id":"01J...","subject":{"id":"01J...","name":"singularmem"},"predicate":"confidence_note","object":{"value":"battle-tested"},"confidence":0.9,"source_item_id":"01J...","recorded_at":"2026-09-05T12:01:00.673915Z"}
 ```
 
 Rules:
@@ -513,13 +528,27 @@ Rules:
   still reads every item out of an `export-v2` file correctly, simply
   skipping the `entity` and `fact` lines it does not understand.
 - UTF-8 throughout. Unix line endings (`\n`). No trailing comma.
+- Timestamps in the JSON are RFC 3339 UTC with **trailing zeros trimmed**
+  — the export renders the instant, it does not copy the column text, so
+  a `recorded_at` stored as `2026-09-05T12:00:00.118204000Z` is emitted as
+  `2026-09-05T12:00:00.118204Z` and a whole-second one as
+  `2026-09-05T12:00:00Z`. A loader MUST parse these rather than compare
+  them as strings, and MUST accept any precision from none to nanoseconds.
+  (The fixed-width rule in "Column semantics" governs the SQLite columns,
+  not this file.)
 - Items are emitted in `created_at` ascending order; entities in
   `created_at` ascending order, then `id`; fact revisions in
   `recorded_at` ascending order, then `id`. Given a deterministic store,
   the export is byte-identical across runs (modulo `exported_at`).
-- Item shape is unchanged from `export-v1`; see its field-omission rules
-  above (`supersedes`, `source`, `tags`, `metadata`, `external_id`,
-  `scope` are omitted when they carry no information).
+- Item shape is unchanged from `export-v1`. Only `_kind`, `id`, `content`
+  and `created_at` are always present; `supersedes`, `source`, `tags`,
+  `metadata`, `external_id`, and `scope` are **omitted** when they carry
+  no information — `supersedes`, `source`, `external_id` and `scope` when
+  null, `tags` when the item has no tags, `metadata` when it is the empty
+  object. A reader MUST treat an absent field as that empty value
+  (`null`, `[]`, `{}`) rather than as an error: the first item line above
+  has no `supersedes` and no `source`, the second has no `tags` and no
+  `metadata`.
 - **Entity line** fields: `_kind` (`"entity"`), `id`, `name`,
   `normalised_name`, `created_at` are always present; `kind` is
   **omitted** when the entity has none (the first entity line above has
@@ -531,8 +560,12 @@ Rules:
   — exactly one of the two keys is present. `valid_from`, `valid_to`,
   `source_item_id`, `scope`, and `supersedes` are **omitted** when null;
   a reader MUST treat an absent field as `null` rather than as an error.
-  A revision with `supersedes` present is a closing or replacing
-  revision, not the first in its chain.
+  A revision with `supersedes` present is a *closing* revision, not the
+  first in its chain. Note that the replacement fact a `supersede`
+  produces is **not** one of these: it is the root of a new chain and has
+  no `supersedes`, so a loader reconstructing "what replaced what" must
+  read the validity windows (and `timeline`'s ordering), not follow
+  `supersedes` across the boundary.
 - Object key order in `metadata` follows insertion order from v0.18.0
   (previously alphabetical); loaders must not depend on key order.
 - A store with no facts (e.g. one migrated from v1–v3 that has never

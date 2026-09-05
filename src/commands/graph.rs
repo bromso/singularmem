@@ -71,7 +71,7 @@ pub enum GraphAction {
         recorded_at: Option<String>,
         #[command(flatten)]
         scope: ScopeArgs,
-        /// Also print each fact's source item's first line.
+        /// Also print each fact's source item's first line (ignored with `--json`).
         #[arg(long)]
         with_sources: bool,
         /// Print facts as a JSON array instead of one line each.
