@@ -1,7 +1,8 @@
 //! Query construction: text parsing (Tantivy `QueryParser`) and programmatic builder.
 
 use tantivy::query::{
-    BooleanQuery, ConstScoreQuery, Occur, Query as TantivyQuery, QueryParser, TermQuery,
+    BooleanQuery, ConstScoreQuery, Occur, Query as TantivyQuery, QueryParser, QueryParserError,
+    TermQuery,
 };
 use tantivy::schema::IndexRecordOption;
 use tantivy::Term;
@@ -57,11 +58,19 @@ impl Query {
     /// Natural-language input is accepted: when the string is not valid
     /// query syntax (a stray `:`, `-`, `(` or quote — common in questions),
     /// the parser falls back to Tantivy's lenient mode, which keeps every
-    /// term it could read and drops the malformed operators.
+    /// clause it could read and drops the malformed ones — not only stray
+    /// operators, but anything the strict parser couldn't make sense of.
+    /// The fallback only applies to genuine syntax errors; a strict error
+    /// that only exists because the query is otherwise well-formed (for
+    /// example, a `field:` prefix that names a field the schema doesn't
+    /// have) is returned as-is rather than silently reinterpreted.
     ///
     /// # Errors
-    /// Returns `Error::QueryParse` only when not a single searchable term
-    /// survives — for example an input made of operators alone.
+    /// Returns `Error::QueryParse` when the strict parse fails for a reason
+    /// other than a syntax error (an unknown field, an unindexed field,
+    /// etc.), or when the strict parse is a syntax error but not a single
+    /// searchable term survives lenient parsing — for example an input made
+    /// of operators alone.
     pub fn parse(query_str: &str) -> Result<Self> {
         let (schema, fields) = build_schema();
         // Construct a throwaway in-RAM index tied to the schema. The actual Index
@@ -71,15 +80,23 @@ impl Query {
         let strict = parser.parse_query(query_str);
         let inner = match strict {
             Ok(q) => q,
-            Err(strict_err) => {
-                let (lenient, _dropped) = parser.parse_query_lenient(query_str);
+            Err(strict_err @ QueryParserError::SyntaxError(_)) => {
+                let (lenient, dropped) = parser.parse_query_lenient(query_str);
                 let mut terms = 0usize;
                 lenient.query_terms(&mut |_, _| terms += 1);
                 if terms == 0 {
                     return Err(Error::QueryParse(format!("{strict_err}")));
                 }
+                if !dropped.is_empty() {
+                    tracing::warn!(
+                        query = query_str,
+                        ?dropped,
+                        "lenient query parsing dropped malformed clauses"
+                    );
+                }
                 lenient
             }
+            Err(strict_err) => return Err(Error::QueryParse(format!("{strict_err}"))),
         };
         Ok(Self { inner })
     }

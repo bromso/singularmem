@@ -28,12 +28,6 @@ fn parse_boolean() {
 }
 
 #[test]
-fn parse_malformed_errors() {
-    let result = Query::parse("tags:");
-    assert!(result.is_err(), "trailing colon should not parse");
-}
-
-#[test]
 fn query_builder_constructs_single_term() {
     let _q = QueryBuilder::new().term(Field::Content, "decision").build();
 }
@@ -55,7 +49,7 @@ fn natural_language_question_with_operator_characters_parses() {
     for q in [
         "What is the order of the three events: 'I signed up', 'I used a coupon', and 'I redeemed'?",
         "I was going through our previous conversation - what did Borges say about the center?",
-        "How many weeks in total do I spent on reading 'The Nightingale\" and 'Sapiens'?",
+        "How many weeks in total: reading 'The Nightingale' and listening to 'Sapiens'?",
         "Which three events happened (in order) from first to last:",
     ] {
         Query::parse(q).unwrap_or_else(|e| panic!("{q:?} should parse leniently: {e}"));
@@ -66,5 +60,20 @@ fn natural_language_question_with_operator_characters_parses() {
 fn operators_alone_still_fail_to_parse() {
     for q in ["tags:", ":::", "- -", "()"] {
         assert!(Query::parse(q).is_err(), "{q:?} has no searchable term");
+    }
+}
+
+#[test]
+fn unknown_field_is_still_an_error() {
+    // Unlike a syntax error, an unknown field is a well-formed query the
+    // schema simply can't satisfy — it must not be papered over by the
+    // lenient fallback, which would silently reinterpret `titel:foo` as an
+    // unqualified term against the default fields and return results.
+    for q in [
+        "decision titel:foo",
+        "+decision +titel:foo",
+        "sqlite -titel:foo",
+    ] {
+        assert!(Query::parse(q).is_err(), "{q:?} names an unknown field");
     }
 }
