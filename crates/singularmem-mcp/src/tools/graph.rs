@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use singularmem_core::graph::time::parse_point;
 use singularmem_core::graph::{
-    Direction, Fact, FactObject, GraphQuery, GraphStats, NewFact, NewObject, TimelineEntry,
+    Direction, EntitySummary, Fact, FactObject, GraphQuery, GraphStats, NewFact, NewObject,
+    TimelineEntry,
 };
-use singularmem_core::ItemId;
+use singularmem_core::{FactId, ItemId};
 
 use crate::tools::util::{open_store_for_reading, open_store_for_writing, scope_filter};
 use crate::{Config, Error, Result};
@@ -172,6 +173,29 @@ pub struct MemoryGraphStatsArgs {
     pub scope: Option<String>,
 }
 
+/// JSON-deserialised arguments for the `memory_graph_entities` tool.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MemoryGraphEntitiesArgs {
+    /// Restrict to entities of this kind.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Restrict to entities with at least one fact in this scope path and
+    /// its descendants (or, with `scope_exact`, only this exact scope).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// When `true`, match only the exact scope given in `scope`. Default
+    /// `false`.
+    #[serde(default)]
+    pub scope_exact: Option<bool>,
+}
+
+/// JSON-deserialised arguments for the `memory_graph_history` tool.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryGraphHistoryArgs {
+    /// ULID of the fact whose revision chain to show.
+    pub fact_id: String,
+}
+
 /// Render one fact the way the CLI's `graph` verbs do (duplicated
 /// minimally here; see Task 6 brief for why a shared home in
 /// `singularmem_core` is a follow-up rather than done now).
@@ -234,6 +258,33 @@ fn render_stats(s: &GraphStats) -> String {
         "entities: {}\nopen facts: {}\nclosed facts: {}\npredicates: {}",
         s.entities, s.open_facts, s.closed_facts, s.predicates
     )
+}
+
+/// Render one entity summary the way the CLI's `graph entities` command
+/// does (`src/commands/graph.rs`'s `cmd_entities`): tab-separated id, name,
+/// kind (`-` when absent), fact count.
+fn render_entity(e: &EntitySummary) -> String {
+    format!(
+        "{}\t{}\t{}\t{}",
+        e.entity.id,
+        e.entity.name,
+        e.entity.kind.as_deref().unwrap_or("-"),
+        e.fact_count
+    )
+}
+
+/// Render a list of entity summaries, one per line, or `"No entities."`
+/// when empty. No trailing newline.
+fn render_entities(entities: &[EntitySummary]) -> String {
+    if entities.is_empty() {
+        return "No entities.".to_string();
+    }
+    let mut text = String::new();
+    for e in entities {
+        writeln!(text, "{}", render_entity(e)).expect("write to String is infallible");
+    }
+    text.pop(); // drop the trailing '\n' left by the last writeln!
+    text
 }
 
 /// Build a [`NewObject`]/query object from a raw string per `object_is_value`.
@@ -452,6 +503,55 @@ pub fn tool_descriptor_stats() -> Tool {
     .annotate(ToolAnnotations::new().read_only(true))
 }
 
+/// Build the rmcp tool descriptor for `memory_graph_entities`.
+///
+/// # Panics
+/// Panics if the hard-coded JSON schema literal is not an object (never happens).
+#[must_use]
+pub fn tool_descriptor_entities() -> Tool {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "description": "Restrict to entities of this kind." },
+            "scope": { "type": "string", "description": "Restrict to entities with at least one fact in this scope path and its descendants, e.g. \"claude-code/myproj\"." },
+            "scope_exact": { "type": "boolean", "default": false, "description": "Match only the exact scope given in scope." }
+        },
+        "required": []
+    });
+    Tool::new(
+        "memory_graph_entities",
+        "List entities in the knowledge graph with their fact counts. Filter by kind or by \
+         the scope of their facts. Use before memory_graph_query when you are unsure of an \
+         entity's exact name. Returns one line per entity, tab-separated id, name, kind (\"-\" \
+         when absent), and fact count, or \"No entities.\".",
+        schema.as_object().expect("schema is object").clone(),
+    )
+    .annotate(ToolAnnotations::new().read_only(true))
+}
+
+/// Build the rmcp tool descriptor for `memory_graph_history`.
+///
+/// # Panics
+/// Panics if the hard-coded JSON schema literal is not an object (never happens).
+#[must_use]
+pub fn tool_descriptor_history() -> Tool {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "fact_id": { "type": "string", "description": "ULID of the fact whose revision chain to show." }
+        },
+        "required": ["fact_id"]
+    });
+    Tool::new(
+        "memory_graph_history",
+        "Show every revision of one fact, oldest first: how its validity window was closed or \
+         replaced over time. Take fact_id from memory_graph_query or memory_graph_timeline \
+         output. Returns one rendered fact per line.",
+        schema.as_object().expect("schema is object").clone(),
+    )
+    .annotate(ToolAnnotations::new().read_only(true))
+}
+
 /// Handle a `tools/call` for `memory_graph_add`.
 ///
 /// # Errors
@@ -639,6 +739,47 @@ pub fn handle_memory_graph_stats(
     let stats = store.graph_stats(scope.as_ref())?;
     Ok(MemoryGraphOutput {
         text: render_stats(&stats),
+    })
+}
+
+/// Handle a `tools/call` for `memory_graph_entities`.
+///
+/// # Errors
+/// [`Error::Core`] wrapping [`singularmem_core::Error::Validation`] for a
+/// bad `scope`.
+pub fn handle_memory_graph_entities(
+    args: &MemoryGraphEntitiesArgs,
+    config: &Config,
+) -> Result<MemoryGraphOutput> {
+    let scope = scope_filter(args.scope.as_deref(), args.scope_exact)?;
+    let store = open_store_for_reading(config)?;
+    let rows = store.entities(scope.as_ref(), args.kind.as_deref())?;
+    Ok(MemoryGraphOutput {
+        text: render_entities(&rows),
+    })
+}
+
+/// Handle a `tools/call` for `memory_graph_history`.
+///
+/// # Errors
+/// - [`Error::Core`] wrapping [`singularmem_core::Error::InvalidId`] if
+///   `args.fact_id` doesn't parse as a `ULID`.
+/// - [`Error::Core`] wrapping [`singularmem_core::Error::FactIdNotFound`] if
+///   `args.fact_id` is well-formed but unknown to the store.
+/// - [`Error::Core`] wrapping
+///   [`singularmem_core::Error::AmbiguousFactRevision`] if the chain forks.
+pub fn handle_memory_graph_history(
+    args: &MemoryGraphHistoryArgs,
+    config: &Config,
+) -> Result<MemoryGraphOutput> {
+    let id: FactId = args
+        .fact_id
+        .parse()
+        .map_err(singularmem_core::Error::InvalidId)?;
+    let store = open_store_for_reading(config)?;
+    let facts = store.fact_history(id)?;
+    Ok(MemoryGraphOutput {
+        text: render_facts(&facts),
     })
 }
 
@@ -1099,6 +1240,147 @@ mod tests {
                 }))
             ),
             "expected Validation{{field: 'at'}}, got {r:?}"
+        );
+    }
+
+    /// Seed two facts on `singularmem` and one on `other`, for
+    /// `memory_graph_entities` tests.
+    #[allow(clippy::missing_panics_doc)]
+    fn seeded_graph() -> (TempDir, Config) {
+        let dir = TempDir::new().unwrap();
+        let store_path = dir.path().join("store.db");
+        let store = Store::open(&store_path).unwrap();
+        store
+            .add_fact(NewFact::triple("singularmem", "uses", "tantivy"))
+            .unwrap();
+        store
+            .add_fact(NewFact::triple("singularmem", "uses", "sqlite"))
+            .unwrap();
+        store
+            .add_fact(NewFact::triple("other", "uses", "something"))
+            .unwrap();
+        drop(store);
+        let config = Config::new(store_path, "plain".to_string(), false);
+        (dir, config)
+    }
+
+    /// [`seeded_graph`] plus a supersede of `singularmem —uses→ tantivy`
+    /// by `meilisearch`, returning the id of the closed revision `fact_history`
+    /// reports.
+    #[allow(clippy::missing_panics_doc)]
+    fn seeded_graph_with_supersede() -> (TempDir, Config, String) {
+        let (dir, config) = seeded_graph();
+        let out = handle_memory_graph_supersede(
+            MemoryGraphSupersedeArgs {
+                subject: "singularmem".to_string(),
+                predicate: "uses".to_string(),
+                old_object: "tantivy".to_string(),
+                new_object: "meilisearch".to_string(),
+                object_is_value: None,
+                at: None,
+                scope: None,
+            },
+            &config,
+        )
+        .expect("supersede ok");
+        let closed_line = out
+            .text
+            .lines()
+            .next()
+            .expect("closed line")
+            .trim_start_matches("closed: ");
+        let closed_id = closed_line
+            .split_whitespace()
+            .next()
+            .expect("closed fact id")
+            .to_string();
+        (dir, config, closed_id)
+    }
+
+    #[test]
+    fn entities_lists_id_name_kind_count_tab_separated() {
+        let (_d, config) = seeded_graph();
+        let out =
+            handle_memory_graph_entities(&MemoryGraphEntitiesArgs::default(), &config).unwrap();
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert!(
+            lines.iter().any(|l| {
+                let cols: Vec<&str> = l.split('\t').collect();
+                cols.len() == 4 && cols[1] == "singularmem" && cols[2] == "-"
+            }),
+            "{}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn entities_filters_by_kind_and_reports_empty() {
+        let (_d, config) = seeded_graph();
+        let out = handle_memory_graph_entities(
+            &MemoryGraphEntitiesArgs {
+                kind: Some("planet".to_string()),
+                ..Default::default()
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(out.text, "No entities.");
+    }
+
+    #[test]
+    fn history_walks_the_chain_oldest_first() {
+        let (_d, config, closed_id) = seeded_graph_with_supersede();
+        let out =
+            handle_memory_graph_history(&MemoryGraphHistoryArgs { fact_id: closed_id }, &config)
+                .unwrap();
+        let lines: Vec<&str> = out.text.lines().collect();
+        assert_eq!(lines.len(), 2, "{}", out.text);
+        assert!(lines[0].contains("—uses→"));
+        // `fact_history` returns the root fact first (its row is never
+        // rewritten in place, so it still shows `valid_to: None` — the
+        // "open" tail of the render — even though the closing revision
+        // supersedes it) and the closing revision second (the same
+        // `valid_from`, but a real `valid_to` closing the window).
+        assert!(
+            lines[0].ends_with(", open)") || lines[0].contains(", open)  conf="),
+            "expected the root revision first (open window): {}",
+            lines[0]
+        );
+        assert!(
+            !(lines[1].contains(", open)  conf=")),
+            "expected the closing revision second (closed window): {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn history_unknown_and_malformed_ids_are_not_found() {
+        let (_d, config) = seeded_graph();
+        let err = handle_memory_graph_history(
+            &MemoryGraphHistoryArgs {
+                fact_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            },
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Core(singularmem_core::Error::FactIdNotFound { .. })
+            ),
+            "{err:?}"
+        );
+
+        let err = handle_memory_graph_history(
+            &MemoryGraphHistoryArgs {
+                fact_id: "nope".to_string(),
+            },
+            &config,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Core(singularmem_core::Error::InvalidId { .. })),
+            "{err:?}"
         );
     }
 }

@@ -19,13 +19,14 @@ use rmcp::{
 use serde_json::{json, Value};
 
 use crate::tools::{
-    handle_memory_get, handle_memory_graph_add, handle_memory_graph_invalidate,
-    handle_memory_graph_query, handle_memory_graph_stats, handle_memory_graph_supersede,
-    handle_memory_graph_timeline, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, handle_memory_scopes, handle_memory_wakeup, MemoryGetArgs,
-    MemoryGraphAddArgs, MemoryGraphInvalidateArgs, MemoryGraphQueryArgs, MemoryGraphStatsArgs,
-    MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs, MemoryIngestArgs, MemoryListArgs,
-    MemoryRetrieveArgs, MemoryRevisionsArgs, MemoryWakeupArgs,
+    handle_memory_get, handle_memory_graph_add, handle_memory_graph_entities,
+    handle_memory_graph_history, handle_memory_graph_invalidate, handle_memory_graph_query,
+    handle_memory_graph_stats, handle_memory_graph_supersede, handle_memory_graph_timeline,
+    handle_memory_ingest, handle_memory_list, handle_memory_retrieve, handle_memory_revisions,
+    handle_memory_scopes, handle_memory_wakeup, MemoryGetArgs, MemoryGraphAddArgs,
+    MemoryGraphEntitiesArgs, MemoryGraphHistoryArgs, MemoryGraphInvalidateArgs,
+    MemoryGraphQueryArgs, MemoryGraphStatsArgs, MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs,
+    MemoryIngestArgs, MemoryListArgs, MemoryRetrieveArgs, MemoryRevisionsArgs, MemoryWakeupArgs,
 };
 use crate::{Config, Error, Result};
 
@@ -73,6 +74,12 @@ fn map_graph_read_error(err: Error) -> McpError {
     match err {
         Error::Core(singularmem_core::Error::Validation { field, reason }) => {
             McpError::invalid_params(format!("{field}: {reason}"), None)
+        }
+        Error::Core(singularmem_core::Error::FactIdNotFound { id }) => {
+            McpError::invalid_params(format!("fact {id} not found"), None)
+        }
+        Error::Core(singularmem_core::Error::InvalidId(e)) => {
+            McpError::invalid_params(format!("invalid fact ID: {e}"), None)
         }
         other => McpError::internal_error(other.to_string(), None),
     }
@@ -134,6 +141,26 @@ fn dispatch_memory_graph_stats(
 ) -> std::result::Result<CallToolResult, McpError> {
     let args: MemoryGraphStatsArgs = parse_call_args(arguments, "memory_graph_stats")?;
     handle_memory_graph_stats(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+fn dispatch_memory_graph_entities(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphEntitiesArgs = parse_call_args(arguments, "memory_graph_entities")?;
+    handle_memory_graph_entities(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+fn dispatch_memory_graph_history(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphHistoryArgs = parse_call_args(arguments, "memory_graph_history")?;
+    handle_memory_graph_history(&args, config)
         .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
         .map_err(map_graph_read_error)
 }
@@ -254,6 +281,8 @@ impl ServerHandler for SingularmemServer {
             crate::tools::graph::tool_descriptor_query(),
             crate::tools::graph::tool_descriptor_timeline(),
             crate::tools::graph::tool_descriptor_stats(),
+            crate::tools::graph::tool_descriptor_entities(),
+            crate::tools::graph::tool_descriptor_history(),
         ];
         if !self.config.read_only {
             tools.push(crate::tools::ingest::tool_descriptor());
@@ -423,6 +452,8 @@ impl ServerHandler for SingularmemServer {
             "memory_graph_supersede" => dispatch_memory_graph_supersede(&config, request.arguments),
             "memory_graph_timeline" => dispatch_memory_graph_timeline(&config, request.arguments),
             "memory_graph_stats" => dispatch_memory_graph_stats(&config, request.arguments),
+            "memory_graph_entities" => dispatch_memory_graph_entities(&config, request.arguments),
+            "memory_graph_history" => dispatch_memory_graph_history(&config, request.arguments),
             "memory_wakeup" => dispatch_memory_wakeup(&config, request.arguments),
             _other => Err(McpError::method_not_found::<
                 rmcp::model::CallToolRequestMethod,
