@@ -15,7 +15,7 @@ workspace = true
 testing = []
 
 [dependencies]
-singularmem-core = { path = "../singularmem-core", version = "0.16.0" }
+singularmem-core = { path = "../singularmem-core", version = "0.20.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
