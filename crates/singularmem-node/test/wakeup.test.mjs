@@ -67,6 +67,24 @@ test('maxBytes drops oldest blocks and keeps the header', async () => {
   assert.ok(w.text.length <= 256, w.text.length);
 });
 
+test('shown is the post-limit count, not the post-maxBytes count', async () => {
+  const { path } = freshStorePath();
+  const project = freshProject();
+  const store = await Store.open(path);
+  for (let i = 0; i < 10; i += 1) {
+    await store.ingest({ content: `decision number ${i}`, scope: 'claude-code/proj-a' });
+  }
+  const w = await store.wakeup({ project, maxBytes: 600 });
+  // `shown` reports items considered after `limit`, unaffected by the
+  // `maxBytes` budget; the header inside `text` reports how many blocks
+  // actually survived that budget, which can be fewer.
+  assert.equal(w.shown, 10);
+  const match = w.text.match(/showing last (\d+)/);
+  assert.ok(match, w.text);
+  const survived = Number(match[1]);
+  assert.ok(survived < 10, `expected maxBytes to drop some blocks: ${survived}`);
+});
+
 test('project defaults to process.cwd()', async () => {
   const { path } = freshStorePath();
   const store = await Store.open(path);

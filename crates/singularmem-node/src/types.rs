@@ -310,7 +310,8 @@ pub struct Fact {
     pub valid_from: Option<String>,
     /// End of the validity window; absent while the fact is open.
     pub valid_to: Option<String>,
-    /// Confidence in `[0.0, 1.0]`.
+    /// Confidence in `[0.0, 1.0]`. Stored at `f32` precision internally, so
+    /// a value like `0.7` reads back as `0.699999988079071`.
     pub confidence: f64,
     /// ULID of the item this fact was extracted from, if any.
     pub source_item_id: Option<String>,
@@ -344,7 +345,9 @@ pub struct NewFact {
     pub valid_from: Option<String>,
     /// End of the validity window: `YYYY-MM-DD` or RFC 3339.
     pub valid_to: Option<String>,
-    /// Confidence in `[0.0, 1.0]`. Default `1.0`.
+    /// Confidence in `[0.0, 1.0]`. Default `1.0`. Stored at `f32` precision
+    /// internally, so a value like `0.7` reads back (e.g. from `Fact.confidence`)
+    /// as `0.699999988079071`.
     pub confidence: Option<f64>,
     /// ULID of the item this fact was extracted from.
     pub source_item_id: Option<String>,
@@ -357,7 +360,8 @@ pub struct NewFact {
 #[derive(Default)]
 pub struct GraphQueryOptions {
     /// Which side of the fact to match: `"outgoing"`, `"incoming"` or
-    /// `"both"` (default). Ignored by `queryPredicate`.
+    /// `"both"` (default). For `queryPredicate`, direction is validated but
+    /// has no effect for predicate queries.
     pub direction: Option<String>,
     /// Only facts valid at this instant: `YYYY-MM-DD` or RFC 3339.
     pub as_of: Option<String>,
@@ -485,8 +489,11 @@ pub struct Wakeup {
     pub text: String,
     /// Items matching the scope set in total (before `limit`).
     pub total: u32,
-    /// Blocks actually rendered into `text` (after `limit` and the
-    /// `maxBytes` budget).
+    /// Items considered after `limit` is applied — **not** the number of
+    /// blocks that made it into `text`. The `maxBytes` budget can drop
+    /// blocks afterwards without changing this count; the header line
+    /// inside `text` (e.g. "showing last N") is what reports how many
+    /// blocks actually survived the `maxBytes` budget.
     pub shown: u32,
     /// The scope paths that were queried, in order.
     pub scopes: Vec<String>,

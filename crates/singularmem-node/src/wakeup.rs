@@ -24,7 +24,8 @@ use singularmem_core::{Error as CoreError, Store as CoreStore};
 use singularmem_retrieve::wakeup::{build, render, ScopeSet, WakeupOptions as CoreWakeupOptions};
 use singularmem_retrieve::Adapter;
 
-use crate::error::{coded_error_to_napi_raw, NodeError};
+use crate::error::NodeError;
+use crate::graph::reject_coded;
 use crate::store::Store;
 use crate::types::{Wakeup, WakeupOptions};
 
@@ -130,15 +131,11 @@ impl Task for WakeupTask {
     }
 
     fn reject(&mut self, env: Env, _trigger: NapiError) -> napi::Result<Self::JsValue> {
-        if let Some(coded) = self.pre_error.take() {
-            return Err(coded_error_to_napi_raw(env, coded));
-        }
-        if let Some(coded) = self.failed.take() {
-            return Err(coded_error_to_napi_raw(env, coded));
-        }
-        Err(NapiError::new(
-            napi::Status::GenericFailure,
-            "unknown wakeup error",
+        Err(reject_coded(
+            env,
+            self.pre_error.take(),
+            self.failed.take(),
+            "wakeup",
         ))
     }
 }
@@ -157,6 +154,7 @@ impl Store {
     /// @param options Project, scope, budget and adapter options (see `WakeupOptions`).
     /// @returns The rendered text plus the counts and scopes behind it.
     /// @throws `{ code: "Validation" }` — `options.project` is missing/not a directory, or `options.adapter` is unknown.
+    /// @throws `{ code: "Io" }` — `options.project` is omitted and looking up the current directory fails.
     /// @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
     #[napi]
     #[allow(clippy::missing_errors_doc)]

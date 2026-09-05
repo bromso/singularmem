@@ -28,7 +28,7 @@ use singularmem_core::graph::{
 };
 use singularmem_core::{Error as CoreError, FactId, ScopeFilter, Store as CoreStore};
 
-use crate::error::{coded_error_to_napi_raw, node_error_to_napi_with_raw, NodeError};
+use crate::error::{coded_error_to_napi_raw, NodeError};
 use crate::store::{scope_filter, Store};
 use crate::types::{
     self, EntityListOptions, EntitySummary, Fact, FactChangeOptions, GraphQueryOptions,
@@ -46,21 +46,30 @@ fn trigger(op: &'static str) -> NapiError {
 /// The shared `reject` body: a pre-validation error wins, then the error
 /// `compute` stashed, then a last-resort placeholder so a task can never
 /// reject without a `.code`.
-fn reject_coded(
+///
+/// Generic over the stashed error's type so `wakeup.rs`'s `WakeupTask` —
+/// whose `failed` is already a coded `NapiError<&'static str>` (see
+/// `from_retrieve_error`) — can share this with the graph tasks here, whose
+/// `failed` is a `NodeError` awaiting conversion.
+pub fn reject_coded<F: Into<NapiError<&'static str>>>(
     env: Env,
     pre_error: Option<NapiError<&'static str>>,
-    failed: Option<NodeError>,
+    failed: Option<F>,
     op: &'static str,
 ) -> NapiError {
     if let Some(coded) = pre_error {
         return coded_error_to_napi_raw(env, coded);
     }
-    let node_err = failed.unwrap_or_else(|| {
-        NodeError::from(CoreError::Io(std::io::Error::other(format!(
-            "unknown {op} error"
-        ))))
-    });
-    node_error_to_napi_with_raw(env, node_err)
+    let coded: NapiError<&'static str> = failed.map_or_else(
+        || {
+            NodeError::from(CoreError::Io(std::io::Error::other(format!(
+                "unknown {op} error"
+            ))))
+            .into()
+        },
+        Into::into,
+    );
+    coded_error_to_napi_raw(env, coded)
 }
 
 /// Stash `e` as the coded error for `reject` and return the trigger.
@@ -508,7 +517,8 @@ impl Store {
 
     /// Every fact with `predicate`, oldest recorded first.
     ///
-    /// `options.direction` is ignored — a predicate query has no side.
+    /// `options.direction` is validated but has no effect for predicate
+    /// queries — a predicate query has no side.
     ///
     /// @param predicate The predicate (normalised for lookup).
     /// @param options Time-travel and scope filters (see `GraphQueryOptions`).

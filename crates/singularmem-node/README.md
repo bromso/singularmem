@@ -300,7 +300,7 @@ const store = await Store.open('./memory.db');
 const w = await store.wakeup({ project: process.cwd() });
 console.log(w.text);   // rendered prompt, header + blocks
 console.log(w.total);  // items matching the scope set
-console.log(w.shown);  // blocks actually rendered (after limit + maxBytes)
+console.log(w.shown);  // items considered after `limit`; the header inside `text` reports how many survived `maxBytes`
 console.log(w.scopes); // ['claude-code/<basename>', 'codex/<basename>', 'cursor/<basename>']
 ```
 

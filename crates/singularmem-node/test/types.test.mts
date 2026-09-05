@@ -26,6 +26,8 @@ import {
   type GraphStats,
   type EntitySummary,
   type SupersedeResult,
+  type WakeupOptions,
+  type Wakeup,
 } from '../index.js';
 
 // 5a — StoreOptions, ListOptions, Item, Store methods (unchanged from 5a)
@@ -192,6 +194,28 @@ declare const superseded: SupersedeResult;
 const _supersededClosed: Fact | undefined = superseded.closed;
 const _supersededOpened: Fact = superseded.opened;
 
+// 16 — wake-up (sub-project 16, Task 5).
+const wakeupOpts: WakeupOptions = {
+  project: '/tmp/proj',
+  includeFiles: true,
+  limit: 20,
+  maxBytes: 8192,
+  adapter: 'plain',
+};
+const wakeupOptsEmpty: WakeupOptions = {};
+
+declare const wakeup: Wakeup;
+const _wakeupText: string = wakeup.text;
+const _wakeupTotal: number = wakeup.total;
+const _wakeupShown: number = wakeup.shown;
+const _wakeupScopes: string[] = wakeup.scopes;
+
+async function _wakeupCheck(s: Store): Promise<void> {
+  const _w: Wakeup = await s.wakeup();
+  const _w2: Wakeup = await s.wakeup(wakeupOpts);
+  const _w3: Wakeup = await s.wakeup(wakeupOptsEmpty);
+}
+
 async function _graphCheck(s: Store): Promise<void> {
   const _added: Fact = await s.addFact(newFactMinimal);
   const _added2: Fact = await s.addFact(newFactFull);
@@ -213,7 +237,7 @@ async function _graphCheck(s: Store): Promise<void> {
 }
 
 void [
-  _check, _openCheck, _ingestCheck, _graphCheck,
+  _check, _openCheck, _ingestCheck, _graphCheck, _wakeupCheck,
   opts, opts2, listOpts, listOpts2,
   searchOpts, searchOptsEmpty, retrieveOpts, retrieveOptsEmpty,
   _formattedPlain, _formattedClaude, _formattedOpenAi, _formattedGemini,
@@ -221,4 +245,6 @@ void [
   minimal, full,
   newFactMinimal, newFactFull, graphQueryOpts, graphQueryOptsEmpty,
   factChangeOpts, factChangeOptsEmpty, graphScopeOpts, entityListOpts,
+  wakeupOpts, wakeupOptsEmpty,
+  _wakeupText, _wakeupTotal, _wakeupShown, _wakeupScopes,
 ];

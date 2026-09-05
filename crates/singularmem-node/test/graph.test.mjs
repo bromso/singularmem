@@ -154,6 +154,23 @@ test('coded errors: FactNotFound and bad timestamps', async () => {
   );
 });
 
+test('confidence is stored at f32 precision', async () => {
+  const store = await open();
+  const fact = await store.addFact({
+    subject: 'Singularmem',
+    predicate: 'uses',
+    object: 'Tantivy',
+    confidence: 0.7,
+  });
+  // `NewFact.confidence` / `Fact.confidence` are documented as f64 on the
+  // JS side but stored at f32 precision internally, so 0.7 does not round
+  // trip exactly.
+  assert.ok(
+    Math.abs(fact.confidence - 0.7) < 1e-6,
+    `expected confidence close to 0.7, got ${fact.confidence}`,
+  );
+});
+
 test('read-only stores reject graph writes with ReadOnly', async () => {
   const { path } = freshStorePath();
   const rw = await Store.open(path);

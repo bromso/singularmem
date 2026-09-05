@@ -329,7 +329,10 @@ export interface Fact {
   validFrom?: string
   /** End of the validity window; absent while the fact is open. */
   validTo?: string
-  /** Confidence in `[0.0, 1.0]`. */
+  /**
+   * Confidence in `[0.0, 1.0]`. Stored at `f32` precision internally, so
+   * a value like `0.7` reads back as `0.699999988079071`.
+   */
   confidence: number
   /** ULID of the item this fact was extracted from, if any. */
   sourceItemId?: string
@@ -367,7 +370,11 @@ export interface NewFact {
   validFrom?: string
   /** End of the validity window: `YYYY-MM-DD` or RFC 3339. */
   validTo?: string
-  /** Confidence in `[0.0, 1.0]`. Default `1.0`. */
+  /**
+   * Confidence in `[0.0, 1.0]`. Default `1.0`. Stored at `f32` precision
+   * internally, so a value like `0.7` reads back (e.g. from `Fact.confidence`)
+   * as `0.699999988079071`.
+   */
   confidence?: number
   /** ULID of the item this fact was extracted from. */
   sourceItemId?: string
@@ -378,7 +385,8 @@ export interface NewFact {
 export interface GraphQueryOptions {
   /**
    * Which side of the fact to match: `"outgoing"`, `"incoming"` or
-   * `"both"` (default). Ignored by `queryPredicate`.
+   * `"both"` (default). For `queryPredicate`, direction is validated but
+   * has no effect for predicate queries.
    */
   direction?: string
   /** Only facts valid at this instant: `YYYY-MM-DD` or RFC 3339. */
@@ -506,8 +514,11 @@ export interface Wakeup {
   /** Items matching the scope set in total (before `limit`). */
   total: number
   /**
-   * Blocks actually rendered into `text` (after `limit` and the
-   * `maxBytes` budget).
+   * Items considered after `limit` is applied — **not** the number of
+   * blocks that made it into `text`. The `maxBytes` budget can drop
+   * blocks afterwards without changing this count; the header line
+   * inside `text` (e.g. "showing last N") is what reports how many
+   * blocks actually survived the `maxBytes` budget.
    */
   shown: number
   /** The scope paths that were queried, in order. */
@@ -609,7 +620,8 @@ export declare class Store {
   /**
    * Every fact with `predicate`, oldest recorded first.
    *
-   * `options.direction` is ignored — a predicate query has no side.
+   * `options.direction` is validated but has no effect for predicate
+   * queries — a predicate query has no side.
    *
    * @param predicate The predicate (normalised for lookup).
    * @param options Time-travel and scope filters (see `GraphQueryOptions`).
@@ -912,6 +924,7 @@ export declare class Store {
    * @param options Project, scope, budget and adapter options (see `WakeupOptions`).
    * @returns The rendered text plus the counts and scopes behind it.
    * @throws `{ code: "Validation" }` — `options.project` is missing/not a directory, or `options.adapter` is unknown.
+   * @throws `{ code: "Io" }` — `options.project` is omitted and looking up the current directory fails.
    * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
    */
   wakeup(options?: WakeupOptions | undefined | null): Promise<Wakeup>
