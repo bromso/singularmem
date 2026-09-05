@@ -453,6 +453,45 @@ pub struct SupersedeResult {
     pub opened: Fact,
 }
 
+// ── Wake-up ────────────────────────────────────────────────────────────────
+
+/// Options for `Store.wakeup`.
+#[napi(object)]
+#[derive(Default)]
+pub struct WakeupOptions {
+    /// Project directory whose default scopes (`claude-code/<b>`,
+    /// `codex/<b>`, `cursor/<b>`, and `files/<b>` when `includeFiles`) are
+    /// read. Defaults to `process.cwd()` — the binding has no server config
+    /// to fall back to.
+    pub project: Option<String>,
+    /// Also read `files/<basename>` (ingest-dir output). Default `false`.
+    pub include_files: Option<bool>,
+    /// Most recent items to consider, across all scopes. Default `20`.
+    pub limit: Option<u32>,
+    /// Output budget in bytes; oldest blocks are dropped first, the header
+    /// always survives. Default `8192`.
+    pub max_bytes: Option<u32>,
+    /// Prompt formatter: `"plain"` (default), `"claude"`, `"openai"` or
+    /// `"gemini"`.
+    pub adapter: Option<String>,
+}
+
+/// Result of `Store.wakeup`: the rendered prompt plus the counts and scopes
+/// behind it.
+#[napi(object)]
+pub struct Wakeup {
+    /// The rendered wake-up text: a one-line header followed by the
+    /// adapter-formatted blocks, budgeted to `maxBytes`.
+    pub text: String,
+    /// Items matching the scope set in total (before `limit`).
+    pub total: u32,
+    /// Blocks actually rendered into `text` (after `limit` and the
+    /// `maxBytes` budget).
+    pub shown: u32,
+    /// The scope paths that were queried, in order.
+    pub scopes: Vec<String>,
+}
+
 /// Convert a core `EntityRef` into its JS mirror.
 fn entity_ref_to_js(r: &singularmem_core::graph::EntityRef) -> EntityRef {
     EntityRef {

@@ -23,6 +23,8 @@
  *    `graphStats`, `entities`, `factHistory`) straight to the native
  *    binding — graph timestamps cross as RFC 3339 strings, so there is
  *    nothing to lift.
+ * 9. Forwards `Store.wakeup` straight to the native binding — its output
+ *    has no timestamps to lift.
  *
  * Must be run after `napi build` (see the `postbuild` npm lifecycle hook).
  */
@@ -140,6 +142,12 @@ class Store {
 
   factHistory(factId) {
     return this._native.factHistory(factId)
+  }
+
+  // ── Wake-up ──────────────────────────────────────────────────────────────
+
+  wakeup(options) {
+    return this._native.wakeup(options)
   }
 }
 

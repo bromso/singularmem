@@ -263,4 +263,68 @@ All offline.
 
 ## Deviations
 
-None yet. Record implementation-time deviations here.
+Recorded by Task 4 (Node knowledge graph) and Task 5 (Node wake-up,
+READMEs). `docs/superpowers/specs/**` was outside Task 4's staging
+allowlist, so its findings are folded in here alongside Task 5's own.
+
+1. **Absent optionals are `undefined`, not `null`.** This spec's
+   TypeScript sketch writes `validFrom: string | null` (and similarly for
+   `validTo`, `sourceItemId`, `scope`, `supersedes`, `kind`). napi-rs 2.x
+   renders a `None` field by *omitting the property*, not by emitting
+   `null` — the generated declarations are `validFrom?: string` etc., and
+   the runtime value is `undefined`. This matches the binding's existing
+   convention for `Item.supersedes` / `Item.scope`. **Consumers must test
+   `=== undefined` / falsiness, not `=== null`.**
+
+2. **New `GraphScopeOptions` type**, not listed in this spec's Types
+   section. `timeline` and `graphStats` take a scope filter but no `kind`,
+   so Task 4 added `GraphScopeOptions { scope?, scopeExact? }` rather than
+   reusing `EntityListOptions` (which has `kind`) and silently ignoring
+   that field.
+
+3. **Timeline order.** This spec's Testing section describes the expected
+   order as "`[closed, current]`"; the implementation (and the SQL in
+   `read.rs`: `ORDER BY valid_from IS NOT NULL, valid_from, recorded_at,
+   id`) puts NULL-`validFrom` heads first, which for the Node test fixture
+   means the still-open `owned_by` fact sorts *before* the closed `uses`
+   fact — i.e. `[current, closed]`. The spec's Testing prose is wrong; the
+   Node and MCP tests assert the SQL's actual order and cite the `ORDER
+   BY` clause.
+
+4. **Argument-validation errors are deferred, not thrown synchronously.**
+   Both `graph.rs` and `wakeup.rs` validate their arguments (timestamps,
+   adapter names, project paths, ULIDs, etc.) on the JS thread *before*
+   queuing the `AsyncTask`, but stash a failure in the task rather than
+   returning it from the method body. `compute` short-circuits on it and
+   `reject` surfaces the coded error, so e.g. `store.wakeup({adapter:
+   'gpt'})` returns a **rejected Promise** rather than throwing
+   synchronously — required for `assert.rejects` in the Node test suite
+   and for parity with `.catch()`-style callers. This is the same
+   `pre_error` pattern `OpenStoreTask` in `store.rs` already used for
+   `Store.open('')`.
+
+5. **`wakeup.rs`'s task carries the coded error directly, not
+   `NodeError`.** `graph.rs`'s tasks wrap failures in `NodeError` (a
+   `singularmem_core::Error` newtype) because every graph operation's
+   error type is `core::Error`. `wakeup::build` returns
+   `singularmem_retrieve::Result<Wakeup>`, whose error `error::
+   from_retrieve_error` already maps straight to the final coded
+   `NapiError<&'static str>` (unwrapping `Search`/`Core` wrapper variants
+   in the process) — mirroring `RetrieveTask` in `store.rs`. Wrapping that
+   again in `NodeError` would have been redundant, so `WakeupTask.failed`
+   is `Option<NapiError<&'static str>>` directly.
+
+6. **The second `#[napi] impl Store` block placement needed no
+   fallback.** Both `graph.rs` and `wakeup.rs` add methods to `Store` from
+   outside `store.rs`; napi-rs merges the extra `impl` blocks onto the one
+   `Store` class with no special handling required, so the brief's
+   "methods live in `store.rs`" fallback was never exercised.
+
+7. **A `project` and `adapter` that are both invalid surface only the
+   `project` error.** `Store.wakeup`'s pre-validation resolves `project`
+   first and only checks `adapter` if that succeeded (`get_or_insert`
+   keeps whichever error is found first); this spec doesn't order the two
+   checks, and the choice mirrors `handle_memory_wakeup`'s MCP-side
+   `resolve_project` → `find_adapter` sequence.
+
+No napi method or field names changed from what this section documents.

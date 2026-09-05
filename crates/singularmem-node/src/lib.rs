@@ -13,6 +13,7 @@ mod error;
 mod graph;
 mod store;
 mod types;
+mod wakeup;
 
 pub use adapters::{ClaudeAdapter, GeminiAdapter, OpenAiAdapter, PlainAdapter};
 pub use store::ListOptions;
@@ -24,6 +25,7 @@ pub use types::{
     GraphQueryOptions, GraphScopeOptions, GraphStats, NewFact, SupersedeResult, TimelineEntry,
 };
 pub use types::{MemoryBlock, NewItem, RetrievedContext, SearchHit, SearchResults};
+pub use types::{Wakeup, WakeupOptions};
 
 /// Returns the crate version. Used as a smoke-test export.
 #[napi]

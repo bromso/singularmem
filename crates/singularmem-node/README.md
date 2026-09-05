@@ -75,6 +75,9 @@ Possible codes:
 | `Sqlite` | Underlying SQLite error |
 | `Io` | Filesystem or I/O error |
 | `Json` | JSON serialisation/deserialisation error |
+| `FactNotFound` | `invalidateFact`/`supersedeFact` found no open fact matching the triple |
+| `FactIdNotFound` | `factHistory` was given a well-formed ULID that names no fact |
+| `AmbiguousFactRevision` | A fact's revision chain forks; the library refuses to pick a branch |
 
 ## API
 
@@ -90,6 +93,8 @@ See `index.d.ts` for the full TypeScript surface. The current public API is:
 - `store.export()` — full JSONL dump
 - `store.scopes()` — distinct scope paths with item counts, sorted by path
 - `store.setScope(id, scope)` — move an item to `scope` (or clear it with `null`/`undefined`), no new revision
+- `store.addFact(fact)` / `store.queryEntity(name, options?)` / `store.queryPredicate(predicate, options?)` / `store.invalidateFact(...)` / `store.supersedeFact(...)` / `store.timeline(entity?, options?)` / `store.graphStats(options?)` / `store.entities(options?)` / `store.factHistory(factId)` — the knowledge graph (see [Knowledge graph](#knowledge-graph))
+- `store.wakeup(options?)` — a project's recent memory, rendered for a prompt (see [Wake-up](#wake-up))
 
 ## Search
 
@@ -215,6 +220,105 @@ scope is not updated until the next `singularmem reindex`.
 await store.setScope(item.id, 'team/frontend');
 await store.setScope(item.id, null); // clears the scope
 ```
+
+## Knowledge graph
+
+Record and query subject–predicate–object facts alongside your items.
+Facts are versioned: `invalidateFact` closes a standing fact, and
+`supersedeFact` closes one and opens its replacement in a single
+transaction. Nothing is ever overwritten — `factHistory` walks the full
+revision chain.
+
+```javascript
+import { Store } from 'singularmem';
+
+const store = await Store.open('./memory.db');
+
+const fact = await store.addFact({
+  subject: 'Singularmem',
+  predicate: 'uses',
+  object: 'Tantivy',
+  validFrom: '2026-05-16',
+});
+```
+
+The object of a fact is either another entity or a literal value —
+exactly one of `FactObject.entity` / `FactObject.value` is set; the other
+is `undefined` (napi omits `None` fields entirely rather than emitting
+`null` — see [Error handling](#error-handling) below for the general rule):
+
+```javascript
+fact.object; // { entity: { id: '01H...', name: 'Tantivy' } } — .value is undefined
+```
+
+Query an entity as of a point in time:
+
+```javascript
+const asOfMay = await store.queryEntity('Singularmem', { asOf: '2026-05-20' });
+```
+
+Replace a fact with its successor in one transaction:
+
+```javascript
+const { closed, opened } = await store.supersedeFact(
+  'Singularmem', 'uses', 'Tantivy', 'Meilisearch',
+);
+// closed is undefined if there was no matching open fact to close
+```
+
+Walk a project's history and its aggregate shape:
+
+```javascript
+const timeline = await store.timeline('Singularmem'); // [{ fact, current }, ...]
+const stats = await store.graphStats();               // { entities, openFacts, closedFacts, predicates }
+const entities = await store.entities({ kind: 'library' });
+const chain = await store.factHistory(fact.id);        // every revision, oldest first
+```
+
+`queryEntity`, `queryPredicate`, `timeline`, `graphStats` and `entities`
+all accept a `scope` / `scopeExact` filter, same semantics as
+[Scoping](#scoping). See `index.d.ts` for every option field
+(`GraphQueryOptions`, `FactChangeOptions`, `GraphScopeOptions`,
+`EntityListOptions`) and the `Fact` / `TimelineEntry` / `GraphStats` /
+`EntitySummary` / `SupersedeResult` return shapes.
+
+Graph-specific error codes: `FactNotFound` (no open head matches
+`invalidateFact`'s triple), `FactIdNotFound` / `AmbiguousFactRevision`
+(bad or forking `factHistory` chain) — on top of the codes in
+[Error handling](#error-handling).
+
+## Wake-up
+
+The same "what happened recently in this project" context the editor
+hooks inject at session start, available directly:
+
+```javascript
+import { Store } from 'singularmem';
+
+const store = await Store.open('./memory.db');
+
+const w = await store.wakeup({ project: process.cwd() });
+console.log(w.text);   // rendered prompt, header + blocks
+console.log(w.total);  // items matching the scope set
+console.log(w.shown);  // blocks actually rendered (after limit + maxBytes)
+console.log(w.scopes); // ['claude-code/<basename>', 'codex/<basename>', 'cursor/<basename>']
+```
+
+`options.project` defaults to `process.cwd()` — this binding has no
+server-side project config to fall back to. Scopes are derived from its
+**raw** (uncanonicalised) basename, so a symlinked project directory reads
+under the link's name, matching what the editor hooks wrote at save time.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `project` | `process.cwd()` | Project directory; its basename drives the scope set. |
+| `includeFiles` | `false` | Also read `files/<basename>` (`singularmem ingest-dir` output). |
+| `limit` | `20` | Most recent items to consider, across all scopes. |
+| `maxBytes` | `8192` | Output budget; oldest blocks are dropped first, the header always survives. |
+| `adapter` | `"plain"` | Prompt formatter: `"plain"`, `"claude"`, `"openai"` or `"gemini"`. |
+
+An unknown `adapter` or a `project` that isn't a directory rejects with
+`code: 'Validation'`.
 
 ## Adapters
 

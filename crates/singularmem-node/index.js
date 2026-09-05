@@ -417,6 +417,12 @@ class Store {
   factHistory(factId) {
     return this._native.factHistory(factId)
   }
+
+  // ── Wake-up ──────────────────────────────────────────────────────────────
+
+  wakeup(options) {
+    return this._native.wakeup(options)
+  }
 }
 
 // Construct the frozen `adapters` namespace from the four native classes.

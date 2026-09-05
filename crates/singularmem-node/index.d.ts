@@ -469,6 +469,50 @@ export interface SupersedeResult {
   /** The newly opened fact. */
   opened: Fact
 }
+/** Options for `Store.wakeup`. */
+export interface WakeupOptions {
+  /**
+   * Project directory whose default scopes (`claude-code/<b>`,
+   * `codex/<b>`, `cursor/<b>`, and `files/<b>` when `includeFiles`) are
+   * read. Defaults to `process.cwd()` — the binding has no server config
+   * to fall back to.
+   */
+  project?: string
+  /** Also read `files/<basename>` (ingest-dir output). Default `false`. */
+  includeFiles?: boolean
+  /** Most recent items to consider, across all scopes. Default `20`. */
+  limit?: number
+  /**
+   * Output budget in bytes; oldest blocks are dropped first, the header
+   * always survives. Default `8192`.
+   */
+  maxBytes?: number
+  /**
+   * Prompt formatter: `"plain"` (default), `"claude"`, `"openai"` or
+   * `"gemini"`.
+   */
+  adapter?: string
+}
+/**
+ * Result of `Store.wakeup`: the rendered prompt plus the counts and scopes
+ * behind it.
+ */
+export interface Wakeup {
+  /**
+   * The rendered wake-up text: a one-line header followed by the
+   * adapter-formatted blocks, budgeted to `maxBytes`.
+   */
+  text: string
+  /** Items matching the scope set in total (before `limit`). */
+  total: number
+  /**
+   * Blocks actually rendered into `text` (after `limit` and the
+   * `maxBytes` budget).
+   */
+  shown: number
+  /** The scope paths that were queried, in order. */
+  scopes: Array<string>
+}
 /** Returns the crate version. Used as a smoke-test export. */
 export declare function version(): string
 /** Plain Markdown adapter. */
@@ -855,6 +899,22 @@ export declare class Store {
    * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
    */
   setScope(id: string, scope?: string | undefined | null): Promise<Item>
+  /**
+   * The project's recent memory across its default scopes, rendered as a
+   * prompt-ready string — the same context the editor hooks inject at
+   * session start.
+   *
+   * Scopes are `claude-code/<basename>`, `codex/<basename>` and
+   * `cursor/<basename>` (plus `files/<basename>` when `includeFiles`),
+   * where `<basename>` is `options.project`'s raw (uncanonicalised)
+   * final path component.
+   *
+   * @param options Project, scope, budget and adapter options (see `WakeupOptions`).
+   * @returns The rendered text plus the counts and scopes behind it.
+   * @throws `{ code: "Validation" }` — `options.project` is missing/not a directory, or `options.adapter` is unknown.
+   * @throws `{ code: "Sqlite" }` — underlying `SQLite` error.
+   */
+  wakeup(options?: WakeupOptions | undefined | null): Promise<Wakeup>
 }
 
 /**
