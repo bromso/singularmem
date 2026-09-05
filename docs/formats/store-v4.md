@@ -115,10 +115,15 @@ representation. Case-insensitive when parsed; emitted as uppercase.
 bytes (1 MiB). Enforced by both the application and the SQL `CHECK`
 constraint.
 
-**`items.created_at`** — RFC 3339 timestamp with nanosecond precision and
-UTC timezone (`Z` suffix). Example: `2026-05-16T12:34:56.123456789Z`.
-String-sortable in ISO order matches chronological order, which the
-`idx_items_created_at` index relies on.
+**`items.created_at`** — RFC 3339 timestamp in UTC (`Z` suffix). Example:
+`2026-05-16T12:34:56.123456789Z`. Inherited unchanged from v2, where the
+fractional part has **variable** width: trailing zeros are trimmed, so a
+whole-second instant is written `2026-05-16T12:34:56Z` and a sub-second one
+`2026-05-16T12:34:56.123456789Z`. Loaders MUST therefore parse this column
+before comparing two values; a raw string comparison is not chronological
+across differing precisions (`'.'` sorts before `'Z'`). The graph columns
+below do not share this caveat. Ordering by this column alone, as
+`idx_items_created_at` does, is still correct to the second.
 
 **`items.supersedes`** — Nullable. When non-null, MUST reference an
 existing `items.id`. The FK is `DEFERRABLE INITIALLY DEFERRED` so a
@@ -202,8 +207,15 @@ write that names a *different* kind for an existing entity is
 is accepted and leaves the stored kind unchanged. Entities are never
 deleted.
 
-**`entities.created_at`** — RFC 3339 timestamp, same shape as
-`items.created_at`.
+**`entities.created_at`** — RFC 3339 timestamp in the **fixed-precision
+graph form**: `YYYY-MM-DDTHH:MM:SS.fffffffffZ` — always UTC, always
+exactly nine fractional digits, always exactly 30 characters. Example:
+`2026-09-05T12:00:00.000000000Z`. Because the width is fixed, string order
+*is* chronological order for this column, so `ORDER BY created_at` and
+`created_at <= ?` are both sound without parsing. (Unlike
+`items.created_at`, which predates this rule — see above.) Writers MUST
+emit the padded form; readers SHOULD still parse leniently, since any
+RFC 3339 precision is a valid instant.
 
 **`facts.id`** — 26-character ULID. Identifies one specific *revision*,
 not a stable "fact slot" — see "Revisions and the two time axes" below.
@@ -230,8 +242,13 @@ one write cannot fork a triple's identity from another's.
 timestamps bounding the fact's *validity window* (not when the row was
 written — that is `recorded_at`). `NULL valid_from` means "since
 unknown"; `NULL valid_to` means "still valid" (open). Input may be a bare
-date (`2026-05-16`, expanded to `T00:00:00Z`) or a full timestamp; stored
-canonical. `CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >=
+date (`2026-05-16`, expanded to `T00:00:00Z`) or a full timestamp; both
+are stored in the fixed-precision graph form
+`YYYY-MM-DDTHH:MM:SS.fffffffffZ` described under `entities.created_at`
+(UTC, nine fractional digits, 30 characters), so `2026-05-16` is stored as
+`2026-05-16T00:00:00.000000000Z`. String order is chronological order for
+these columns, which is what makes the window comparisons below — and the
+`CHECK` immediately following — correct as plain text comparisons. `CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >=
 valid_from)` rejects an inverted window at the database level; the
 application also rejects it before ever preparing the statement.
 
@@ -254,7 +271,9 @@ first in a chain; see "Revisions and the two time axes" below.
 
 **`facts.recorded_at`** — RFC 3339 timestamp: when this specific revision
 was appended (append time — the second of the two time axes, distinct
-from `valid_from`/`valid_to`).
+from `valid_from`/`valid_to`). Stored in the same fixed-precision graph
+form, `YYYY-MM-DDTHH:MM:SS.fffffffffZ`, so the `recorded_at <= ?`
+comparisons the "believed at" reads depend on are chronological.
 
 ### Revisions and the two time axes
 

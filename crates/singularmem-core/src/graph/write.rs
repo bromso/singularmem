@@ -13,6 +13,7 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use crate::error::{Error, Result};
 use crate::graph::normalise;
 use crate::graph::read::load_fact;
+use crate::graph::time::to_sql;
 use crate::graph::types::{EntityRef, Fact, FactObject, NewFact, NewObject};
 use crate::id::{EntityId, FactId};
 use crate::ingest::mint_raw_ulid;
@@ -121,13 +122,13 @@ fn insert_fact_row(tx: &Transaction<'_>, fact: &Fact) -> Result<()> {
             fact.predicate,
             object.id,
             object.value,
-            fact.valid_from.map(|t| t.to_string()),
-            fact.valid_to.map(|t| t.to_string()),
+            fact.valid_from.map(to_sql),
+            fact.valid_to.map(to_sql),
             f64::from(fact.confidence),
             fact.source_item_id.map(|i| i.to_string()),
             fact.scope,
             fact.supersedes.map(|i| i.to_string()),
-            fact.recorded_at.to_string(),
+            to_sql(fact.recorded_at),
         ],
     )
     .map_err(|e| Error::Sqlite {
@@ -217,7 +218,7 @@ impl Store {
         tx.execute(
             "INSERT INTO entities (id, name, normalised_name, kind, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id.to_string(), display, normalised, kind, now.to_string()],
+            params![id.to_string(), display, normalised, kind, to_sql(now)],
         )
         .map_err(|e| Error::Sqlite {
             context: "inserting entity",

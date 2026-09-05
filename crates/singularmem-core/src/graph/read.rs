@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Row};
 
 use crate::error::{Error, Result};
 use crate::graph::normalise;
-use crate::graph::time::parse_point;
+use crate::graph::time::{parse_point, to_sql};
 use crate::graph::types::{
     Direction, Entity, EntityRef, EntitySummary, Fact, FactObject, GraphQuery, GraphStats,
     TimelineEntry,
@@ -65,7 +65,7 @@ pub(super) fn fact_where(q: &GraphQuery, validity: Validity) -> (String, Vec<Str
              (SELECT 1 FROM facts g WHERE g.supersedes = f.id AND g.recorded_at <= ?))"
                 .to_string(),
         );
-        let r = recorded_at.to_string();
+        let r = to_sql(recorded_at);
         binds.push(r.clone());
         binds.push(r);
     } else {
@@ -79,7 +79,7 @@ pub(super) fn fact_where(q: &GraphQuery, validity: Validity) -> (String, Vec<Str
                  AND (f.valid_to IS NULL OR ? < f.valid_to))"
                     .to_string(),
             );
-            let t = as_of.to_string();
+            let t = to_sql(as_of);
             binds.push(t.clone());
             binds.push(t);
         } else {

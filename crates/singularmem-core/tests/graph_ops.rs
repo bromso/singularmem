@@ -707,3 +707,89 @@ fn forked_chain_is_reported_not_guessed() {
     );
     assert!(err.to_string().contains("forks"), "{err}");
 }
+
+/// Graph timestamps are stored at a fixed nine-digit precision so `SQLite`'s
+/// string comparison is chronological. With `Timestamp`'s trimming `Display`
+/// the clock-minted `…T03:12:00.788Z` sorted *before* the user-supplied
+/// `…T03:12:00Z` (`'.'` < `'Z'`), which inverted `--recorded-at` answers
+/// inside a one-second window.
+#[test]
+fn recorded_at_ordering_survives_sub_second_writes() {
+    let d = TempDir::new().unwrap();
+
+    let s1 = store_at(&d, "2026-09-05T03:11:59.745Z");
+    s1.add_fact(NewFact::triple("a", "p", "x")).unwrap();
+    drop(s1);
+
+    let s2 = store_at(&d, "2026-09-05T03:12:00.788Z");
+    s2.supersede_fact("a", "p", &entity("x"), entity("y"), None, None)
+        .unwrap();
+
+    let believed_at = |r: &str| {
+        s2.query_entity(
+            "a",
+            &GraphQuery {
+                recorded_at: Some(ts(r)),
+                direction: Direction::Outgoing,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|f| match f.object {
+            singularmem_core::graph::FactObject::Entity(e) => e.name,
+            singularmem_core::graph::FactObject::Value(v) => v,
+        })
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        believed_at("2026-09-05T03:12:00Z"),
+        vec!["x"],
+        "the supersede was recorded at 03:12:00.788, after this instant"
+    );
+    assert_eq!(
+        believed_at("2026-09-05T03:12:01Z"),
+        vec!["y"],
+        "and is visible one second later"
+    );
+}
+
+/// Every graph timestamp column holds the 30-character fixed-precision form.
+#[test]
+fn stored_graph_timestamps_are_fixed_width() {
+    let d = TempDir::new().unwrap();
+    let path = d.path().join("s.db");
+    let s = store_at(&d, "2026-09-05T03:11:59.745Z");
+    let mut f = NewFact::triple("a", "p", "b");
+    f.valid_from = Some(ts("2026-05-16"));
+    s.add_fact(f).unwrap();
+    s.invalidate_fact("a", "p", &entity("b"), None, Some(ts("2026-09-01")))
+        .unwrap();
+    drop(s);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (sql, column) in [
+        ("SELECT created_at FROM entities", "entities.created_at"),
+        (
+            "SELECT valid_from FROM facts WHERE valid_from IS NOT NULL",
+            "facts.valid_from",
+        ),
+        (
+            "SELECT valid_to FROM facts WHERE valid_to IS NOT NULL",
+            "facts.valid_to",
+        ),
+        ("SELECT recorded_at FROM facts", "facts.recorded_at"),
+    ] {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let values: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!values.is_empty(), "{column} produced no rows to check");
+        for v in values {
+            assert_eq!(v.len(), 30, "{column} = {v:?}");
+            assert!(v.ends_with('Z'), "{column} = {v:?}");
+        }
+    }
+}
