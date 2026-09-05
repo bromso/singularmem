@@ -23,6 +23,12 @@ use usearch::{IndexOptions, MetricKind, ScalarKind};
 use crate::embedder::Embedder;
 use crate::error::{Error, Result};
 
+/// Items per `Embedder::embed_batch` call in [`EmbedderIndex::on_ingest_batch`].
+///
+/// 64 sits on the flat part of the measured throughput curve for the bundled
+/// ONNX models; larger chunks buy nothing and cost memory.
+pub const EMBED_CHUNK: usize = 64;
+
 // ── VectorIndexOptions ────────────────────────────────────────────────────
 
 /// HNSW tuning parameters for [`VectorIndex::open_with_options`].
@@ -556,6 +562,31 @@ impl singularmem_core::IndexHook for EmbedderIndex {
     /// Equivalent to `on_ingest`: re-embed and re-index.
     fn on_reindex(&self, item: &singularmem_core::Item) -> singularmem_core::Result<()> {
         self.on_ingest(item)
+    }
+
+    /// Embed `items` in chunks of [`EMBED_CHUNK`] via
+    /// [`Embedder::embed_batch`], then add each vector to the
+    /// [`VectorIndex`]. On an error mid-way, vectors already added stay
+    /// added; the error propagates to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`singularmem_core::Error::Io`] wrapping the search error
+    /// message if embedding or indexing fails.
+    fn on_ingest_batch(&self, items: &[singularmem_core::Item]) -> singularmem_core::Result<()> {
+        for chunk in items.chunks(EMBED_CHUNK) {
+            let texts: Vec<&str> = chunk.iter().map(|i| i.content.as_str()).collect();
+            let vectors = self
+                .embedder
+                .embed_batch(&texts)
+                .map_err(|ref e| to_core_err(e))?;
+            for (item, v) in chunk.iter().zip(vectors) {
+                self.vector_index
+                    .add(item.id, &v)
+                    .map_err(|ref e| to_core_err(e))?;
+            }
+        }
+        Ok(())
     }
 
     /// Flush the [`VectorIndex`] to disk (`index.usearch` + `keymap.bin`).

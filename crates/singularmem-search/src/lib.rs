@@ -34,6 +34,6 @@ pub use crate::result::{Hit, SearchOptions, SearchResults};
 pub use crate::scope_lookup::ScopeLookup;
 pub use crate::semantic_query::{SemanticHit, SemanticSearchOptions, SemanticSearchResults};
 pub use crate::vector_index::{
-    EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions,
+    EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions, EMBED_CHUNK,
 };
 pub use singularmem_core::ScopeFilter;
