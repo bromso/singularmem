@@ -334,8 +334,9 @@ opened: 01CW8BZ7FQRJM4HCVCV9ABCDEF  singularmem —uses→ meilisearch  [2026-06
 ### `memory_graph_timeline`
 
 Lists every fact revision — open and closed alike — for an entity or
-the whole graph, ordered by validity start. Use this to see how a
-fact changed over time, not just its current value.
+the whole graph, ordered by validity start ascending, with revisions
+whose start is unknown (`[?, …`) first, then by record time and id. Use
+this to see how a fact changed over time, not just its current value.
 
 **Arguments:**
 

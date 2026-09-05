@@ -299,10 +299,10 @@ fn directions_scopes_predicates_timeline_entities() {
     assert_eq!(tl.len(), 2);
     assert!(tl.iter().all(|e| e.current));
     assert_eq!(
-        tl[0].fact.valid_from,
-        Some(ts("2026-05-16")),
-        "dated first, NULL valid_from last"
+        tl[0].fact.valid_from, None,
+        "NULL valid_from means 'valid since forever', so it sorts first"
     );
+    assert_eq!(tl[1].fact.valid_from, Some(ts("2026-05-16")));
     let ents = graph_store.entities(None, None).unwrap();
     assert_eq!(
         ents.iter()
@@ -792,4 +792,98 @@ fn stored_graph_timestamps_are_fixed_width() {
             assert!(v.ends_with('Z'), "{column} = {v:?}");
         }
     }
+}
+
+/// A whitespace-only `kind` is no kind at all. Storing the trimmed `""`
+/// would brick the entity: every later write naming a real kind would then
+/// collide with it and fail the immutability check.
+#[test]
+fn blank_kind_is_treated_as_absent() {
+    let (_d, s) = store();
+    let mut blank = NewFact::triple("ada", "works_at", "acme");
+    blank.subject_kind = Some("   ".into());
+    blank.object = NewObject::Entity {
+        name: "acme".into(),
+        kind: Some("\t\n".into()),
+    };
+    s.add_fact(blank).unwrap();
+    let kinds = |name: &str| {
+        s.entities(None, None)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.entity.name == name)
+            .unwrap()
+            .entity
+            .kind
+    };
+    assert_eq!(kinds("ada"), None, "a blank kind is not stored");
+    assert_eq!(kinds("acme"), None);
+
+    let mut real = NewFact::triple("ada", "works_at", "acme");
+    real.subject_kind = Some("person".into());
+    real.object = NewObject::Entity {
+        name: "acme".into(),
+        kind: Some("company".into()),
+    };
+    s.add_fact(real).unwrap();
+    assert_eq!(kinds("ada").as_deref(), Some("person"));
+    assert_eq!(kinds("acme").as_deref(), Some("company"));
+}
+
+/// `add` is idempotent only for a request that matches the standing head.
+/// A differing validity window or confidence is refused rather than
+/// silently discarded — `supersede`/`invalidate` are how a fact changes.
+#[test]
+fn add_refuses_to_silently_drop_a_divergent_window_or_confidence() {
+    let (_d, s) = store();
+    let mut original = NewFact::triple("a", "p", "b");
+    original.valid_from = Some(ts("2026-01-01"));
+    original.confidence = 0.5;
+    let head = s.add_fact(original.clone()).unwrap();
+
+    assert_eq!(
+        s.add_fact(original).unwrap().id,
+        head.id,
+        "the exact same request is still a no-op"
+    );
+
+    let divergent = |mutate: fn(&mut NewFact)| {
+        let mut f = NewFact::triple("a", "p", "b");
+        f.valid_from = Some(ts("2026-01-01"));
+        f.confidence = 0.5;
+        mutate(&mut f);
+        f
+    };
+    for f in [
+        divergent(|f| f.valid_from = Some(ts("2026-02-01"))),
+        divergent(|f| f.valid_from = None),
+        divergent(|f| f.valid_to = Some(ts("2026-06-01"))),
+        divergent(|f| f.confidence = 1.0),
+    ] {
+        let err = s.add_fact(f).unwrap_err();
+        assert!(
+            matches!(err, Error::Validation { field: "fact", .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("a —p→ b"), "{err}");
+        assert!(
+            err.to_string().contains("use supersede or invalidate"),
+            "{err}"
+        );
+    }
+    assert_eq!(
+        s.graph_stats(None).unwrap().open_facts,
+        1,
+        "no refused request wrote anything"
+    );
+}
+
+/// The `NULL` window is the default: an omitted `valid_from` matches a head
+/// that also has none, so plain `add` stays idempotent.
+#[test]
+fn add_with_no_window_is_idempotent_against_a_null_window_head() {
+    let (_d, s) = store();
+    let first = s.add_fact(NewFact::triple("a", "p", "b")).unwrap();
+    let again = s.add_fact(NewFact::triple("a", "p", "b")).unwrap();
+    assert_eq!(first.id, again.id);
 }

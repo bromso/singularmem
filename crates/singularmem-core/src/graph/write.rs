@@ -162,6 +162,30 @@ fn find_entity(tx: &Transaction<'_>, name: &str) -> Result<Option<EntityRef>> {
     }
 }
 
+/// A caller-supplied `kind`, trimmed, with a blank one treated as absent.
+///
+/// Storing `Some("")` for `"   "` would brick the entity: every later write
+/// naming a real kind would fail the immutability check against `""`.
+fn kind_or_none(kind: Option<&str>) -> Option<&str> {
+    kind.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Whether an existing open head already answers `request` exactly, or
+/// diverges from it in a way `add` must not silently discard.
+///
+/// Only the validity window and confidence can differ here — subject,
+/// predicate, object, and scope are what [`find_open_head`] matched on.
+/// A request that omits `valid_from`/`valid_to` matches a head whose
+/// column is `NULL`, and an omitted confidence is the default `1.0`.
+fn head_matches_request(
+    head: &Fact,
+    request_window: (Option<Timestamp>, Option<Timestamp>),
+    request_confidence: f32,
+) -> bool {
+    (head.valid_from, head.valid_to) == request_window
+        && (head.confidence - request_confidence).abs() < f32::EPSILON
+}
+
 impl Store {
     /// Resolve or create an entity inside `tx`, returning its id and display
     /// name. Entities are store-global: identity is the normalised name
@@ -272,11 +296,14 @@ impl Store {
             }
         }
 
-        let subject_kind = f.subject_kind.as_deref().map(str::trim);
+        // A whitespace-only kind is no kind at all: trimming alone would
+        // store `""`, which then collides with every later real kind and
+        // leaves the entity permanently unusable.
+        let subject_kind = kind_or_none(f.subject_kind.as_deref());
         let subject = self.get_or_create_entity(tx, now, &f.subject, subject_kind)?;
         let object = match f.object {
             NewObject::Entity { name, kind } => {
-                let kind = kind.as_deref().map(str::trim);
+                let kind = kind_or_none(kind.as_deref());
                 FactObject::Entity(self.get_or_create_entity(tx, now, &name, kind)?)
             }
             NewObject::Value(value) => {
@@ -302,9 +329,30 @@ impl Store {
             &columns,
             scope.as_deref(),
         )? {
+            let head = load_fact(tx, open)?.ok_or(Error::FactIdNotFound { id: open })?;
+            if !head_matches_request(&head, (f.valid_from, f.valid_to), f.confidence) {
+                // The triple is the same but the request carries a
+                // different window or confidence. Returning the head would
+                // silently drop what the caller asked for; appending a
+                // second open head would fork the chain. Neither is `add`'s
+                // job — say so instead.
+                return Err(Error::Validation {
+                    field: "fact",
+                    reason: format!(
+                        "an open fact <{} —{}→ {}> already exists with a different \
+                         validity window or confidence; use supersede or invalidate",
+                        head.subject.name,
+                        head.predicate,
+                        match &head.object {
+                            FactObject::Entity(e) => e.name.clone(),
+                            FactObject::Value(v) => v.clone(),
+                        }
+                    ),
+                });
+            }
             // Idempotent: the same open fact already stands, so return it
             // rather than appending a duplicate revision.
-            return load_fact(tx, open)?.ok_or(Error::FactIdNotFound { id: open });
+            return Ok(head);
         }
 
         let fact = Fact {
@@ -392,14 +440,18 @@ impl Store {
     /// Record a fact, creating its entities on demand.
     ///
     /// Idempotent: if an identical open fact (same subject, predicate,
-    /// object, and scope) already stands, it is returned unchanged and
-    /// nothing is written.
+    /// object, and scope) already stands with the same validity window and
+    /// confidence, it is returned unchanged and nothing is written. If the
+    /// triple matches but the window or confidence differs, the request is
+    /// rejected rather than quietly discarded — closing or replacing a
+    /// standing fact is `invalidate_fact`/`supersede_fact`'s job.
     ///
     /// # Errors
     /// `Error::ReadOnly` on a read-only store; `Error::Validation` for a
     /// bad entity name, predicate, `confidence`, `valid_window`, `scope`,
-    /// `kind`, or unknown `source_item_id`; `Error::Sqlite` on database
-    /// error. On any error nothing is written.
+    /// `kind`, unknown `source_item_id`, or (field `"fact"`) an open head
+    /// that diverges from the request; `Error::Sqlite` on database error.
+    /// On any error nothing is written.
     ///
     /// # Panics
     /// Panics if the connection `Mutex` is poisoned.

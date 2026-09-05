@@ -2933,6 +2933,7 @@ fn graph_add_query_supersede_history_and_axes() {
         ],
     );
     assert_eq!(fact.len(), 26);
+    // Same triple, same window: idempotent, down to the id.
     graph_cmd(
         db_s,
         &[
@@ -2943,6 +2944,8 @@ fn graph_add_query_supersede_history_and_axes() {
             "tantivy",
             "--scope",
             "claude-code/singularmem",
+            "--from",
+            "2026-05-16",
         ],
     )
     .success()
@@ -3326,8 +3329,47 @@ fn graph_history_invalid_fact_id_is_a_distinct_error() {
         .stderr(predicate::str::contains("invalid item ID").not());
 }
 
+/// A second `graph add` for a standing triple is idempotent only when the
+/// validity window matches; a differing one is refused rather than dropped.
+#[test]
+fn graph_add_refuses_a_divergent_window_for_a_standing_fact() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let fact = graph_stdout(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-05-16"],
+    );
+
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-05-16"],
+    )
+    .success()
+    .stdout(format!("{fact}\n"));
+
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--from", "2026-06-01"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("a —p→ b"))
+    .stderr(predicate::str::contains("use supersede or invalidate"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--confidence", "0.5"],
+    )
+    .code(1)
+    .stderr(predicate::str::contains("use supersede or invalidate"));
+
+    graph_cmd(db_s, &["graph", "stats"])
+        .success()
+        .stdout(predicate::str::contains("open facts: 1"));
+}
+
 /// `graph timeline`'s human output marks the open head `[current]` and every
-/// other revision `[closed]`.
+/// other revision `[closed]`, ordered by `valid_from` with "valid since
+/// unknown" (`NULL`) first.
 #[test]
 fn graph_timeline_human_output_marks_current_and_closed() {
     let dir = TempDir::new().unwrap();
@@ -3350,10 +3392,10 @@ fn graph_timeline_human_output_marks_current_and_closed() {
     let out = graph_stdout(db_s, &["graph", "timeline", "singularmem"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].starts_with("[current] "));
-    assert!(lines[0].contains("meilisearch"));
-    assert!(lines[1].starts_with("[closed] "));
-    assert!(lines[1].contains("tantivy"));
+    assert!(lines[0].starts_with("[closed] "), "{out}");
+    assert!(lines[0].contains("tantivy"), "{out}");
+    assert!(lines[1].starts_with("[current] "), "{out}");
+    assert!(lines[1].contains("meilisearch"), "{out}");
 }
 
 /// `graph supersede`'s human output: the closed fact's line, then the new

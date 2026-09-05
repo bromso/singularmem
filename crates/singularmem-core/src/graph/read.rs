@@ -387,8 +387,9 @@ impl Store {
         select_facts(&conn, &sql, &binds, "querying facts by predicate")
     }
 
-    /// Head revisions — open and closed — ordered by `valid_from` ascending
-    /// with unknown starts last, then by record time. Capped at 500 rows.
+    /// Head revisions — open and closed — ordered by `valid_from`
+    /// ascending, with `NULL` ("valid since unknown") first, then by record
+    /// time, then by id so the order is total. Capped at 500 rows.
     ///
     /// # Errors
     /// `Error::Validation { field: "entity" }` if `entity` does not
@@ -415,7 +416,10 @@ impl Store {
             sql.push_str(&side);
             binds.extend(side_binds);
         }
-        sql.push_str(" ORDER BY f.valid_from IS NULL, f.valid_from ASC, f.recorded_at ASC LIMIT ");
+        sql.push_str(
+            " ORDER BY f.valid_from IS NOT NULL, f.valid_from ASC, \
+             f.recorded_at ASC, f.id ASC LIMIT ",
+        );
         sql.push_str(&TIMELINE_LIMIT.to_string());
         let facts = select_facts(&conn, &sql, &binds, "reading timeline")?;
         drop(conn);
