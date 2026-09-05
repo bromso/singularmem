@@ -1,6 +1,7 @@
 //! The library's error type. Each variant carries the three pieces Principle VII
 //! requires: what failed, what was attempted, what state was preserved.
 
+use crate::id::FactId;
 use crate::item::ItemId;
 
 /// Result alias used throughout the library.
@@ -31,6 +32,27 @@ pub enum Error {
     NotFound {
         /// The ID that was looked up.
         id: ItemId,
+    },
+
+    /// `invalidate_fact`/`supersede_fact` found no open head for the given
+    /// triple. Nothing was written. (`supersede_fact` tolerates this for the
+    /// old fact and reports `old: None` instead.)
+    #[error("no open fact {subject} —{predicate}→ {object}; nothing changed")]
+    FactNotFound {
+        /// Subject as the caller wrote it.
+        subject: String,
+        /// Predicate as the caller wrote it.
+        predicate: String,
+        /// Object as the caller wrote it (entity name or literal value).
+        object: String,
+    },
+
+    /// A fact id was looked up (`get_fact`, `fact_history`) and does not
+    /// exist in the store.
+    #[error("fact {id} not found")]
+    FactIdNotFound {
+        /// The fact id that was looked up.
+        id: FactId,
     },
 
     /// `latest_revision` walked forward from an item and found multiple
