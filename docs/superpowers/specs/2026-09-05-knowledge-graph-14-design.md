@@ -242,7 +242,7 @@ singularmem graph supersede  <SUBJECT> <PREDICATE> <OLD> <NEW> [--value] [--at T
 singularmem graph timeline [ENTITY] [--scope ...] [--json]
 singularmem graph stats [--scope ...] [--json]
 singularmem graph entities [--kind K] [--scope ...] [--json]
-singularmem graph history <FACT_ID> [--json]
+singularmem graph history <FACT_ID> [--format table|ids|json] [--json]  # --json is shorthand for --format json; conflicts with an explicit --format
 ```
 
 Human output, one fact per line: `<fact id>  <subject> —<predicate>→ <object>  [<valid_from>, <valid_to>)  conf=0.9  scope=…  src=<item>` with `open` for a null `valid_to`. Exit codes: 0; 1 usage/validation; 2 `NotFound` or read-only; 3 unsupported format.

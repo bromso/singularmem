@@ -3,26 +3,29 @@ Record a fact: SUBJECT PREDICATE OBJECT (entities are created on demand)
 Usage: singularmem graph add [OPTIONS] <SUBJECT> <PREDICATE> <OBJECT>
 
 Arguments:
-  <SUBJECT>    
-  <PREDICATE>  
-  <OBJECT>     
+  <SUBJECT>    The fact's subject entity name
+  <PREDICATE>  Normalised predicate, e.g. `uses`
+  <OBJECT>     The fact's object: an entity name, or a literal value with `--value`
 
 Options:
       --store <PATH>                 Path to the `SQLite` store file. Defaults to the per-user XDG
                                      data dir. Also settable via the `SINGULARMEM_STORE` environment
                                      variable — the only way to point a hook (which runs with a
                                      fixed, flag-less command line) at a non-default store
-      --value                        OBJECT is a literal value, not an entity
+      --value                        Treat OBJECT as a literal value, not an entity
       --read-only                    Open the store in read-only mode (refuses ingest)
-      --subject-kind <SUBJECT_KIND>  
+      --subject-kind <SUBJECT_KIND>  Kind to set on SUBJECT if it is newly created by this call
       --no-index                     Skip wiring up the Tantivy hook on open. Use for storage-only
                                      operations that don't need search, or when the Tantivy
                                      directory is intentionally absent
-      --object-kind <OBJECT_KIND>    
-      --from <TS>                    
-      --to <TS>                      
-      --confidence <CONFIDENCE>      [default: 1]
-      --source <ITEM_ID>             
-      --scope <PATH>                 
-      --json                         
+      --object-kind <OBJECT_KIND>    Kind to set on OBJECT if it is newly created by this call
+                                     (ignored with `--value`)
+      --from <TS>                    Start of the validity window (`YYYY-MM-DD` or RFC 3339);
+                                     omitted means "since unknown"
+      --to <TS>                      End of the validity window (`YYYY-MM-DD` or RFC 3339); omitted
+                                     means "still valid"
+      --confidence <CONFIDENCE>      Confidence in the fact, in the range 0..1 [default: 1]
+      --source <ITEM_ID>             Item ID this fact was extracted from
+      --scope <PATH>                 Scope of the fact
+      --json                         Print the full Fact as JSON instead of just its id
   -h, --help                         Print help

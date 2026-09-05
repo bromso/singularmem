@@ -94,6 +94,12 @@ pub(crate) enum CliError {
     Json(#[from] serde_json::Error),
     #[error("invalid item ID: {0}")]
     InvalidId(#[from] ulid::DecodeError),
+    /// A `graph history` `FACT_ID` argument did not parse as a ULID.
+    /// Distinct from [`CliError::InvalidId`] (used for `--source`/`ItemId`
+    /// parsing) since both wrap the same underlying `ulid::DecodeError` type
+    /// and only one `#[from]` impl can exist for it.
+    #[error("invalid fact ID: {0}")]
+    InvalidFactId(ulid::DecodeError),
     #[error("could not open Tantivy index: {0}")]
     IndexOpen(String),
     #[error("{0}")]

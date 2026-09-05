@@ -10,7 +10,7 @@ Options:
                       non-default store
       --read-only     Open the store in read-only mode (refuses ingest)
       --scope-exact   With --scope: match only that exact scope, not descendants
-      --json          
+      --json          Print counts as JSON instead of plain text
       --no-index      Skip wiring up the Tantivy hook on open. Use for storage-only operations that
                       don't need search, or when the Tantivy directory is intentionally absent
   -h, --help          Print help
