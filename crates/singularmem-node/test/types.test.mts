@@ -14,6 +14,20 @@ import {
   type RetrieveOptions,
   type MemoryBlock,
   type RetrievedContext,
+  type EntityRef,
+  type Fact,
+  type FactObject,
+  type NewFact,
+  type GraphQueryOptions,
+  type FactChangeOptions,
+  type GraphScopeOptions,
+  type EntityListOptions,
+  type TimelineEntry,
+  type GraphStats,
+  type EntitySummary,
+  type SupersedeResult,
+  type WakeupOptions,
+  type Wakeup,
 } from '../index.js';
 
 // 5a — StoreOptions, ListOptions, Item, Store methods (unchanged from 5a)
@@ -112,11 +126,125 @@ async function _ingestCheck(s: Store): Promise<void> {
   const _y: Item = await s.ingest(full);
 }
 
+
+// 16 — knowledge graph (sub-project 16, Task 4).
+// napi renders `Option<T>` as an optional property, so absent values are
+// `undefined` rather than `null` (same convention as `Item.supersedes`).
+declare const fact: Fact;
+const _factId: string = fact.id;
+const _factSubject: EntityRef = fact.subject;
+const _factSubjectId: string = fact.subject.id;
+const _factPredicate: string = fact.predicate;
+const _factObject: FactObject = fact.object;
+const _factObjectEntity: EntityRef | undefined = fact.object.entity;
+const _factObjectValue: string | undefined = fact.object.value;
+const _factValidFrom: string | undefined = fact.validFrom;
+const _factValidTo: string | undefined = fact.validTo;
+const _factConfidence: number = fact.confidence;
+const _factSourceItemId: string | undefined = fact.sourceItemId;
+const _factScope: string | undefined = fact.scope;
+const _factSupersedes: string | undefined = fact.supersedes;
+const _factRecordedAt: string = fact.recordedAt;
+
+const newFactMinimal: NewFact = { subject: 'A', predicate: 'uses', object: 'B' };
+const newFactFull: NewFact = {
+  subject: 'A',
+  predicate: 'uses',
+  object: 'literal',
+  objectIsValue: true,
+  subjectKind: 'project',
+  objectKind: 'library',
+  validFrom: '2026-05-16',
+  validTo: '2026-09-01T00:00:00Z',
+  confidence: 0.5,
+  sourceItemId: '01H...',
+  scope: 'team/backend',
+};
+
+const graphQueryOpts: GraphQueryOptions = {
+  direction: 'incoming',
+  asOf: '2026-06-01',
+  recordedAt: '2026-06-01',
+  scope: 'team',
+  scopeExact: true,
+};
+const graphQueryOptsEmpty: GraphQueryOptions = {};
+const factChangeOpts: FactChangeOptions = { objectIsValue: true, at: '2026-09-01', scope: 'team' };
+const factChangeOptsEmpty: FactChangeOptions = {};
+const graphScopeOpts: GraphScopeOptions = { scope: 'team', scopeExact: false };
+const entityListOpts: EntityListOptions = { kind: 'library', scope: 'team', scopeExact: false };
+
+declare const entry: TimelineEntry;
+const _entryFact: Fact = entry.fact;
+const _entryCurrent: boolean = entry.current;
+
+declare const stats: GraphStats;
+const _statsEntities: number = stats.entities;
+const _statsOpen: number = stats.openFacts;
+const _statsClosed: number = stats.closedFacts;
+const _statsPredicates: number = stats.predicates;
+
+declare const summary: EntitySummary;
+const _summaryId: string = summary.id;
+const _summaryName: string = summary.name;
+const _summaryKind: string | undefined = summary.kind;
+const _summaryFactCount: number = summary.factCount;
+
+declare const superseded: SupersedeResult;
+const _supersededClosed: Fact | undefined = superseded.closed;
+const _supersededOpened: Fact = superseded.opened;
+
+// 16 — wake-up (sub-project 16, Task 5).
+const wakeupOpts: WakeupOptions = {
+  project: '/tmp/proj',
+  includeFiles: true,
+  limit: 20,
+  maxBytes: 8192,
+  adapter: 'plain',
+};
+const wakeupOptsEmpty: WakeupOptions = {};
+
+declare const wakeup: Wakeup;
+const _wakeupText: string = wakeup.text;
+const _wakeupTotal: number = wakeup.total;
+const _wakeupShown: number = wakeup.shown;
+const _wakeupScopes: string[] = wakeup.scopes;
+
+async function _wakeupCheck(s: Store): Promise<void> {
+  const _w: Wakeup = await s.wakeup();
+  const _w2: Wakeup = await s.wakeup(wakeupOpts);
+  const _w3: Wakeup = await s.wakeup(wakeupOptsEmpty);
+}
+
+async function _graphCheck(s: Store): Promise<void> {
+  const _added: Fact = await s.addFact(newFactMinimal);
+  const _added2: Fact = await s.addFact(newFactFull);
+  const _byEntity: Fact[] = await s.queryEntity('A');
+  const _byEntity2: Fact[] = await s.queryEntity('A', graphQueryOpts);
+  const _byPredicate: Fact[] = await s.queryPredicate('uses');
+  const _byPredicate2: Fact[] = await s.queryPredicate('uses', graphQueryOptsEmpty);
+  const _closed: Fact = await s.invalidateFact('A', 'uses', 'B');
+  const _closed2: Fact = await s.invalidateFact('A', 'uses', 'B', factChangeOpts);
+  const _sup: SupersedeResult = await s.supersedeFact('A', 'uses', 'B', 'C');
+  const _sup2: SupersedeResult = await s.supersedeFact('A', 'uses', 'B', 'C', factChangeOptsEmpty);
+  const _tl: TimelineEntry[] = await s.timeline();
+  const _tl2: TimelineEntry[] = await s.timeline('A', graphScopeOpts);
+  const _st: GraphStats = await s.graphStats();
+  const _st2: GraphStats = await s.graphStats(graphScopeOpts);
+  const _ents: EntitySummary[] = await s.entities();
+  const _ents2: EntitySummary[] = await s.entities(entityListOpts);
+  const _hist: Fact[] = await s.factHistory('01H...');
+}
+
 void [
-  _check, _openCheck, _ingestCheck,
+  _check, _openCheck, _ingestCheck, _graphCheck, _wakeupCheck,
   opts, opts2, listOpts, listOpts2,
   searchOpts, searchOptsEmpty, retrieveOpts, retrieveOptsEmpty,
   _formattedPlain, _formattedClaude, _formattedOpenAi, _formattedGemini,
   _adapterPlainName, _adapterClaudeName, _adapterOpenAiName, _adapterGeminiName,
   minimal, full,
+  newFactMinimal, newFactFull, graphQueryOpts, graphQueryOptsEmpty,
+  factChangeOpts, factChangeOptsEmpty, graphScopeOpts, entityListOpts,
+  wakeupOpts, wakeupOptsEmpty,
+  _wakeupText, _wakeupTotal, _wakeupShown, _wakeupScopes,
 ];

@@ -8,23 +8,26 @@ use std::sync::Arc;
 
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
+        Implementation, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+        ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
     transport::stdio,
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::tools::{
-    handle_memory_get, handle_memory_graph_add, handle_memory_graph_invalidate,
-    handle_memory_graph_query, handle_memory_graph_stats, handle_memory_graph_supersede,
-    handle_memory_graph_timeline, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryGraphAddArgs,
-    MemoryGraphInvalidateArgs, MemoryGraphQueryArgs, MemoryGraphStatsArgs,
-    MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs, MemoryIngestArgs, MemoryListArgs,
-    MemoryRetrieveArgs, MemoryRevisionsArgs,
+    handle_memory_get, handle_memory_graph_add, handle_memory_graph_entities,
+    handle_memory_graph_history, handle_memory_graph_invalidate, handle_memory_graph_query,
+    handle_memory_graph_stats, handle_memory_graph_supersede, handle_memory_graph_timeline,
+    handle_memory_ingest, handle_memory_list, handle_memory_retrieve, handle_memory_revisions,
+    handle_memory_scopes, handle_memory_wakeup, MemoryGetArgs, MemoryGraphAddArgs,
+    MemoryGraphEntitiesArgs, MemoryGraphHistoryArgs, MemoryGraphInvalidateArgs,
+    MemoryGraphQueryArgs, MemoryGraphStatsArgs, MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs,
+    MemoryIngestArgs, MemoryListArgs, MemoryRetrieveArgs, MemoryRevisionsArgs, MemoryWakeupArgs,
 };
 use crate::{Config, Error, Result};
 
@@ -72,6 +75,12 @@ fn map_graph_read_error(err: Error) -> McpError {
     match err {
         Error::Core(singularmem_core::Error::Validation { field, reason }) => {
             McpError::invalid_params(format!("{field}: {reason}"), None)
+        }
+        Error::Core(singularmem_core::Error::FactIdNotFound { id }) => {
+            McpError::invalid_params(format!("fact {id} not found"), None)
+        }
+        Error::Core(singularmem_core::Error::InvalidId(e)) => {
+            McpError::invalid_params(format!("invalid fact ID: {e}"), None)
         }
         other => McpError::internal_error(other.to_string(), None),
     }
@@ -137,6 +146,64 @@ fn dispatch_memory_graph_stats(
         .map_err(map_graph_read_error)
 }
 
+fn dispatch_memory_graph_entities(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphEntitiesArgs = parse_call_args(arguments, "memory_graph_entities")?;
+    handle_memory_graph_entities(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+fn dispatch_memory_graph_history(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryGraphHistoryArgs = parse_call_args(arguments, "memory_graph_history")?;
+    handle_memory_graph_history(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_graph_read_error)
+}
+
+/// Map a `memory_wakeup` / `wake-up` prompt error to an MCP error.
+fn map_wakeup_error(err: Error) -> McpError {
+    match err {
+        Error::InvalidProject(p) => {
+            McpError::invalid_params(format!("project {p} is not a directory"), None)
+        }
+        Error::NoProject(reason) => McpError::invalid_params(
+            format!("cannot determine a project directory: {reason}"),
+            None,
+        ),
+        Error::UnknownAdapter(name) => McpError::invalid_params(
+            format!("unknown adapter '{name}'; known adapters: plain, claude, openai, gemini"),
+            None,
+        ),
+        other => McpError::internal_error(other.to_string(), None),
+    }
+}
+
+/// Map a `resources/read` error to an MCP error.
+fn map_resource_error(err: crate::resources::ResourceError) -> McpError {
+    match err {
+        crate::resources::ResourceError::NotFound(uri) => {
+            McpError::resource_not_found(format!("resource not found: {uri}"), None)
+        }
+        crate::resources::ResourceError::Other(e) => McpError::internal_error(e.to_string(), None),
+    }
+}
+
+fn dispatch_memory_wakeup(
+    config: &Config,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<CallToolResult, McpError> {
+    let args: MemoryWakeupArgs = parse_call_args(arguments, "memory_wakeup")?;
+    handle_memory_wakeup(&args, config)
+        .map(|out| CallToolResult::success(vec![Content::text(out.text)]))
+        .map_err(map_wakeup_error)
+}
+
 /// MCP server handler for Singularmem.
 ///
 /// Implements `list_tools` (returning the `memory_retrieve` descriptor) and
@@ -190,7 +257,8 @@ impl SingularmemServer {
             "Retrieve memories from the user's local Singularmem store that are relevant to a \
              query. Returns formatted context the model can use to ground its response. \
              Memories are private to this user and stored locally. For current facts (who \
-             owns what, which tool is used), call `memory_graph_query` first.",
+             owns what, which tool is used), call `memory_graph_query` first. \
+             For a session's opening context, call `memory_wakeup` instead.",
             schema_obj,
         )
     }
@@ -198,9 +266,17 @@ impl SingularmemServer {
 
 impl ServerHandler for SingularmemServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new("singularmem-mcp", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(Implementation::new(
+            "singularmem-mcp",
+            env!("CARGO_PKG_VERSION"),
+        ))
     }
 
     fn list_tools(
@@ -216,9 +292,12 @@ impl ServerHandler for SingularmemServer {
             crate::tools::list::tool_descriptor(),
             crate::tools::revisions::tool_descriptor(),
             crate::tools::scopes::tool_descriptor(),
+            crate::tools::wakeup::tool_descriptor(),
             crate::tools::graph::tool_descriptor_query(),
             crate::tools::graph::tool_descriptor_timeline(),
             crate::tools::graph::tool_descriptor_stats(),
+            crate::tools::graph::tool_descriptor_entities(),
+            crate::tools::graph::tool_descriptor_history(),
         ];
         if !self.config.read_only {
             tools.push(crate::tools::ingest::tool_descriptor());
@@ -388,10 +467,91 @@ impl ServerHandler for SingularmemServer {
             "memory_graph_supersede" => dispatch_memory_graph_supersede(&config, request.arguments),
             "memory_graph_timeline" => dispatch_memory_graph_timeline(&config, request.arguments),
             "memory_graph_stats" => dispatch_memory_graph_stats(&config, request.arguments),
+            "memory_graph_entities" => dispatch_memory_graph_entities(&config, request.arguments),
+            "memory_graph_history" => dispatch_memory_graph_history(&config, request.arguments),
+            "memory_wakeup" => dispatch_memory_wakeup(&config, request.arguments),
             _other => Err(McpError::method_not_found::<
                 rmcp::model::CallToolRequestMethod,
             >()),
         })
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListPromptsResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        std::future::ready(Ok(
+            ListPromptsResult::with_all_items(crate::prompts::list()),
+        ))
+    }
+
+    fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<GetPromptResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let config = Arc::clone(&self.config);
+        std::future::ready(if request.name == crate::prompts::WAKE_UP {
+            match request.arguments.as_ref().and_then(|m| m.get("project")) {
+                None => crate::prompts::get(&config, None).map_err(map_wakeup_error),
+                Some(Value::String(s)) => {
+                    crate::prompts::get(&config, Some(s.as_str())).map_err(map_wakeup_error)
+                }
+                Some(_) => Err(McpError::invalid_params(
+                    "prompt argument 'project' must be a string",
+                    None,
+                )),
+            }
+        } else {
+            Err(McpError::invalid_params(
+                format!("prompt not found: {}", request.name),
+                None,
+            ))
+        })
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListResourcesResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        // Enumerating a store is not a browsing experience: memories are
+        // reached by ID (via `memory_get`/`memory_retrieve`/`memory_list`),
+        // not by listing every item as a resource. `resources/list` stays
+        // empty by design; only the template is advertised.
+        std::future::ready(Ok(ListResourcesResult::default()))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ListResourceTemplatesResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
+            crate::resources::template(),
+        ])))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = std::result::Result<ReadResourceResult, McpError>>
+           + rmcp::service::MaybeSendFuture
+           + '_ {
+        let config = Arc::clone(&self.config);
+        std::future::ready(
+            crate::resources::read(&config, &request.uri).map_err(map_resource_error),
+        )
     }
 }
 
@@ -412,4 +572,38 @@ pub async fn serve(config: Config) -> Result<()> {
     service.waiting().await.map_err(std::io::Error::other)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::ErrorCode;
+
+    #[test]
+    fn map_wakeup_error_no_project_is_invalid_params_and_names_the_reason() {
+        let err = map_wakeup_error(Error::NoProject("some io error".to_string()));
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.contains("cannot determine a project directory"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("some io error"), "{}", err.message);
+    }
+
+    #[test]
+    fn map_resource_error_not_found_is_resource_not_found() {
+        let err = map_resource_error(crate::resources::ResourceError::NotFound(
+            "nope".to_string(),
+        ));
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+    }
+
+    #[test]
+    fn map_resource_error_other_is_internal_error() {
+        let err = map_resource_error(crate::resources::ResourceError::Other(
+            Error::UnknownAdapter("gpt".to_string()),
+        ));
+        assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
+    }
 }

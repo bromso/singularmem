@@ -406,7 +406,7 @@ impl SearchMode {
 ///
 /// Returns a `NapiError<&'static str>` with code `"Validation"` if `scope`
 /// is set but fails `singularmem_core::scope::validate`.
-fn scope_filter(
+pub fn scope_filter(
     scope: Option<String>,
     exact: Option<bool>,
 ) -> Result<Option<ScopeFilter>, NapiError<&'static str>> {

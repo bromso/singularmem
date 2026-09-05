@@ -11,7 +11,8 @@ a stable, vendor-neutral interface.
 > store, hybrid search (Tantivy + USearch), provider adapters, MCP server,
 > TypeScript SDK, bulk transcript ingestion, hierarchical item scoping,
 > an append-only entity/fact graph with point-in-time queries, and a
-> LongMemEval retrieval benchmark (`singularmem-bench`).
+> LongMemEval retrieval benchmark (`singularmem-bench`), MCP wake-up and
+> resources, and the graph API in the TypeScript SDK.
 > Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core

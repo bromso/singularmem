@@ -6,6 +6,8 @@
 
 pub mod config;
 pub mod error;
+pub mod prompts;
+pub mod resources;
 pub mod server;
 pub mod tools;
 
@@ -16,9 +18,10 @@ pub use crate::tools::{
     handle_memory_get, handle_memory_graph_add, handle_memory_graph_invalidate,
     handle_memory_graph_query, handle_memory_graph_stats, handle_memory_graph_supersede,
     handle_memory_graph_timeline, handle_memory_ingest, handle_memory_list, handle_memory_retrieve,
-    handle_memory_revisions, handle_memory_scopes, MemoryGetArgs, MemoryGetOutput,
-    MemoryGraphAddArgs, MemoryGraphInvalidateArgs, MemoryGraphOutput, MemoryGraphQueryArgs,
-    MemoryGraphStatsArgs, MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs, MemoryIngestArgs,
-    MemoryIngestOutput, MemoryListArgs, MemoryListOutput, MemoryRetrieveArgs, MemoryRetrieveOutput,
-    MemoryRevisionsArgs, MemoryRevisionsOutput, MemoryScopesOutput,
+    handle_memory_revisions, handle_memory_scopes, handle_memory_wakeup, MemoryGetArgs,
+    MemoryGetOutput, MemoryGraphAddArgs, MemoryGraphInvalidateArgs, MemoryGraphOutput,
+    MemoryGraphQueryArgs, MemoryGraphStatsArgs, MemoryGraphSupersedeArgs, MemoryGraphTimelineArgs,
+    MemoryIngestArgs, MemoryIngestOutput, MemoryListArgs, MemoryListOutput, MemoryRetrieveArgs,
+    MemoryRetrieveOutput, MemoryRevisionsArgs, MemoryRevisionsOutput, MemoryScopesOutput,
+    MemoryWakeupArgs, MemoryWakeupOutput,
 };

@@ -44,4 +44,14 @@ pub enum Error {
         /// Why it was rejected.
         reason: String,
     },
+
+    /// `memory_wakeup` / `wake-up` project argument is not a directory.
+    #[error("project {0} is not a directory")]
+    InvalidProject(String),
+
+    /// No `project` argument, no server `--project`, and
+    /// `std::env::current_dir()` failed — there is no directory left to
+    /// fall back to.
+    #[error("cannot determine a project directory: {0}")]
+    NoProject(String),
 }

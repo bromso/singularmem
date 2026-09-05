@@ -110,11 +110,11 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     );
 
-    // tools/list should return 8 tools (5 original readers + memory_ingest's
-    // 3 graph-reader siblings; memory_ingest / memory_graph_add /
-    // memory_graph_invalidate / memory_graph_supersede stay hidden — spec
-    // acceptance criterion: "six memory_graph_* tools normally and three in
-    // read-only mode").
+    // tools/list should return 11 tools (5 original readers + memory_wakeup +
+    // memory_ingest's 5 graph-reader siblings; memory_ingest /
+    // memory_graph_add / memory_graph_invalidate / memory_graph_supersede
+    // stay hidden — spec acceptance criterion: "eight memory_graph_* tools
+    // normally and five in read-only mode").
     send(
         &mut stdin,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
@@ -123,8 +123,8 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        8,
-        "expected 8 tools in read-only mode, got: {tools:?}"
+        11,
+        "expected 11 tools in read-only mode, got: {tools:?}"
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
@@ -148,6 +148,10 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
         "memory_scopes should be listed in read-only mode: {names:?}"
     );
     assert!(
+        names.contains(&"memory_wakeup"),
+        "memory_wakeup should be listed in read-only mode: {names:?}"
+    );
+    assert!(
         names.contains(&"memory_graph_query"),
         "memory_graph_query should be listed in read-only mode: {names:?}"
     );
@@ -158,6 +162,14 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     assert!(
         names.contains(&"memory_graph_stats"),
         "memory_graph_stats should be listed in read-only mode: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_graph_entities"),
+        "memory_graph_entities should be listed in read-only mode: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_graph_history"),
+        "memory_graph_history should be listed in read-only mode: {names:?}"
     );
 
     // tools/call memory_ingest should be rejected.

@@ -6,11 +6,13 @@ agents). After installation, an LLM talking to one of these clients
 can call the `memory_retrieve` tool to fetch relevant memories from
 your personal Singularmem store and use them to ground its responses.
 
-**Status:** sub-project 14 — the temporal knowledge graph's `memory_graph_*`
-tools shipped alongside the original read + write tools. The server's
-tool surface matches the `singularmem` CLI's operations: retrieve,
-ingest, get, list, revisions, scopes, and now graph add/query/
-invalidate/supersede/timeline/stats. Run with `--read-only` to disable
+**Status:** sub-project 16 — the server lists 15 tools (11 with
+`--read-only`) and advertises all three MCP capabilities: tools,
+prompts (one `wake-up` prompt), and resources (one
+`singularmem://memory/{id}` template). The tool surface matches the
+`singularmem` CLI's operations: retrieve, ingest, get, list,
+revisions, scopes, wake-up, and graph add/query/invalidate/supersede/
+timeline/stats/entities/history. Run with `--read-only` to disable
 `memory_ingest` and the three graph writers for shared-memory
 deployments.
 
@@ -71,6 +73,31 @@ You should see a JSON response containing `"name":"singularmem-mcp"`.
 Adjust `SINGULARMEM_DEFAULT_ADAPTER` to the format that matches your
 client's LLM (`plain`, `claude`, `openai`, or `gemini`). The default
 when omitted is `plain`.
+
+### Pinning a default project for wake-up
+
+Set `SINGULARMEM_PROJECT` so `memory_wakeup` and the `wake-up` prompt
+default to a specific checkout without every call passing `project`
+— useful when the server runs outside the repo it should wake up for
+(e.g. launched from a client's own working directory):
+
+```json
+{
+  "mcpServers": {
+    "singularmem": {
+      "command": "singularmem-mcp",
+      "args": [],
+      "env": {
+        "SINGULARMEM_STORE": "/Users/YOU/Library/Application Support/singularmem/store.db",
+        "SINGULARMEM_PROJECT": "/path/to/repo"
+      }
+    }
+  }
+}
+```
+
+Without `SINGULARMEM_PROJECT` (or a per-call `project` argument), the
+server falls back to its own working directory.
 
 ## Available tools
 
@@ -218,6 +245,49 @@ work/notes	5
 
 If the store has no scoped items, the response is
 `No scopes (all items are unscoped).`
+
+### `memory_wakeup`
+
+Loads the project's recent memory — the same context the editor hooks
+inject at session start. Call this at the start of a session; prefer
+`memory_retrieve` for a specific question.
+
+**Arguments:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `project` | string | no | server `--project`, else its cwd | Directory whose scopes to read. |
+| `include_files` | boolean | no | `false` | Also include `files/<basename>` items (ingest-dir output). |
+| `limit` | integer | no | 20 | Most recent items to consider. |
+| `max_bytes` | integer | no | 8192 | Output budget in bytes; oldest blocks are dropped first. |
+| `adapter` | enum string | no | server default | One of `plain`, `claude`, `openai`, `gemini`. |
+
+An empty project is not an error — the output reports `0 items,
+showing last 0` and nothing follows.
+
+**Example response:**
+
+```
+# Singularmem wake-up — claude-code/myproj, codex/myproj, cursor/myproj — 2 items, showing last 2
+# 2 memories for query: "wake-up:claude-code/myproj,codex/myproj,cursor/myproj"
+
+## memory 1 (score=0.0000)
+id: 01M1S3F0Q8W1J8Z5N0V4K2X9YB
+created: 2026-09-05T18:37:03.363997Z
+
+alpha decision
+---
+
+## memory 2 (score=0.0000)
+id: 01M1S3F0QAQ4T7H6M2C8D1R5ZE
+created: 2026-09-05T18:37:03.401212Z
+
+beta decision
+---
+```
+
+(The body after the first line is the adapter's own rendering; `plain`
+shown here.)
 
 ### `memory_graph_add`
 
@@ -375,9 +445,98 @@ closed facts: 1
 predicates: 1
 ```
 
+### `memory_graph_entities`
+
+Lists entities in the knowledge graph, optionally filtered by `kind`
+and/or `scope`. One line per entity, name ascending.
+
+**Arguments:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `kind` | string | no | (none) | Restrict to entities of this kind. |
+| `scope` | string | no | (none) | Restrict to entities with at least one fact in this scope path and its descendants. |
+| `scope_exact` | boolean | no | `false` | Match only the exact scope given in `scope`. |
+
+**Example response:**
+
+```
+01ARZ3NDEKTSV4RRFFQ69G5FAV	singularmem	tool	3
+01BX5ZZKBKACTAV9WEVGEMMVRZ	tantivy	library	1
+```
+
+Tab-separated: id, name, kind (`-` when absent), fact count. With no
+matching entities, the response is `No entities.`.
+
+### `memory_graph_history`
+
+Walks one fact's revision chain, oldest first — every closing and
+reopening that led to its current state.
+
+**Arguments:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `fact_id` | string | yes | — | ULID of the fact whose revision chain to show. |
+
+**Example response:**
+
+```
+01BX5ZZKBKACTAV9WEVGEMMVRZ  singularmem —uses→ tantivy  [?, 2026-06-01T00:00:00Z)  conf=1.00  scope=-  src=-
+01CW8BZ7FQRJM4HCVCV9ABCDEF  singularmem —uses→ meilisearch  [2026-06-01T00:00:00Z, open)  conf=1.00  scope=-  src=-
+```
+
+An unknown or malformed `fact_id` is an invalid-params error.
+
+## Prompts
+
+### `wake-up`
+
+Wraps `memory_wakeup` as a one-click MCP prompt: "recent memory for
+the current project, ready to paste into context."
+
+**Arguments:**
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `project` | string | no | server `--project`, else its cwd | Project directory. |
+
+`prompts/get` returns a single `user` message whose text is exactly
+the `memory_wakeup` output for that project, with every other option
+(`include_files`, `limit`, `max_bytes`, `adapter`) at its default.
+
+## Resources
+
+### `singularmem://memory/{id}`
+
+A read-only view of one memory, addressed by its ULID. Advertised via
+`resources/templates/list`; `resources/list` itself always returns an
+empty list — a memory store is not a browsing experience, so reach a
+memory by ID first (`memory_get`, `memory_retrieve`, or
+`memory_list`), then read it as a resource if your client wants it
+attached to the conversation rather than returned as a tool result.
+
+`resources/read` for `singularmem://memory/<ulid>` returns one
+`text/plain` contents entry:
+
+```
+id: 01ARZ3NDEKTSV4RRFFQ69G5FAV
+created_at: 2026-05-18T14:30:00Z
+scope: claude-code/myproj
+source: -
+tags: fox, animals
+
+the quick brown fox jumps over the lazy dog
+```
+
+Any other URI scheme, a malformed ULID, or a well-formed ULID with no
+matching item all return the MCP `resource_not_found` error, naming
+the requested URI. Read-only mode changes nothing here — resources are
+always readable.
+
 ## Configuration
 
-All three CLI flags have env-var equivalents:
+All CLI flags have env-var equivalents:
 
 | Flag | Env var | Default |
 |---|---|---|
@@ -385,6 +544,10 @@ All three CLI flags have env-var equivalents:
 | `--default-adapter <NAME>` | `SINGULARMEM_DEFAULT_ADAPTER` | `plain` |
 | `--log-level <LEVEL>` | `RUST_LOG` | `info` |
 | `--read-only` | `SINGULARMEM_READ_ONLY` | `false` |
+| `--project <DIR>` | `SINGULARMEM_PROJECT` | server's working directory |
+
+`--project` sets the default project directory for `memory_wakeup`
+and the `wake-up` prompt when a call omits `project`.
 
 Precedence: per-call tool argument > CLI flag > env var > built-in
 default.
@@ -414,15 +577,13 @@ default.
 ## What's coming next
 
 The MCP server's tool surface covers items and, as of sub-project 14,
-the temporal knowledge graph. Future MCP work will likely live in
-separate sub-projects:
+the temporal knowledge graph; sub-project 16 added wake-up (tool +
+prompt), the two remaining graph readers, and the
+`singularmem://memory/{id}` resource. Future MCP work will likely
+live in separate sub-projects:
 
 - **HTTP / SSE transport** (in addition to stdio) for remote MCP
   deployments.
-- **MCP resources** — read-only URIs for individual memories
-  (`singularmem://memory/<id>`).
-- **MCP prompts** — pre-baked prompts that incorporate retrieved
-  memory for one-click "ask Singularmem about X" workflows.
 
 ## License
 

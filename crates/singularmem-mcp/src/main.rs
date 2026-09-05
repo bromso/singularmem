@@ -7,9 +7,10 @@
 //! constitution names the MCP server as an open-core deliverable
 //! (Open / Closed Split, line 245).
 //!
-//! Sub-project 4a ships the foundation + one read tool
-//! (`memory_retrieve`). Sub-project 4b will add `memory_ingest` and
-//! utility tools.
+//! As of sub-project 16, the server exposes 15 tools (11 in
+//! `--read-only` mode): the original read/write memory tools, eight
+//! `memory_graph_*` knowledge-graph tools, and `memory_wakeup`, plus a
+//! `wake-up` prompt and a `singularmem://memory/{id}` resource template.
 //!
 //! See `docs/superpowers/specs/2026-05-18-mcp-server-4a-design.md`
 //! for the design rationale.
@@ -51,6 +52,12 @@ struct Args {
     /// tools open the store with `SQLite` read-only mode.
     #[arg(long, env = "SINGULARMEM_READ_ONLY", default_value_t = false)]
     read_only: bool,
+
+    /// Default project directory for `memory_wakeup` and the `wake-up`
+    /// prompt when a call omits `project`. Falls back to the server's
+    /// working directory.
+    #[arg(long, env = "SINGULARMEM_PROJECT", value_name = "DIR")]
+    project: Option<PathBuf>,
 }
 
 /// Adapter choices recognised at startup. Mirrors the registered
@@ -133,7 +140,8 @@ async fn main() -> std::process::ExitCode {
         store_path,
         args.default_adapter.as_str().to_string(),
         args.read_only,
-    );
+    )
+    .with_project(args.project);
 
     match singularmem_mcp::serve(config).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
