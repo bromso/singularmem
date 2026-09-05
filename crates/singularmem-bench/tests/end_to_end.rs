@@ -5,6 +5,7 @@ use singularmem_bench::dataset::load;
 use singularmem_bench::metrics::{summarise, SearchMode};
 use singularmem_bench::runner::{run_question, run_question_in, RunConfig, SharedEmbedder};
 use singularmem_search::testing::MockEmbedder;
+use singularmem_search::{Embedder, Error as SearchError};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/longmemeval-mini.json")
@@ -12,6 +13,29 @@ fn fixture() -> PathBuf {
 
 fn mock() -> SharedEmbedder {
     SharedEmbedder::new(Arc::new(MockEmbedder::default()))
+}
+
+/// An [`Embedder`] whose `embed` (and therefore the default `embed_batch`)
+/// always fails, to exercise the runner's post-ingest doc-count guard: the
+/// vector index hook's `on_ingest` fails for every item, `Store::ingest_many`
+/// only logs that and swallows it, so without the guard the question would
+/// come back with empty hits and `error: None`.
+#[derive(Default)]
+struct FailingEmbedder;
+
+impl Embedder for FailingEmbedder {
+    fn dim(&self) -> usize {
+        384
+    }
+    fn model_id(&self) -> &'static str {
+        "failing-embedder@v1"
+    }
+    fn embed(&self, _content: &str) -> singularmem_search::Result<Vec<f32>> {
+        Err(SearchError::Embedding {
+            context: "test",
+            reason: "always fails".to_string(),
+        })
+    }
 }
 
 #[test]
@@ -105,7 +129,8 @@ fn a_failing_question_does_not_abort_the_batch() {
         modes: vec![SearchMode::Lexical],
         ks: vec![1],
     };
-    // Force a failure by making the temp root unwritable: point TMPDIR at a file.
+    // Force a failure by making the temp root unwritable: pass a regular
+    // file as the scratch root.
     let dir = tempfile::tempdir().unwrap();
     let not_a_dir = dir.path().join("file");
     std::fs::write(&not_a_dir, b"x").unwrap();
@@ -117,4 +142,20 @@ fn a_failing_question_does_not_abort_the_batch() {
     assert!(results.iter().all(|r| r.error.is_some()));
     let s = summarise(&results, &cfg.ks);
     assert_eq!(s.errors, 6);
+}
+
+#[test]
+fn a_broken_vector_index_hook_is_a_recorded_error_not_empty_hits() {
+    let qs = load(&fixture()).unwrap();
+    let cfg = RunConfig {
+        modes: vec![SearchMode::Semantic],
+        ks: vec![1],
+    };
+    let failing = SharedEmbedder::new(Arc::new(FailingEmbedder));
+    let r = run_question(&qs[0], &cfg, Some(&failing));
+    let err = r
+        .error
+        .expect("index hook failures must surface as an error");
+    assert!(err.contains("dropped"), "{err}");
+    assert!(r.hits.is_empty());
 }

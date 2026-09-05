@@ -122,29 +122,15 @@ fn evaluate(
     let sem_path = dir.path().join("sem");
 
     // --- ingest ---------------------------------------------------------
-    let t0 = Instant::now();
-    {
-        let mut hooks: Vec<Box<dyn IndexHook>> = vec![Box::new(
-            Index::open(&lex_path).map_err(|e| format!("opening lexical index: {e}"))?,
-        )];
-        if let Some(emb) = embedder.filter(|_| needs_embedder) {
-            hooks.push(Box::new(
-                EmbedderIndex::open(&sem_path, emb.boxed())
-                    .map_err(|e| format!("opening vector index: {e}"))?,
-            ));
-        }
-        let store = Store::open_with_hook(&store_path, Box::new(MultiHook::new(hooks)))
-            .map_err(|e| format!("opening store: {e}"))?;
-        for (session_index, session) in q.haystack.iter().enumerate() {
-            for item in items_for(q, session_index, session) {
-                store
-                    .ingest(item)
-                    .map_err(|e| format!("ingesting session {}: {e}", session.id))?;
-            }
-        }
-        // `store` (and the hooks) drop here, committing the indexes.
-    }
-    out.ingest_ms = t0.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    let (ingest_ms, n_ingested) = ingest_question(
+        q,
+        embedder,
+        needs_embedder,
+        &store_path,
+        &lex_path,
+        &sem_path,
+    )?;
+    out.ingest_ms = ingest_ms;
 
     // --- query ----------------------------------------------------------
     let store = Store::open(&store_path).map_err(|e| format!("reopening store: {e}"))?;
@@ -156,6 +142,24 @@ fn evaluate(
         ),
         None => None,
     };
+
+    // `Store::ingest`/`ingest_many` log and swallow `on_ingest`/`commit`
+    // hook failures (see `singularmem_core::ingest`), so a broken index
+    // would otherwise silently yield empty hits with `error: None`. Catch
+    // that here by checking that every ingested item actually landed in
+    // each index that is in use.
+    let lex_count = lex
+        .doc_count()
+        .map_err(|e| format!("counting lexical docs: {e}"))?;
+    let sem_count = match sem.as_ref() {
+        Some(s) => Some(
+            s.vector_index()
+                .doc_count()
+                .map_err(|e| format!("counting vector docs: {e}"))?,
+        ),
+        None => None,
+    };
+    verify_doc_counts(n_ingested, lex_count, sem_count)?;
 
     let fetch = cfg.max_k() * OVERFETCH;
     for &mode in &cfg.modes {
@@ -203,6 +207,58 @@ fn evaluate(
     Ok(())
 }
 
+/// Open the lexical (and, when needed, vector) index hooks over a fresh
+/// store at `store_path` and ingest every item across all of `q`'s haystack
+/// sessions in one [`Store::ingest_many`] call. Returns `(ingest_ms,
+/// n_ingested)`, where `ingest_ms` is timed from just after the store and
+/// hooks are open (excluding index setup) to just after ingestion returns.
+///
+/// One `ingest_many` call for the whole question, rather than one
+/// `Store::ingest` call per item: `Store::ingest` fires `on_ingest` +
+/// `commit` on the index hooks for every single item (a Tantivy commit +
+/// reader reload, and a full `USearch` save, per item), while `ingest_many`
+/// inserts all items in one `SQLite` transaction and fires the hooks'
+/// `on_ingest` + `commit` once at the end — the difference between ~90
+/// ms/item and one hook commit per question.
+fn ingest_question(
+    q: &Question,
+    embedder: Option<&SharedEmbedder>,
+    needs_embedder: bool,
+    store_path: &Path,
+    lex_path: &Path,
+    sem_path: &Path,
+) -> Result<(u64, usize), String> {
+    let mut hooks: Vec<Box<dyn IndexHook>> = vec![Box::new(
+        Index::open(lex_path).map_err(|e| format!("opening lexical index: {e}"))?,
+    )];
+    if let Some(emb) = embedder.filter(|_| needs_embedder) {
+        hooks.push(Box::new(
+            EmbedderIndex::open(sem_path, emb.boxed())
+                .map_err(|e| format!("opening vector index: {e}"))?,
+        ));
+    }
+    let store = Store::open_with_hook(store_path, Box::new(MultiHook::new(hooks)))
+        .map_err(|e| format!("opening store: {e}"))?;
+
+    // Start the clock after the store and hooks are open: `ingest_ms` is
+    // meant to measure ingestion throughput, not index setup.
+    let t0 = Instant::now();
+    let items: Vec<NewItem> = q
+        .haystack
+        .iter()
+        .enumerate()
+        .flat_map(|(session_index, session)| items_for(q, session_index, session))
+        .collect();
+    let n_ingested = items.len();
+    store
+        .ingest_many(items)
+        .map_err(|e| format!("ingesting: {e}"))?;
+    let ingest_ms = t0.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    // `store` (and the hooks) drop here, closing the SQLite connection so
+    // the indexes can be reopened cleanly for querying.
+    Ok((ingest_ms, n_ingested))
+}
+
 fn items_for(q: &Question, session_index: usize, session: &Session) -> Vec<NewItem> {
     let mut items = Vec::new();
     for (turn, t) in session.turns.iter().enumerate() {
@@ -237,6 +293,63 @@ fn items_for(q: &Question, session_index: usize, session: &Session) -> Vec<NewIt
 
 fn session_index_from_tags(tags: &[String]) -> Option<usize> {
     tags.iter()
-        .find_map(|t| t.strip_prefix(SESSION_TAG_PREFIX))
-        .and_then(|n| n.parse().ok())
+        .filter_map(|t| t.strip_prefix(SESSION_TAG_PREFIX))
+        .find_map(|n| n.parse().ok())
+}
+
+/// Verify that every item ingested for this question actually landed in
+/// each index hook that is in use. `Store::ingest`/`ingest_many` only log
+/// (`tracing::warn!`) an `on_ingest`/`commit` hook failure and otherwise
+/// swallow it, so a broken index hook would otherwise silently produce
+/// empty search results with `error: None` instead of failing the
+/// question. `sem_count` is `None` when no vector index is in use.
+///
+/// # Errors
+/// Returns an error naming which index is short and by how much.
+fn verify_doc_counts(
+    n_ingested: usize,
+    lex_count: u64,
+    sem_count: Option<u64>,
+) -> Result<(), String> {
+    let n = n_ingested as u64;
+    if lex_count != n {
+        return Err(format!(
+            "index hook dropped items: lexical has {lex_count} of {n} ingested items"
+        ));
+    }
+    if let Some(sem_count) = sem_count {
+        if sem_count != n {
+            return Err(format!(
+                "index hook dropped items: vector index has {sem_count} of {n} ingested items"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_doc_counts;
+
+    #[test]
+    fn verify_doc_counts_passes_when_all_counts_match() {
+        assert!(verify_doc_counts(3, 3, None).is_ok());
+        assert!(verify_doc_counts(3, 3, Some(3)).is_ok());
+    }
+
+    #[test]
+    fn verify_doc_counts_catches_a_short_lexical_index() {
+        let err = verify_doc_counts(5, 2, None).unwrap_err();
+        assert!(err.contains("lexical"), "{err}");
+        assert!(err.contains("dropped"), "{err}");
+        assert!(err.contains("2 of 5"), "{err}");
+    }
+
+    #[test]
+    fn verify_doc_counts_catches_a_short_vector_index() {
+        let err = verify_doc_counts(5, 5, Some(1)).unwrap_err();
+        assert!(err.contains("vector index"), "{err}");
+        assert!(err.contains("dropped"), "{err}");
+        assert!(err.contains("1 of 5"), "{err}");
+    }
 }

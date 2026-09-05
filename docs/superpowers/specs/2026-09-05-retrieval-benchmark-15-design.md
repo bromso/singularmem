@@ -318,4 +318,31 @@ No test loads a real embedding model.
 
 ## Deviations
 
-None yet. Record implementation-time deviations here.
+- Ingested items use `scope: Some("longmemeval")`, not
+  `longmemeval/{question_id}`: each question gets its own throwaway store
+  under a fresh temp dir (`run_question_in`), so there is no cross-question
+  collision to guard against with a per-question scope segment.
+- `MemoryBlock` (what `Retriever::retrieve` returns) exposes `tags`, not
+  `metadata`, so the session a hit belongs to is recovered from the
+  `s:{session_index}` tag (`session_index_from_tags`) rather than from
+  `metadata.session_index`; `external_id` is likewise built from
+  `session_index` (`longmemeval:{question_id}:{session_index}:{turn}[#chunk]`).
+- `RunConfig` has no `model` field: the embedder is a runtime value
+  (`Option<&SharedEmbedder>`) passed into `run_question`/`run_question_in`,
+  not a config field, since which embedder to use is a caller concern
+  (mock in tests, a real `FastembedEmbedder` in the CLI), not part of the
+  eval configuration being measured.
+- Ingestion goes through `Store::ingest_many` (one call per question,
+  covering all haystack sessions), not a `Store::ingest` call per item.
+  `Store::ingest` fires `on_ingest` + `commit` on every index hook per
+  item (a Tantivy commit + reader reload, and a full USearch save, each
+  time — roughly 90 ms/item), which made per-question ingest dominate
+  runtime; `ingest_many` inserts all items in one SQLite transaction and
+  fires the hooks' `on_ingest` + `commit` once at the end.
+- The runner verifies index doc counts after ingest: `Store::ingest`/
+  `ingest_many` only log and swallow `on_ingest`/`commit` hook failures,
+  so a broken index would otherwise silently produce empty hits with
+  `error: None`. After reopening the lexical (and, when in use, vector)
+  index for querying, the runner checks `doc_count()` on each against the
+  number of items ingested and fails the question with an error naming
+  the mismatch if they disagree.
