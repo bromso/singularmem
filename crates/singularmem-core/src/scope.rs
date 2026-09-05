@@ -1,7 +1,7 @@
 //! Scope paths: validation, normalisation, ancestor expansion, and the
 //! filter value threaded through every read surface.
 //!
-//! Spec: `docs/formats/store-v3.md` § "Scope".
+//! Spec: `docs/formats/store-v4.md` § "Scope".
 
 use serde::{Deserialize, Serialize};
 

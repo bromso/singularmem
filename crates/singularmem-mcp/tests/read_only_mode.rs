@@ -53,6 +53,7 @@ fn seed_via_cli(store: &Path) -> String {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     let dir = TempDir::new().unwrap();
     let store = dir.path().join("store.db");
@@ -109,7 +110,11 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     );
 
-    // tools/list should return 5 tools (no memory_ingest).
+    // tools/list should return 8 tools (5 original readers + memory_ingest's
+    // 3 graph-reader siblings; memory_ingest / memory_graph_add /
+    // memory_graph_invalidate / memory_graph_supersede stay hidden — spec
+    // acceptance criterion: "six memory_graph_* tools normally and three in
+    // read-only mode").
     send(
         &mut stdin,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
@@ -118,8 +123,8 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     let tools = resp["result"]["tools"].as_array().expect("tools array");
     assert_eq!(
         tools.len(),
-        5,
-        "expected 5 tools in read-only mode, got: {tools:?}"
+        8,
+        "expected 8 tools in read-only mode, got: {tools:?}"
     );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(
@@ -127,8 +132,32 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
         "memory_ingest should be omitted: {names:?}"
     );
     assert!(
+        !names.contains(&"memory_graph_add"),
+        "memory_graph_add should be omitted: {names:?}"
+    );
+    assert!(
+        !names.contains(&"memory_graph_invalidate"),
+        "memory_graph_invalidate should be omitted: {names:?}"
+    );
+    assert!(
+        !names.contains(&"memory_graph_supersede"),
+        "memory_graph_supersede should be omitted: {names:?}"
+    );
+    assert!(
         names.contains(&"memory_scopes"),
         "memory_scopes should be listed in read-only mode: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_graph_query"),
+        "memory_graph_query should be listed in read-only mode: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_graph_timeline"),
+        "memory_graph_timeline should be listed in read-only mode: {names:?}"
+    );
+    assert!(
+        names.contains(&"memory_graph_stats"),
+        "memory_graph_stats should be listed in read-only mode: {names:?}"
     );
 
     // tools/call memory_ingest should be rejected.
@@ -139,6 +168,23 @@ fn read_only_mode_excludes_ingest_and_rejects_direct_calls() {
     let resp = recv(&mut reader);
     let err = &resp["error"];
     assert!(err.is_object(), "expected error response: {resp}");
+    let msg = err["message"].as_str().expect("error message");
+    assert!(
+        msg.contains("read-only"),
+        "expected 'read-only' in error message: {msg}"
+    );
+
+    // tools/call memory_graph_add should also be rejected.
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"memory_graph_add","arguments":{"subject":"singularmem","predicate":"uses","object":"tantivy"}}}"#,
+    );
+    let resp = recv(&mut reader);
+    let err = &resp["error"];
+    assert!(
+        err.is_object(),
+        "expected error response for memory_graph_add: {resp}"
+    );
     let msg = err["message"].as_str().expect("error message");
     assert!(
         msg.contains("read-only"),

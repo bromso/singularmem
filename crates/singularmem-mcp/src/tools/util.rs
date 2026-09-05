@@ -23,6 +23,19 @@ pub fn open_store_for_reading(config: &Config) -> Result<Store> {
     }
 }
 
+/// Open the store for a `memory_graph_*` writer, with no index hooks
+/// (facts aren't indexed by Tantivy/`USearch`, unlike items). Callers must
+/// check `config.read_only` themselves, exactly as `memory_ingest` does,
+/// since the graph writers' error semantics differ per tool.
+///
+/// # Errors
+///
+/// Returns whatever error `Store::open` raises (e.g., I/O, malformed
+/// `SQLite` file).
+pub fn open_store_for_writing(config: &Config) -> Result<Store> {
+    Ok(Store::open(&config.store_path)?)
+}
+
 /// Build a [`ScopeFilter`] from a tool's `scope` / `scope_exact` arguments.
 ///
 /// `scope: None` means "no scope restriction" regardless of `exact`.

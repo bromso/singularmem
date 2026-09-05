@@ -1,0 +1,27 @@
+Rebuild the Tantivy index from the `SQLite` store
+
+Usage: singularmem reindex [OPTIONS]
+
+Options:
+      --quiet
+          Suppress progress output
+      --store <PATH>
+          Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also settable via
+          the `SINGULARMEM_STORE` environment variable — the only way to point a hook (which runs
+          with a fixed, flag-less command line) at a non-default store
+      --read-only
+          Open the store in read-only mode (refuses ingest)
+      --with-embeddings
+          Also rebuild the vector index
+      --embedding-model <EMBEDDING_MODEL>
+          Which embedding model to use. Only meaningful with --with-embeddings [default:
+          all-mini-lm-l6-v2]
+      --no-index
+          Skip wiring up the Tantivy hook on open. Use for storage-only operations that don't need
+          search, or when the Tantivy directory is intentionally absent
+      --reset-vectors
+          Destructive — delete .vectors/ before reindex (e.g. to switch models)
+      --force
+          Required to confirm --reset-vectors
+  -h, --help
+          Print help

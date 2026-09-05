@@ -1,5 +1,10 @@
 # Singularmem Store Format — v3
 
+> Superseded by [store-v4.md](store-v4.md) (first shipped in v0.19.0).
+> `store-v4.md` adds the temporal knowledge graph (`entities`/`facts`
+> tables) and `export-v2`; the `items`/`item_tags` schema and `export-v1`
+> shape described below are unchanged in v4.
+
 This document specifies the on-disk format of a Singularmem memory store
 at `format_version = 3`. **A third-party tool that reads this document and
 has access to a SQLite library can write a complete loader without

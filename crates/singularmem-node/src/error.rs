@@ -44,6 +44,29 @@ impl From<NodeError> for NapiError<&'static str> {
                 format!("supersedes target {id} not found"),
             ),
             CoreError::NotFound { id } => ("NotFound", format!("item {id} not found")),
+            CoreError::FactNotFound {
+                subject,
+                predicate,
+                object,
+            } => (
+                "FactNotFound",
+                format!("no open fact {subject} —{predicate}→ {object}; nothing changed"),
+            ),
+            CoreError::FactIdNotFound { id } => {
+                ("FactIdNotFound", format!("fact {id} not found"))
+            }
+            CoreError::AmbiguousFactRevision { candidates } => (
+                "AmbiguousFactRevision",
+                format!(
+                    "fact chain forks at {} competing revisions; candidates {}",
+                    candidates.len(),
+                    candidates
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
             CoreError::AmbiguousLatest { candidates } => (
                 "AmbiguousLatest",
                 format!("ambiguous latest revision: {} candidates", candidates.len()),

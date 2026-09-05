@@ -1,0 +1,23 @@
+Add a new item to the store
+
+Usage: singularmem ingest [OPTIONS]
+
+Options:
+      --content <CONTENT>        Item content as a literal string
+      --store <PATH>             Path to the `SQLite` store file. Defaults to the per-user XDG data
+                                 dir. Also settable via the `SINGULARMEM_STORE` environment variable
+                                 — the only way to point a hook (which runs with a fixed, flag-less
+                                 command line) at a non-default store
+      --file <FILE>              Read item content from a file
+      --read-only                Open the store in read-only mode (refuses ingest)
+      --no-index                 Skip wiring up the Tantivy hook on open. Use for storage-only
+                                 operations that don't need search, or when the Tantivy directory is
+                                 intentionally absent
+      --stdin                    Read item content from stdin
+      --tag <TAGS>               Tag (repeatable)
+      --source <SOURCE>          Free-form provenance label
+      --supersedes <SUPERSEDES>  Supersedes the given prior item ID
+      --metadata <METADATA>      Inline JSON object as the metadata payload
+      --scope <PATH>             Assign this scope path to the item (e.g. `team/backend`)
+      --format <FORMAT>          Output format [default: id] [possible values: id, json]
+  -h, --help                     Print help
