@@ -116,3 +116,35 @@ fn search_with_snippets_returns_marked_text() {
     );
     drop(dir);
 }
+
+#[test]
+fn question_with_operator_characters_still_finds_the_item() {
+    let (dir, store, index_path) = store_with_index();
+    let item = store
+        .ingest(NewItem::text(
+            "Borges wrote that the Library is a sphere whose center is any hexagon",
+        ))
+        .unwrap();
+    store
+        .ingest(NewItem::text("Unrelated note about lentil soup"))
+        .unwrap();
+    drop(store);
+    wait_for_index_visibility();
+
+    let index = Index::open(&index_path).unwrap();
+    // Strict Tantivy syntax would reject this (a `:` field prefix on
+    // "conversation", a dangling `-`); the lenient fallback keeps the terms.
+    let query = Query::parse(
+        "I was going through our previous conversation: what did Borges say - about the center?",
+    )
+    .unwrap();
+    let results = index.search(&query, SearchOptions::default()).unwrap();
+
+    assert!(
+        !results.hits.is_empty(),
+        "lenient parse must still retrieve"
+    );
+    assert_eq!(results.hits[0].id, item.id);
+
+    drop(dir);
+}

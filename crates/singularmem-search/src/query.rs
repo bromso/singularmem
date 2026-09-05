@@ -54,17 +54,33 @@ impl Query {
     /// `content` and `source` (bare terms match either); `tags` requires the
     /// explicit `tags:` prefix to avoid accidental matches.
     ///
+    /// Natural-language input is accepted: when the string is not valid
+    /// query syntax (a stray `:`, `-`, `(` or quote — common in questions),
+    /// the parser falls back to Tantivy's lenient mode, which keeps every
+    /// term it could read and drops the malformed operators.
+    ///
     /// # Errors
-    /// Returns `Error::QueryParse` for malformed syntax.
+    /// Returns `Error::QueryParse` only when not a single searchable term
+    /// survives — for example an input made of operators alone.
     pub fn parse(query_str: &str) -> Result<Self> {
         let (schema, fields) = build_schema();
         // Construct a throwaway in-RAM index tied to the schema. The actual Index
         // construction reuses the same schema, so semantics match.
         let temp_index = tantivy::Index::create_in_ram(schema);
         let parser = QueryParser::for_index(&temp_index, vec![fields.content, fields.source]);
-        let inner = parser
-            .parse_query(query_str)
-            .map_err(|e| Error::QueryParse(format!("{e}")))?;
+        let strict = parser.parse_query(query_str);
+        let inner = match strict {
+            Ok(q) => q,
+            Err(strict_err) => {
+                let (lenient, _dropped) = parser.parse_query_lenient(query_str);
+                let mut terms = 0usize;
+                lenient.query_terms(&mut |_, _| terms += 1);
+                if terms == 0 {
+                    return Err(Error::QueryParse(format!("{strict_err}")));
+                }
+                lenient
+            }
+        };
         Ok(Self { inner })
     }
 

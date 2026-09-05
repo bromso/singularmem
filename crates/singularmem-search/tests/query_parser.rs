@@ -46,3 +46,25 @@ fn query_builder_combines_must_and_must_not() {
         .build();
     let _ = q;
 }
+
+#[test]
+fn natural_language_question_with_operator_characters_parses() {
+    // Real LongMemEval questions that the strict parser rejected: a colon
+    // after a word looks like a field prefix, a lone dash like a negation,
+    // and unbalanced quotes like an unterminated phrase.
+    for q in [
+        "What is the order of the three events: 'I signed up', 'I used a coupon', and 'I redeemed'?",
+        "I was going through our previous conversation - what did Borges say about the center?",
+        "How many weeks in total do I spent on reading 'The Nightingale\" and 'Sapiens'?",
+        "Which three events happened (in order) from first to last:",
+    ] {
+        Query::parse(q).unwrap_or_else(|e| panic!("{q:?} should parse leniently: {e}"));
+    }
+}
+
+#[test]
+fn operators_alone_still_fail_to_parse() {
+    for q in ["tags:", ":::", "- -", "()"] {
+        assert!(Query::parse(q).is_err(), "{q:?} has no searchable term");
+    }
+}
