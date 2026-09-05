@@ -2893,3 +2893,148 @@ fn store_env_var_is_honoured_and_flag_wins() {
         .stdout(predicate::str::contains("via flag"))
         .stdout(predicate::str::contains("via env").not());
 }
+
+/// Run `singularmem --store db_s <args>`.
+fn graph_cmd(db: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+    let mut full = vec!["--store", db];
+    full.extend_from_slice(args);
+    singularmem().args(full).assert()
+}
+
+/// Run and return trimmed stdout, asserting success.
+fn graph_stdout(db: &str, args: &[&str]) -> String {
+    String::from_utf8(graph_cmd(db, args).success().get_output().stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn graph_add_query_supersede_history_and_axes() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    let item = graph_stdout(db_s, &["ingest", "--content", "we picked tantivy"]);
+
+    let fact = graph_stdout(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "Singularmem",
+            "uses",
+            "Tantivy",
+            "--source",
+            &item,
+            "--scope",
+            "claude-code/singularmem",
+            "--from",
+            "2026-05-16",
+        ],
+    );
+    assert_eq!(fact.len(), 26);
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "add",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "--scope",
+            "claude-code/singularmem",
+        ],
+    )
+    .success()
+    .stdout(format!("{fact}\n"));
+
+    graph_cmd(db_s, &["graph", "query", "singularmem", "--with-sources"])
+        .success()
+        .stdout(predicate::str::contains("Singularmem —uses→ Tantivy"))
+        .stdout(predicate::str::contains("open"))
+        .stdout(predicate::str::contains("we picked tantivy"));
+
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "supersede",
+            "singularmem",
+            "uses",
+            "tantivy",
+            "meilisearch",
+            "--at",
+            "2026-09-01",
+            "--scope",
+            "claude-code/singularmem",
+        ],
+    )
+    .success();
+    graph_cmd(
+        db_s,
+        &["graph", "query", "singularmem", "--as-of", "2026-08-01"],
+    )
+    .success()
+    .stdout(predicate::str::contains("Tantivy"))
+    .stdout(predicate::str::contains("meilisearch").not());
+    graph_cmd(
+        db_s,
+        &["graph", "query", "singularmem", "--as-of", "2026-09-02"],
+    )
+    .success()
+    .stdout(predicate::str::contains("meilisearch"))
+    .stdout(predicate::str::contains("Tantivy").not());
+    graph_cmd(
+        db_s,
+        &[
+            "graph",
+            "query",
+            "singularmem",
+            "--recorded-at",
+            "2020-01-01",
+        ],
+    )
+    .success()
+    .stdout("");
+
+    let hist = graph_stdout(db_s, &["graph", "history", &fact, "--format", "ids"]);
+    assert_eq!(hist.lines().count(), 2);
+    let tl = graph_stdout(db_s, &["graph", "timeline", "singularmem", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&tl).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    graph_cmd(db_s, &["graph", "stats"])
+        .success()
+        .stdout(predicate::str::contains("open facts: 1"))
+        .stdout(predicate::str::contains("closed facts: 1"));
+    graph_cmd(db_s, &["graph", "entities", "--json"])
+        .success()
+        .stdout(predicate::str::contains("\"fact_count\""));
+}
+
+#[test]
+fn graph_errors_and_read_only() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let db_s = db.to_str().unwrap();
+    graph_cmd(db_s, &["graph", "add", "a", "bad-pred", "b"])
+        .code(1)
+        .stderr(predicate::str::contains("predicate"));
+    graph_cmd(db_s, &["graph", "invalidate", "a", "p", "b"])
+        .code(2)
+        .stderr(predicate::str::contains("no open fact"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "b", "--confidence", "1.5"],
+    )
+    .code(1);
+    graph_cmd(db_s, &["graph", "add", "a", "p", "b"]).success();
+    graph_cmd(db_s, &["--read-only", "graph", "add", "a", "p", "c"])
+        .code(2)
+        .stderr(predicate::str::contains("read-only"));
+    graph_cmd(
+        db_s,
+        &["graph", "add", "a", "p", "Rust 1.80", "--value", "--json"],
+    )
+    .success()
+    .stdout(predicate::str::contains("\"value\":\"Rust 1.80\""));
+}

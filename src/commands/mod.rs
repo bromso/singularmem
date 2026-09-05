@@ -7,6 +7,7 @@
 //! `cmd_*` functions) lives in its own sibling module.
 
 pub mod bulk;
+pub mod graph;
 pub mod hooks;
 pub mod index;
 pub mod items;
@@ -18,6 +19,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use singularmem_core::ScopeFilter;
 
+use crate::commands::graph::GraphCommand;
 use crate::CliError;
 
 #[derive(Parser, Debug)]
@@ -84,6 +86,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install, uninstall, or inspect editor hook wiring.
     Hooks(HooksCommand),
+    /// Record and query the temporal knowledge graph.
+    Graph(GraphCommand),
 }
 
 #[derive(Args, Debug)]

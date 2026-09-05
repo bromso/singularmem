@@ -27,6 +27,16 @@ const SUBCOMMANDS: &[&[&str]] = &[
     &["hooks", "install"],
     &["hooks", "uninstall"],
     &["hooks", "status"],
+    &["graph"],
+    &["graph", "add"],
+    &["graph", "query"],
+    &["graph", "predicate"],
+    &["graph", "invalidate"],
+    &["graph", "supersede"],
+    &["graph", "timeline"],
+    &["graph", "stats"],
+    &["graph", "entities"],
+    &["graph", "history"],
 ];
 
 fn snapshot_path(args: &[&str]) -> PathBuf {

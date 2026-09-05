@@ -10,6 +10,7 @@ use singularmem_core::{Error, Store, StoreOptions};
 mod commands;
 
 use commands::bulk::{cmd_ingest_codex, cmd_ingest_cursor, cmd_ingest_dir, cmd_ingest_transcript};
+use commands::graph::{cmd_graph, GraphAction, GraphCommand};
 use commands::hooks::{cmd_hook_entry, cmd_hooks};
 use commands::index::wire_index_hooks;
 use commands::items::{cmd_export, cmd_get, cmd_ingest, cmd_list, cmd_revisions, cmd_scope};
@@ -62,7 +63,10 @@ fn main() -> ExitCode {
             eprintln!("singularmem: {e}");
             ExitCode::from(code)
         }
-        Err(e @ CliError::StoreReadOnly) => {
+        Err(
+            e @ (CliError::StoreReadOnly
+            | CliError::Lib(Error::FactNotFound { .. } | Error::FactIdNotFound { .. })),
+        ) => {
             eprintln!("singularmem: {e}");
             ExitCode::from(2)
         }
@@ -140,6 +144,11 @@ fn run(cli: Cli) -> Result<(), CliError> {
                 | Command::Scope(ScopeCommand {
                     action: ScopeAction::Move { .. }
                 })
+                | Command::Graph(GraphCommand {
+                    action: GraphAction::Add { .. }
+                        | GraphAction::Invalidate { .. }
+                        | GraphAction::Supersede { .. }
+                })
         )
     {
         return Err(CliError::StoreReadOnly);
@@ -183,5 +192,6 @@ fn run_command(command: Command, store: &Store, store_path: &Path) -> Result<(),
         Command::WakeUp(args) => cmd_wake_up(store, &args),
         Command::Hook(_) => unreachable!("Command::Hook is dispatched before the store opens"),
         Command::Hooks(_) => unreachable!("Command::Hooks is dispatched before the store opens"),
+        Command::Graph(cmd) => cmd_graph(store, cmd),
     }
 }

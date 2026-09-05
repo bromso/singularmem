@@ -1,0 +1,25 @@
+Record and query the temporal knowledge graph
+
+Usage: singularmem graph [OPTIONS] <COMMAND>
+
+Commands:
+  add         Record a fact: SUBJECT PREDICATE OBJECT (entities are created on demand)
+  query       Facts about an entity
+  predicate   Facts with a predicate
+  invalidate  Close an open fact (append-only: writes a new revision)
+  supersede   Replace OLD with NEW at one instant, in one transaction
+  timeline    Chronological facts, optionally for one entity
+  stats       Counts
+  entities    Entities with fact counts
+  history     All revisions of a fact, oldest first
+  help        Print this message or the help of the given subcommand(s)
+
+Options:
+      --store <PATH>  Path to the `SQLite` store file. Defaults to the per-user XDG data dir. Also
+                      settable via the `SINGULARMEM_STORE` environment variable — the only way to
+                      point a hook (which runs with a fixed, flag-less command line) at a
+                      non-default store
+      --read-only     Open the store in read-only mode (refuses ingest)
+      --no-index      Skip wiring up the Tantivy hook on open. Use for storage-only operations that
+                      don't need search, or when the Tantivy directory is intentionally absent
+  -h, --help          Print help

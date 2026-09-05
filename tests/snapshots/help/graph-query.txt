@@ -1,0 +1,25 @@
+Facts about an entity
+
+Usage: singularmem graph query [OPTIONS] <ENTITY>
+
+Arguments:
+  <ENTITY>  
+
+Options:
+      --direction <DIRECTION>  [default: both] [possible values: outgoing, incoming, both]
+      --store <PATH>           Path to the `SQLite` store file. Defaults to the per-user XDG data
+                               dir. Also settable via the `SINGULARMEM_STORE` environment variable —
+                               the only way to point a hook (which runs with a fixed, flag-less
+                               command line) at a non-default store
+      --as-of <TS>             
+      --read-only              Open the store in read-only mode (refuses ingest)
+      --no-index               Skip wiring up the Tantivy hook on open. Use for storage-only
+                               operations that don't need search, or when the Tantivy directory is
+                               intentionally absent
+      --recorded-at <TS>       
+      --scope <PATH>           Restrict to this scope and its descendants (e.g.
+                               `claude-code/myproj`)
+      --scope-exact            With --scope: match only that exact scope, not descendants
+      --with-sources           
+      --json                   
+  -h, --help                   Print help
