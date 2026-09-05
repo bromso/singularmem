@@ -3237,6 +3237,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "singularmem-bench"
+version = "0.16.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "jiff",
+ "predicates",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "singularmem-core",
+ "singularmem-ingest",
+ "singularmem-retrieve",
+ "singularmem-search",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "singularmem-core"
 version = "0.16.0"
 dependencies = [

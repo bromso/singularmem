@@ -1,0 +1,146 @@
+[
+  {
+    "question_id": "q1",
+    "question_type": "single-session-user",
+    "question": "What breed is my dog Biscuit?",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s1a", "s1b", "s1c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "We adopted a corgi last week and named him Biscuit."},
+        {"role": "assistant", "content": "Congratulations on adopting Biscuit the corgi!"}
+      ],
+      [
+        {"role": "user", "content": "Can you suggest a recipe for lentil soup?"},
+        {"role": "assistant", "content": "Simmer red lentils with onion, cumin and stock for twenty minutes."}
+      ],
+      [
+        {"role": "user", "content": "How do I renew a passport online?"},
+        {"role": "assistant", "content": "Use the government portal and upload a recent photo."}
+      ]
+    ],
+    "answer_session_ids": ["s1a"],
+    "answer": "corgi"
+  },
+  {
+    "question_id": "q2",
+    "question_type": "single-session-assistant",
+    "question": "Which sourdough hydration percentage did you recommend?",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s2a", "s2b", "s2c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Any tips for planting tulip bulbs?"},
+        {"role": "assistant", "content": "Plant tulip bulbs in autumn, pointed end up, three times their depth."}
+      ],
+      [
+        {"role": "user", "content": "My bread is dense. What should I change?"},
+        {"role": "assistant", "content": "Try a sourdough hydration of seventy-eight percent and a longer bulk ferment."}
+      ],
+      [
+        {"role": "user", "content": "Explain the offside rule in football."},
+        {"role": "assistant", "content": "A player is offside when nearer the goal line than the ball and the second-last defender."}
+      ]
+    ],
+    "answer_session_ids": ["s2b"],
+    "answer": "seventy-eight percent"
+  },
+  {
+    "question_id": "q3",
+    "question_type": "single-session-preference",
+    "question": "Recommend a holiday given my preference for quiet mountain villages.",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s3a", "s3b", "s3c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "How many litres are in a gallon?"},
+        {"role": "assistant", "content": "A US gallon is about 3.785 litres."}
+      ],
+      [
+        {"role": "user", "content": "Write a limerick about a cat."},
+        {"role": "assistant", "content": "There once was a cat from Peru..."}
+      ],
+      [
+        {"role": "user", "content": "I always prefer quiet mountain villages over busy beaches for a holiday."},
+        {"role": "assistant", "content": "Noted: quiet mountain villages it is."}
+      ]
+    ],
+    "answer_session_ids": ["s3c"],
+    "answer": "quiet mountain villages"
+  },
+  {
+    "question_id": "q4",
+    "question_type": "multi-session",
+    "question": "How many marathon training runs did I log in total?",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s4a", "s4b", "s4c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Logging a marathon training run: 12 km today."},
+        {"role": "assistant", "content": "Logged 12 km for marathon training."}
+      ],
+      [
+        {"role": "user", "content": "What is the capital of Mongolia?"},
+        {"role": "assistant", "content": "Ulaanbaatar."}
+      ],
+      [
+        {"role": "user", "content": "Another marathon training run, 18 km this time."},
+        {"role": "assistant", "content": "Logged 18 km for marathon training."}
+      ]
+    ],
+    "answer_session_ids": ["s4a", "s4c"],
+    "answer": "two runs, 30 km"
+  },
+  {
+    "question_id": "q5",
+    "question_type": "temporal-reasoning",
+    "question": "How long after the kitchen renovation did the leak appear?",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s5a", "s5b", "s5c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Builders finished remodelling our cooking area in January."},
+        {"role": "assistant", "content": "Glad your remodel turned out well."}
+      ],
+      [
+        {"role": "user", "content": "Which planet has the most moons?"},
+        {"role": "assistant", "content": "Saturn, with over one hundred confirmed moons."}
+      ],
+      [
+        {"role": "user", "content": "Translate 'good morning' into Swedish."},
+        {"role": "assistant", "content": "God morgon."}
+      ]
+    ],
+    "answer_session_ids": ["s5a"],
+    "answer": "unknown"
+  },
+  {
+    "question_id": "q6_abs",
+    "question_type": "knowledge-update",
+    "question": "What is the new name of my company?",
+    "question_date": "2024/03/01 (Fri) 10:00",
+    "haystack_session_ids": ["s6a", "s6b", "s6c"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00", "2024/02/02 (Fri) 09:00", "2024/02/03 (Sat) 09:00"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "Draft a polite out-of-office reply."},
+        {"role": "assistant", "content": "Thank you for your message; I am away until Monday."}
+      ],
+      [
+        {"role": "user", "content": "How do I center a div?"},
+        {"role": "assistant", "content": "Use flexbox with justify-content and align-items set to center."}
+      ],
+      [
+        {"role": "user", "content": "Suggest three names for a goldfish."},
+        {"role": "assistant", "content": "Bubbles, Captain, and Nemo."}
+      ]
+    ],
+    "answer_session_ids": [],
+    "answer": "N/A"
+  }
+]

@@ -1,0 +1,11 @@
+[
+  {
+    "question_id": "bad1",
+    "question_type": "single-session-user",
+    "question": "x",
+    "haystack_session_ids": ["a", "b"],
+    "haystack_dates": ["2024/02/01 (Thu) 09:00"],
+    "haystack_sessions": [[{"role": "user", "content": "hello"}]],
+    "answer_session_ids": ["a"]
+  }
+]

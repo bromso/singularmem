@@ -10,7 +10,8 @@ a stable, vendor-neutral interface.
 > scoping (v0.18.0), and a temporal knowledge graph (v0.19.0) — memory
 > store, hybrid search (Tantivy + USearch), provider adapters, MCP server,
 > TypeScript SDK, bulk transcript ingestion, hierarchical item scoping,
-> and an append-only entity/fact graph with point-in-time queries.
+> an append-only entity/fact graph with point-in-time queries, and a
+> LongMemEval retrieval benchmark (`singularmem-bench`).
 > Constitution v0.2.0 ratified 2026-05-15.
 
 ## Open core
@@ -115,6 +116,12 @@ both "what was true in June" and "what did we believe in June".
 Fact extraction is your agent's job; nothing here calls an LLM. See
 [docs/formats/store-v4.md](docs/formats/store-v4.md) for the tables, the
 query rules, and the export shape.
+
+## Benchmarks
+
+`singularmem-bench` measures retrieval quality (Recall@k, MRR) against
+LongMemEval. See [docs/benchmarks/longmemeval.md](docs/benchmarks/longmemeval.md)
+for the published numbers and how to reproduce them.
 
 ## Installing the CLI
 
