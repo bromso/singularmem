@@ -212,6 +212,7 @@ fn as_of_and_recorded_at_answer_both_axes() {
 fn supersede_is_atomic_and_tolerates_missing_old() {
     let (_d, s) = store();
     s.add_fact(NewFact::triple("a", "p", "old")).unwrap();
+    let entities_before = s.entities(None, None).unwrap().len();
     let bad_new = entity("   ");
     assert!(s
         .supersede_fact("a", "p", &entity("old"), bad_new, None, None)
@@ -220,6 +221,11 @@ fn supersede_is_atomic_and_tolerates_missing_old() {
         s.graph_stats(None).unwrap().open_facts,
         1,
         "old fact still open after a failed supersede"
+    );
+    assert_eq!(
+        s.entities(None, None).unwrap().len(),
+        entities_before,
+        "the rolled-back supersede created no entities either"
     );
     let (old, new) = s
         .supersede_fact("b", "p", &entity("nothing"), entity("new"), None, None)
@@ -372,4 +378,308 @@ fn provenance_and_read_only() {
         ro.add_fact(NewFact::triple("q", "r", "s")),
         Err(Error::ReadOnly { .. })
     ));
+}
+
+#[test]
+fn literal_values_and_kinds_are_trimmed() {
+    let (_d, s) = store();
+    let mut f = NewFact::triple("proj", "written_in", "unused");
+    f.object = NewObject::Value("  Rust  ".into());
+    f.subject_kind = Some("  project  ".into());
+    let stored = s.add_fact(f).unwrap();
+    assert!(
+        matches!(stored.object, singularmem_core::graph::FactObject::Value(ref v) if v == "Rust"),
+        "the literal is stored trimmed: {:?}",
+        stored.object
+    );
+    assert_eq!(
+        s.get_entity("proj").unwrap().unwrap().kind.as_deref(),
+        Some("project"),
+        "kind is stored trimmed"
+    );
+
+    // A trimmed kind on a later add matches the stored one rather than
+    // tripping the immutability check.
+    let mut g = NewFact::triple("proj", "has_author", "jonas");
+    g.subject_kind = Some(" project ".into());
+    s.add_fact(g).unwrap();
+
+    // …and the untrimmed literal addresses the same triple on the way out.
+    let closed = s
+        .invalidate_fact(
+            "proj",
+            "written_in",
+            &NewObject::Value("Rust".into()),
+            None,
+            Some(ts("2026-09-01")),
+        )
+        .unwrap();
+    assert_eq!(closed.supersedes, Some(stored.id));
+}
+
+#[test]
+fn value_objects_are_idempotent() {
+    let (_d, s) = store();
+    let value = || {
+        let mut f = NewFact::triple("proj", "written_in", "unused");
+        f.object = NewObject::Value("Rust".into());
+        f
+    };
+    let a = s.add_fact(value()).unwrap();
+    let b = s.add_fact(value()).unwrap();
+    assert_eq!(a.id, b.id, "an identical open literal fact is a no-op");
+    assert_eq!(s.graph_stats(None).unwrap().open_facts, 1);
+}
+
+#[test]
+fn confidence_round_trips_and_is_bounded() {
+    let (_d, s) = store();
+    let mut f = NewFact::triple("a", "p", "b");
+    f.confidence = 0.25;
+    let stored = s.add_fact(f).unwrap();
+    assert!(
+        (stored.confidence - 0.25).abs() < f32::EPSILON,
+        "0.25 is exact in binary floating point: {}",
+        stored.confidence
+    );
+    assert!(
+        (s.get_fact(stored.id).unwrap().confidence - 0.25).abs() < f32::EPSILON,
+        "and survives the REAL round trip"
+    );
+    for bad in [1.5_f32, -0.1_f32] {
+        let mut f = NewFact::triple("a", "q", "b");
+        f.confidence = bad;
+        assert!(
+            matches!(
+                s.add_fact(f),
+                Err(Error::Validation {
+                    field: "confidence",
+                    ..
+                })
+            ),
+            "{bad} is out of range"
+        );
+    }
+}
+
+#[test]
+fn invalidating_before_valid_from_is_a_window_error() {
+    let (_d, s) = store();
+    let mut f = NewFact::triple("a", "p", "b");
+    f.valid_from = Some(ts("2026-06-01"));
+    s.add_fact(f).unwrap();
+    assert!(matches!(
+        s.invalidate_fact("a", "p", &entity("b"), None, Some(ts("2026-05-01"))),
+        Err(Error::Validation {
+            field: "valid_window",
+            ..
+        })
+    ));
+    assert_eq!(
+        s.graph_stats(None).unwrap().open_facts,
+        1,
+        "the refused invalidate wrote nothing"
+    );
+}
+
+/// Three write events under three different clocks: open at A, supersede at
+/// B, supersede again at C. Each supersede closes the standing head (a
+/// two-revision chain) and opens a fresh one, so `fact_history` returns the
+/// closed pair for the chains behind it, and a `recorded_at` between the
+/// second and third events sees exactly the second belief.
+#[test]
+fn revision_chains_and_recorded_at_between_writes() {
+    let d = TempDir::new().unwrap();
+
+    let s1 = store_at(&d, "2026-01-01T00:00:00Z");
+    let mut first = NewFact::triple("a", "p", "x");
+    first.valid_from = Some(ts("2026-01-01"));
+    let r1 = s1.add_fact(first).unwrap();
+    drop(s1);
+
+    let s2 = store_at(&d, "2026-02-01T00:00:00Z");
+    let (closed1, r3) = s2
+        .supersede_fact(
+            "a",
+            "p",
+            &entity("x"),
+            entity("y"),
+            None,
+            Some(ts("2026-02-01")),
+        )
+        .unwrap();
+    let r2 = closed1.expect("the open head was there to close");
+    drop(s2);
+
+    let s3 = store_at(&d, "2026-03-01T00:00:00Z");
+    let (closed2, r5) = s3
+        .supersede_fact(
+            "a",
+            "p",
+            &entity("y"),
+            entity("z"),
+            None,
+            Some(ts("2026-03-01")),
+        )
+        .unwrap();
+    let r4 = closed2.expect("the second head was there to close");
+
+    assert_eq!(
+        s3.fact_history(r1.id)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>(),
+        vec![r1.id, r2.id],
+        "oldest first, from either end of the chain"
+    );
+    assert_eq!(
+        s3.fact_history(r2.id)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>(),
+        vec![r1.id, r2.id]
+    );
+    assert_eq!(
+        s3.fact_history(r4.id)
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>(),
+        vec![r3.id, r4.id]
+    );
+    assert_eq!(s3.fact_history(r5.id).unwrap().len(), 1, "the open head");
+
+    let objects = |q: &GraphQuery| {
+        s3.query_entity("a", q)
+            .unwrap()
+            .into_iter()
+            .map(|f| match f.object {
+                singularmem_core::graph::FactObject::Entity(e) => e.name,
+                singularmem_core::graph::FactObject::Value(v) => v,
+            })
+            .collect::<Vec<_>>()
+    };
+    let believed_at = |r: &str| GraphQuery {
+        recorded_at: Some(ts(r)),
+        direction: Direction::Outgoing,
+        ..Default::default()
+    };
+    assert_eq!(
+        objects(&believed_at("2026-02-15T00:00:00Z")),
+        vec!["y"],
+        "between the second and third writes we believed exactly y"
+    );
+    assert_eq!(objects(&believed_at("2026-01-15T00:00:00Z")), vec!["x"]);
+    assert_eq!(objects(&GraphQuery::default()), vec!["z"]);
+}
+
+/// A closing revision must leave the row it closes byte-identical. Compared
+/// column by column through a second `rusqlite` connection, not through the
+/// typed API, so a silent `UPDATE` cannot hide behind parsing.
+#[test]
+fn invalidate_leaves_the_original_row_byte_identical() {
+    type RawRow = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        f64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+
+    fn raw_row(path: &std::path::Path, id: &str) -> RawRow {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row(
+            "SELECT id, subject_id, predicate, object_id, object_value, valid_from, valid_to, \
+             confidence, source_item_id, scope, supersedes, recorded_at \
+             FROM facts WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                ))
+            },
+        )
+        .unwrap()
+    }
+
+    let d = TempDir::new().unwrap();
+    let path = d.path().join("s.db");
+    let s = store_at(&d, "2026-06-01T00:00:00Z");
+    let mut f = NewFact::triple("a", "p", "b");
+    f.valid_from = Some(ts("2026-06-01"));
+    f.confidence = 0.5;
+    f.scope = Some("proj/sub".into());
+    let original = s.add_fact(f).unwrap();
+    let before = raw_row(&path, &original.id.to_string());
+
+    s.invalidate_fact(
+        "a",
+        "p",
+        &entity("b"),
+        Some("proj/sub"),
+        Some(ts("2026-09-01")),
+    )
+    .unwrap();
+
+    assert_eq!(
+        raw_row(&path, &original.id.to_string()),
+        before,
+        "every column of the superseded row is unchanged"
+    );
+}
+
+/// Two rows superseding the same revision is a fork the store's own writes
+/// cannot produce; `fact_history` must say so rather than pick a branch.
+#[test]
+fn forked_chain_is_reported_not_guessed() {
+    let d = TempDir::new().unwrap();
+    let path = d.path().join("s.db");
+    let s = store_at(&d, "2026-06-01T00:00:00Z");
+    let head = s.add_fact(NewFact::triple("a", "p", "b")).unwrap();
+    drop(s);
+
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for fork_id in ["01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW"] {
+            conn.execute(
+                "INSERT INTO facts \
+                 (id, subject_id, predicate, object_id, object_value, valid_from, valid_to, \
+                  confidence, source_item_id, scope, supersedes, recorded_at) \
+                 SELECT ?1, subject_id, predicate, object_id, object_value, valid_from, \
+                        '2026-09-01T00:00:00Z', confidence, source_item_id, scope, id, \
+                        recorded_at \
+                 FROM facts WHERE id = ?2",
+                rusqlite::params![fork_id, head.id.to_string()],
+            )
+            .unwrap();
+        }
+    }
+
+    let s = store_at(&d, "2026-10-01T00:00:00Z");
+    let err = s.fact_history(head.id).unwrap_err();
+    assert!(
+        matches!(err, Error::AmbiguousFactRevision { ref candidates } if candidates.len() == 2),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("forks"), "{err}");
 }
