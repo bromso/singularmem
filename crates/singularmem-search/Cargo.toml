@@ -35,6 +35,7 @@ ort-sys = "=2.0.0-rc.9"
 tempfile = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
+ulid = { workspace = true }
 singularmem-core = { path = "../singularmem-core", version = "0.20.0" }  # for test fixtures
 
 [[bench]]

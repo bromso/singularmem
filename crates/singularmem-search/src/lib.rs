@@ -21,6 +21,7 @@ pub mod vector_index;
 mod hook;
 mod reindex;
 mod schema;
+mod vector_journal;
 
 pub use crate::embedder::{Embedder, FastembedEmbedder};
 pub use crate::error::{Error, Result};

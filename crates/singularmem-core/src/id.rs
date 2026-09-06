@@ -22,6 +22,12 @@ macro_rules! ulid_id {
             /// Underlying ULID.
             #[must_use]
             pub const fn as_ulid(&self) -> ulid::Ulid { self.0 }
+            /// Big-endian 16-byte encoding of the underlying ULID.
+            #[must_use]
+            pub const fn to_bytes(self) -> [u8; 16] { self.0.to_bytes() }
+            /// Reconstruct from a big-endian 16-byte ULID encoding.
+            #[must_use]
+            pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(ulid::Ulid::from_bytes(bytes)) }
         }
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(&self.0, f) }
