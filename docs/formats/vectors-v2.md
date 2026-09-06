@@ -243,6 +243,15 @@ Total file after one append: 40 bytes. A record is one `write_all`
 followed by one `fsync`, so a crash never leaves a record half its correct
 length mid-file *except* at the very tail (see "Crash safety" below).
 
+**Creating the file `fsync`s the parent directory too.** The header write is
+`fsync`ed, and then `<store_path>.vectors/` itself is `fsync`ed, so the
+directory entry naming `journal.bin` is durable before the first append
+returns. Without that second `fsync` the very first `commit(false)` in a
+directory's life could return `Ok` and still lose every record it wrote: the
+bytes would be on the platter with no name pointing at them. On Windows,
+which has no directory handle to `fsync`, this is a no-op and the ordering
+is the filesystem's business.
+
 ### Replay rules
 
 On open, and again at the start of every compaction, the journal is
@@ -275,6 +284,16 @@ replayed into the in-memory HNSW graph:
    step 3) is skipped outright — this is what makes replay idempotent (see
    "Crash safety").
 
+The filter in step 2 is evaluated against the keymap as it stood *before*
+the replay began, so if the journal holds **two records for the same id** —
+the same item re-embedded and re-added between compactions — both pass it.
+That is deliberate: records are applied in file order and an add of an id
+that is already indexed **replaces** it (the id's previous key is removed
+from the graph and from both keymap directions before the new key is
+issued), so the last record in the file wins and the id ends up with exactly
+one vector. The same rule is what stops `singularmem reindex
+--with-embeddings` without `--reset-vectors` from doubling the graph.
+
 ## `lock`
 
 An empty file used purely as an advisory-lock handle (`fs4::FileExt`'s
@@ -283,7 +302,12 @@ meaningful bytes. A commit (append-then-maybe-compact) takes this lock
 **exclusively** for its entire duration. Lock acquisition retries up to 5
 times with delays `50, 100, 200, 400` ms (doubling, no sleep after the last
 attempt); exhaustion surfaces as an "index busy" error (`Error::Usearch`
-with context `"acquiring vector index lock"`) to the caller. Two
+with context `"acquiring vector index lock"`) to the caller. Contention is
+recognised as `EWOULDBLOCK` (`io::ErrorKind::WouldBlock`) on Unix **and as
+raw OS error 33, `ERROR_LOCK_VIOLATION`, on Windows** — `LockFileEx`'s code
+for "already locked", which Rust maps to the unstable `Uncategorized` kind
+and which therefore has to be matched by raw code or it reads as a hard
+failure and skips the backoff entirely. Two
 `VectorIndex` handles — in one process or two — that both try to commit at
 the same time serialise through this file; a handle whose `flock` request
 would block waits rather than corrupting the other's write.
@@ -362,51 +386,78 @@ Once both are done, compaction:
 1. Snapshots the in-memory graph and drains `pending` together, under the
    inner lock, so a concurrent `add` is either already reflected in the
    snapshot or still queued afterward — never in neither.
-2. If the graph holds at least one vector, serialises it to
-   `index.usearch.tmp`, `fsync`s it, and renames it over `index.usearch`.
-   An empty graph skips this step entirely — no `index.usearch.tmp` is
+2. **Puts the graph file into its final state.** If the graph holds at
+   least one vector, serialises it to `index.usearch.tmp`, `fsync`s it, and
+   renames it over `index.usearch`. If the graph is empty, **removes** any
+   `index.usearch` still on disk instead — no `index.usearch.tmp` is
    written.
 3. **Stamps `keymap.generation = loaded_generation + 1`**, serialises the
    keymap, writes `keymap.bin.tmp`, `fsync`s it, and renames it over
    `keymap.bin`. This happens whether or not the graph was empty — **the
    `count == 0` path goes through this same temp-file-plus-rename, not a
    direct overwrite.**
-4. Only *now*, if the graph was empty and a stale `index.usearch` still
-   exists on disk, removes it. Doing this after step 3 rather than before
-   or concurrently means the pair on disk is never observed as (old graph +
-   a keymap already renamed to reflect zero items) — by the time the graph
-   file disappears, the keymap naming the empty state is already durable.
-5. `fsync`s the directory itself, so the renames in steps 2–4 are durable
+4. `fsync`s the directory itself, so the mutations in steps 2–3 are durable
    in order. **This failure now propagates as an error** on every platform
    except Windows (which has no directory handle to sync, so a failure to
    *open* one there is tolerated instead of reported) — the renamed pair is
    already internally consistent if this fails, but the guarantee that the
    ordering survives an immediately-following crash is lost, which is
    worth surfacing rather than swallowing.
-6. Truncates `journal.bin` back to just its header (an absent journal stays
+5. Truncates `journal.bin` back to just its header (an absent journal stays
    absent — this never creates the file) and clears the in-memory
    tombstone set: the journal no longer holds the vectors it was
    suppressing. Stores the new generation as this handle's
    `loaded_generation`.
 
-Any failure between the drain in step 1 and the end of step 6 requeues the
+Any failure between the drain in step 1 and the end of step 5 requeues the
 drained records at the front of `pending`, so the next commit still
 journals them.
 
+**Why step 2 differs by direction.** For a non-empty graph the new
+`index.usearch` lands *before* the keymap that names it; for an empty one
+the old `index.usearch` is removed *before* the empty keymap lands. Both
+orderings pick the crash state that `open` can act on:
+
+- Non-empty: a crash between them leaves (new graph + old keymap). Every
+  vector the old keymap is missing is either in the journal (threshold
+  compaction — replay recovers it exactly, per "Replay rules" step 3) or
+  gone (end-of-batch commit, which never journals — see the crash table
+  below).
+- Empty: a crash between them leaves (no graph + old keymap), which `open`
+  recognises as a stale keymap and resets. The other ordering would leave
+  (old graph + empty keymap), where the removed vectors are still in the
+  graph, unnamed and unsearchable, and every later compaction would write
+  them out again — a leak with no way back.
+
 ## Crash safety
 
-| Failure point | Resulting state |
-|---|---|
-| Crash mid-`write_all` of a journal record | The record is a partial tail; replay drops it silently. Every record before it is valid and durable. |
-| Crash between the `index.usearch.tmp`/`keymap.bin.tmp` rename and the journal truncate | The directory has the **new** index and keymap, but the **full** (pre-compaction) journal. On next open, every record replays — but every id in it is already in the freshly-written keymap, so replay is a no-op. Idempotent by construction. |
-| Crash before either rename | The directory has the **old** index and keymap and the full journal — as if the compaction never started. Next open replays the journal from scratch. |
-| Journal append fails (disk full, permission) | The commit fails; the queued vectors are restored to the front of the pending queue (ahead of anything queued in the meantime) so a later commit can still make them durable. `ingest_many` surfaces "item is durably stored but un-searchable; run `singularmem reindex`". |
-| Lock not acquired after 5 attempts | "index busy" error; no partial write. |
+Every intermediate state a crash can leave, and what the next `open` does
+with it. "Journal" means `journal.bin`'s state at the moment of the crash;
+an end-of-batch commit never journals at all (see "Commit and compaction
+rules"), which is why the same rename gap has two very different rows.
 
-At every point the directory is one of exactly two consistent states: (old
-index + full journal) or (new index + empty journal). There is no state in
-between that a loader could observe as corrupt, other than a dropped
-partial tail record, which is by design, not corruption.
+| # | Crash point | State on disk | What `open` does |
+|---|---|---|---|
+| 1 | Mid-`write_all` of a journal record | Header + N complete records + a partial tail | Replay reads the N complete records and **silently drops the partial tail** (`bytes.len() % record_len != 0`, logged at `debug`). Not an error. |
+| 2 | After `journal.bin` is created (header written, file and parent directory `fsync`ed) but before any record | Header-only journal | Replays nothing. The parent-directory `fsync` in `create_file` is what makes the *name* durable here: without it a power cut could leave a `commit(false)` that returned `Ok` with no journal file at all. |
+| 3 | After a journal append returns | Header + all records | Replays every record whose id the keymap does not already hold. |
+| 4 | Compaction, before either rename (with or without `index.usearch.tmp` / `keymap.bin.tmp` on disk) | Old index + old keymap + full journal + possibly stale `*.tmp` | `open` sweeps `*.tmp` under the shared lock, then replays the full journal. Identical to "the compaction never started". |
+| 5 | Compaction of a **non-empty** graph, between the `index.usearch` rename and the `keymap.bin` rename, **journal non-empty** (a threshold compaction) | New index + old keymap + full journal | **Fully recovered.** Replay assigns keys from the old keymap's `next_key`; each key is checked with `usearch::Index::contains` first, the orphan the crashed compaction left under it is evicted, and the journal record — the authoritative value for that key — is inserted (see "Replay rules" step 3). |
+| 6 | Same rename gap, **journal empty** (an end-of-batch commit, which skips the journal) | New index + old keymap + **no journal** | **Not recoverable — reported, not repaired.** The extra vectors' `ItemId`s only ever lived in the keymap that was lost, and USearch 2.15 cannot enumerate a graph's keys, so nothing can rebuild the mapping. `open` succeeds and logs a **warning** naming both counts and telling the operator to run `singularmem reindex --with-embeddings --reset-vectors --force`. The orphans stay in the graph, unsearchable (`search` filters every hit through `keymap.forward`) and re-saved by every later compaction. `doc_count()` reports the **keymap's** count — the searchable count — so it does not over-report forever. See "Known limitation: a torn pair after an end-of-batch commit". |
+| 7 | Compaction, after both renames, before `journal.clear()` | New index + new keymap + full journal | Replays every record, but every id in it is already in the freshly written keymap, so replay is a no-op. **Idempotent by construction.** |
+| 8 | Compaction of an **empty** graph, after `index.usearch` is removed, before the empty `keymap.bin` is renamed in | **No index** + old (non-empty) keymap + journal as it was | `open` recognises that no successful compaction produces this pair, logs a **warning**, and **resets the keymap to empty** (keeping `generation` and `next_key`), then replays the journal. `doc_count()` is the replayed count — 0 when the emptying went through compaction-only commits, which never journal. Removals themselves are not journalled, so if the journal *does* still hold records for the removed ids they come back (see "Known limitation: removals are not journaled"). |
+| 9 | Compaction of an empty graph, after the empty `keymap.bin` rename, before `journal.clear()` | No index + empty keymap + full journal | Replays every record into an empty graph. Same removal caveat as row 8; nothing is corrupt, and the next compaction truncates the journal. |
+| 10 | Between the v1 → v2 `.meta.json` upgrade and the first v2 `keymap.bin` rename | `"2"` meta + a still-v1 `keymap.bin` | `read_keymap` picks the layout by `format_version` and **falls back to the other layout** when the expected one fails to decode, so the directory opens. |
+| 11 | Journal append fails (disk full, permission) — not a crash, an error return | Whatever chunks already landed | The commit fails; only the *unwritten tail* is restored to the front of the pending queue, so a later commit makes it durable without duplicating what did land. `ingest_many` surfaces "item is durably stored but un-searchable; run `singularmem reindex`". |
+| 12 | Lock not acquired after 5 attempts | Unchanged | "index busy" error (`Error::Usearch`, context `"acquiring vector index lock"`); no partial write. |
+
+Rows 1–5 and 7–12 leave the directory in a state `open` restores exactly:
+either (old index + full journal) or (new index + empty journal), with the
+in-between rows recovered by replay, by the `*.tmp` sweep, or by the
+stale-keymap reset. **Row 6 is the one hole**, and it is a hole by
+construction rather than an oversight — recovering it needs either the ids
+in the graph file (USearch does not expose them) or a journal the
+end-of-batch path deliberately does not write.
 
 ## v1 → v2 upgrade
 
@@ -447,6 +498,59 @@ changed was to avoid rewriting `index.usearch` on every single-item
 commit, and that means a handle's in-memory graph is not automatically
 kept current with every other handle's uncompacted writes.
 
+## Known limitation: a torn pair after an end-of-batch commit
+
+An end-of-batch commit (a bulk `Store::ingest_many`, or any direct
+`compact()`) **skips `journal.bin` entirely** — the compaction it runs makes
+the queued vectors durable in `index.usearch` inside the same locked
+section, so journalling them first would be pure write amplification. The
+cost is that this commit has no journal to recover from: a crash between
+compaction's `index.usearch` rename and its `keymap.bin` rename leaves a new
+graph beside an old keymap and **nothing on disk that can rebuild the
+difference** (crash-table row 6). The extra vectors' `ItemId`s lived only in
+the keymap that never landed, and USearch 2.15 has no key-enumeration API,
+so neither half of the mapping survives.
+
+What this build does about it, on every `open`:
+
+- If `usearch::Index::size()` exceeds `keymap.forward.len()` **after** the
+  journal has been replayed, log a warning naming both counts and the
+  recovery command (`singularmem reindex --with-embeddings --reset-vectors
+  --force`, which deletes the whole `.vectors/` directory and rebuilds from
+  SQLite).
+- Report `doc_count()` / `len()` as the **keymap's** count, not the graph's.
+  `search` translates every hit through `keymap.forward`, so an orphan can
+  never be returned; counting it would over-report the searchable corpus for
+  the life of the directory.
+
+The orphans themselves stay: they are re-serialised into every subsequent
+`index.usearch`, costing space and a little query time, until a
+`--reset-vectors` rebuild. Removing them would need an on-disk record of
+which keys are live — the same format change the removal limitation below
+needs.
+
+## Known limitation: the `count == 0` compaction window
+
+Emptying an index is two filesystem mutations — remove `index.usearch`, then
+rename an empty `keymap.bin` into place — and a crash between them leaves
+(no index + old keymap), a pair no successful compaction produces
+(crash-table row 8). `open` treats the keymap as the stale half: it clears
+`forward` and `reverse` (keeping `generation`, so other handles still see a
+coherent generation, and `next_key`, because keys are never reused), logs a
+warning, and replays the journal.
+
+Two consequences worth stating plainly:
+
+- The reset is unconditional. A keymap naming vectors with no graph file to
+  hold them is *always* wrong, so there is no case where a legitimate
+  directory loses entries to this rule — but equally, nothing distinguishes
+  "crashed mid-compaction" from "someone deleted `index.usearch` by hand".
+  Both end up with an empty index.
+- Because removals are not journalled (below), a journal that still holds
+  records for the removed ids re-adds them during that replay. In the
+  common path there is no journal at all — the compactions that empty an
+  index are end-of-batch commits, which never write one.
+
 ## Known limitation: removals are not journaled
 
 `journal.bin` has no tombstone record — it can only say "this vector
@@ -484,11 +588,18 @@ exercise it.
    the Singularmem release you are targeting). Construct an index with the
    same `dim` and `distance` as `.meta.json`, then `index.load(path)` — or
    skip this step entirely if the graph is empty (no `index.usearch` file
-   exists in that case).
+   exists in that case). **If `index.usearch` is absent but `keymap.bin`'s
+   `forward` map is not empty, the keymap is stale** (a crash during an
+   empty-index compaction, crash-table row 8): treat the keymap as empty and
+   load only what the journal replays.
 6. Assign the journal-replayed vectors (step 3) fresh sequential keys
    continuing from `keymap.bin`'s `next_key`, and add them to the loaded
    graph the same way the journal records were embedded (unit-length f32
-   vectors, cosine distance). **Check each key against the loaded graph
+   vectors, cosine distance). Apply the records **in file order**, and if an
+   id already has a key — from `keymap.bin` or from an earlier record in the
+   same journal — drop that key from the graph and your maps first: an add
+   replaces, so the last record for an id wins and no id ever holds two
+   keys. **Check each key against the loaded graph
    before adding** (USearch's own key-existence check, e.g. `contains`):
    a hit means the directory was mid-compaction when it was read (a torn
    rename between `index.usearch.tmp` and `keymap.bin.tmp`), and the
@@ -496,7 +607,10 @@ exercise it.
    authoritative value for that key (see "Replay rules" above).
 7. Issue KNN queries: `index.search(query_vector, k)` returns `(keys,
    distances)`; translate `keys` back to `ItemId`s via the forward map (and
-   your own journal-assigned keys from step 6).
+   your own journal-assigned keys from step 6). **Drop any key you cannot
+   translate**: it is an orphan from a torn compaction (crash-table row 6),
+   not a document. For the same reason, report the size of your key → id
+   map, not `index.size()`, as the number of indexed documents.
 
 ## HNSW parameters (unchanged from v1)
 

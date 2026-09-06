@@ -1,8 +1,10 @@
 //! `IndexHook` — extension point for search index implementations.
 //!
-//! The trait is intentionally minimal: three methods, no associated types,
-//! no Tantivy or vector-index types in the signature. Implementations live in
-//! external crates (e.g. `singularmem-search` provides a Tantivy impl).
+//! The trait is intentionally minimal: four methods (`on_ingest`,
+//! `on_reindex`, `commit`, and the defaulted `on_ingest_batch`), no
+//! associated types, no Tantivy or vector-index types in the signature.
+//! Implementations live in external crates (e.g. `singularmem-search`
+//! provides a Tantivy impl).
 //!
 //! Hook failures DO NOT roll back the underlying `SQLite` write. Per
 //! Principle VII (Honest Failure Modes), `Store::ingest`'s contract is "the

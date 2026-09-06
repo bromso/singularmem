@@ -340,13 +340,98 @@ Recorded during Tasks 3–5 (see `.superpowers/sdd/task-3-report.md`,
 15. **The `count == 0` compaction path goes through the same
     temp-file-plus-rename as the non-empty path**, not a direct write: the
     keymap is written to `keymap.bin.tmp`, fsynced, and renamed over
-    `keymap.bin` first, stamping the new (empty) generation; only *after*
-    that rename lands does `publish_compaction` remove the stale
-    `index.usearch`. This ordering means the on-disk pair is never
-    observed as (old graph + a keymap already renamed to reflect zero
-    items) — the graph file is removed only once the keymap naming the
-    empty state is already durable. Pinned by
+    `keymap.bin`, stamping the new (empty) generation. Pinned by
     `compacting_an_empty_index_renames_the_keymap_and_drops_index_usearch`,
     which replaces a `chmod 0o444` `keymap.bin` (only possible via
     temp+rename, not a direct overwrite) and confirms `index.usearch` is
-    gone afterward.
+    gone afterward. **The ordering of the two mutations was reversed during
+    the whole-branch review wave — see deviation 18 below.**
+16. **A re-added `ItemId` evicts its previous USearch key.**
+    `VectorIndex::add` is documented as "add **or replace**", but
+    `insert_entries` issued a fresh sequential key for every entry and never
+    dropped the id's old one, so a second vector simply piled up beside the
+    first. The visible bug: `singularmem reindex --with-embeddings` *without*
+    `--reset-vectors` doubled the graph on every run and `search` returned
+    the same id twice, once per key. Fixed by removing the id's existing key
+    from the graph (`index.remove`) and from both keymap directions before
+    the new key is issued. The old key is **not** reused — `next_key` only
+    moves forward and the vacated key stays a hole — because the sequential
+    numbering is what journal replay reproduces and what the
+    `index.contains(key)` torn-compaction guard (deviation 13) reasons
+    about. Pinned by
+    `re_adding_an_id_replaces_its_vector_instead_of_duplicating_it`
+    (`tests/vector_index_journal.rs`: one id, two vectors, `len() == 1`, the
+    *new* vector's self-similarity, and the same after journal replay and
+    after a compaction + reopen) and, at the CLI level, by
+    `reindex_with_embeddings_twice_does_not_double_the_vector_index`
+    (`tests/cli.rs`). Both mutation-checked: deleting the eviction fails
+    both.
+17. **`open` resets a keymap that names vectors with no `index.usearch` to
+    hold them.** An absent graph file beside a non-empty keymap is a state no
+    successful compaction produces — it can only be a crash inside the
+    two-step empty-index compaction — so the keymap is the stale half and is
+    reset to empty (keeping `generation`, which other handles still compare
+    against, and `next_key`, because keys are never reused), logged at
+    `warn`, before the journal is replayed. Without this, the directory
+    reported documents that no query could ever return. Pinned by
+    `an_absent_index_beside_a_non_empty_keymap_is_reset_on_open`;
+    mutation-checked.
+18. **The `count == 0` compaction now removes `index.usearch` *before* it
+    renames the empty `keymap.bin` into place** — the reverse of the order
+    deviation 15 originally recorded. Either order can be interrupted; the
+    question is which leftover state is recoverable. Removing the graph first
+    leaves (no index + old keymap), which deviation 17's rule resets cleanly.
+    Renaming the keymap first leaves (old index + empty keymap): the removed
+    vectors are still in the graph, now unnamed, and every later compaction
+    serialises them out again — a permanent leak of exactly the data the user
+    asked to delete, with no way to identify it afterwards.
+19. **A torn pair with no journal is reported rather than repaired, and
+    `doc_count()` counts the keymap.** An end-of-batch commit skips the
+    journal (see the vectors-v2 doc's "Commit and compaction rules"), so a
+    crash between compaction's two renames can leave a new `index.usearch`
+    beside an old `keymap.bin` with nothing on disk to reconstruct the
+    difference from: the missing `ItemId`s lived only in the keymap that
+    never landed, and USearch 2.15 cannot enumerate a graph's keys. `open`
+    now logs a `warn` naming both counts and the recovery command
+    (`singularmem reindex --with-embeddings --reset-vectors --force`), and
+    `doc_count()`/`len()` return the **keymap's** entry count — the
+    searchable count, since `search` filters every hit through
+    `keymap.forward` — instead of `usearch::Index::size()`, which would
+    over-report the corpus for the life of the directory. Pinned by
+    `a_torn_pair_with_no_journal_reports_the_keymap_count`;
+    mutation-checked.
+20. **Windows lock contention is recognised by raw OS error, not by
+    `ErrorKind`.** `acquire_lock_at` retried only
+    `io::ErrorKind::WouldBlock`. On Windows, `LockFileEx` reports an
+    already-held lock as `ERROR_LOCK_VIOLATION` (raw OS error 33), which Rust
+    maps to the unstable `ErrorKind::Uncategorized` — unmatchable, so every
+    genuinely contended commit failed immediately instead of backing off.
+    `is_lock_contention` now also accepts `raw_os_error() == Some(33)` under
+    `cfg(windows)`. Not testable from this workspace (no Windows runner in
+    the test matrix); documented on the function and in the vectors-v2 doc's
+    "`lock`" section.
+21. **`Journal::create_file` fsyncs the parent directory.** It fsynced the
+    new file's contents but not the directory entry naming it, so the first
+    `commit(false)` in a directory's life could return `Ok` and lose the
+    whole journal to a power cut — bytes on the platter, no name pointing at
+    them. `sync_file`/`sync_dir` moved out of `vector_index.rs` into a shared
+    `crate::fsync` module, since both the journal's creation and
+    compaction's renames need them. The fsync itself is not observable from
+    a test; `create_file_writes_the_header_and_survives_a_relative_path`
+    covers the behaviour around it (including the bare-filename case, where
+    there is no parent directory to open) and the guarantee is stated in the
+    function's doc comment.
+22. **Documentation corrections.** `docs/formats/vectors-v2.md`'s claim that
+    "at every point the directory is one of exactly two consistent states"
+    was false — deviations 17-19 name three states it did not cover. It is
+    replaced by a twelve-row crash-point table listing every intermediate
+    state and what `open` does with it, with the torn pair (row 6) marked
+    explicitly as the one hole, plus two new "Known limitation" sections
+    beside the existing in-memory-tombstone one.
+    `docs/benchmarks/ingest.md` gains a "Read-side cost" section with the
+    open-latency measurement the write-side numbers were silent about
+    (11.9 ms with an empty journal vs 638.8 ms with 999 records, at 20,000
+    vectors) and the two things that bound it. `crates/singularmem-core/`
+    `src/hook.rs`'s module doc said `IndexHook` has "three methods"; it has
+    four (`on_ingest`, `on_reindex`, `commit`, and the defaulted
+    `on_ingest_batch`, added by this sub-project).

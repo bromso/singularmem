@@ -19,6 +19,10 @@
 //!   `EmbedderIndex` — i.e. what a real ingest path looks like. Ungated;
 //!   reported informationally by `.github/scripts/perf-check.sh` so the
 //!   Tantivy-dominated combined cost stays visible without gating on it.
+//! - `open_with_journal`: `VectorIndex::open` on a 20,000-vector compacted
+//!   directory with 999 journal records waiting to be replayed — the
+//!   read-side cost the journal buys the write side with. Ungated,
+//!   informational; see `docs/benchmarks/ingest.md` § "Read-side cost".
 //!
 //! `.github/scripts/perf-check.sh` reads the per-bench
 //! `target/criterion/<bench>/new/estimates.json` files produced here.
@@ -27,7 +31,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use singularmem_core::{NewItem, Store};
 use singularmem_search::testing::MockEmbedder;
 use singularmem_search::{
-    EmbedderIndex, HybridSearcher, Index, Query, SearchOptions, SemanticSearchOptions,
+    Embedder, EmbedderIndex, HybridSearcher, Index, Query, SearchOptions, SemanticSearchOptions,
+    VectorIndex,
 };
 use tempfile::TempDir;
 
@@ -264,6 +269,64 @@ fn bench_ingest_single_with_both_hooks(c: &mut Criterion) {
     group.finish();
 }
 
+/// Seed a vector directory with `compacted` compacted vectors and then
+/// `journalled` more sitting in `journal.bin` (a `commit(false)` below the
+/// 1,000-record compaction threshold), using `VectorIndex` directly rather
+/// than a `Store` so the setup costs only the embedding and the graph
+/// inserts.
+fn seed_journalled_vector_dir(compacted: usize, journalled: usize) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+    for chunk in (0..compacted).collect::<Vec<_>>().chunks(1_000) {
+        let vectors: Vec<Vec<f32>> = chunk
+            .iter()
+            .map(|i| Embedder::embed(&e, &format!("seed {i}")).unwrap())
+            .collect();
+        let entries: Vec<(singularmem_core::ItemId, &[f32])> = vectors
+            .iter()
+            .map(|v| (ulid::Ulid::new().to_string().parse().unwrap(), v.as_slice()))
+            .collect();
+        idx.add_batch(&entries).unwrap();
+    }
+    idx.compact().unwrap();
+    for i in 0..journalled {
+        let v = Embedder::embed(&e, &format!("journalled {i}")).unwrap();
+        idx.add(ulid::Ulid::new().to_string().parse().unwrap(), &v)
+            .unwrap();
+    }
+    idx.commit(false).unwrap();
+    assert_eq!(idx.journal_len().unwrap(), journalled);
+    drop(idx);
+    dir
+}
+
+/// The read side of the journal trade: `VectorIndex::open` has to replay
+/// every journal record into the loaded graph, so open latency grows with
+/// journal length while commit latency stops growing with index size.
+///
+/// Informational only — **not gated**. `COMPACT_THRESHOLD = 1_000` is what
+/// bounds this cost (a journal never holds more than 1,000 records before a
+/// commit compacts it), and any bulk `ingest_many` ends with a compacting
+/// commit that resets it to zero. 999 records is therefore the worst case a
+/// reader can encounter.
+fn bench_open_with_journal(c: &mut Criterion) {
+    let dir = seed_journalled_vector_dir(20_000, 999);
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let mut group = c.benchmark_group("open_with_journal");
+    // Each open replays 999 vectors into a 20,000-node HNSW graph; the
+    // default 100 samples would run for minutes.
+    group.sample_size(10);
+    group.bench_function("open_with_999_journal_records", |b| {
+        b.iter(|| {
+            let idx = VectorIndex::open(&vdir, &e).unwrap();
+            assert_eq!(idx.len(), 20_999);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_search_latency,
@@ -274,5 +337,6 @@ criterion_group!(
     bench_ingest_with_indexes,
     bench_ingest_single_with_vector_index,
     bench_ingest_single_with_both_hooks,
+    bench_open_with_journal,
 );
 criterion_main!(benches);

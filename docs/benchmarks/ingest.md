@@ -133,6 +133,55 @@ size-dependent regression the journal fixes. The mock-embedder measurement
 at 20,000 items above isolates that effect instead, without paying for
 20,000 real embedding calls.
 
+## Read-side cost
+
+The journal makes a single-item commit cheap by *not* rewriting
+`index.usearch`. Somebody has to pay for that later, and it is the reader:
+`VectorIndex::open` loads the graph and then replays every journal record
+into it, one HNSW insertion each. So open latency grows with journal length
+in exactly the way commit latency stopped growing with index size.
+
+Measured with an ad-hoc example (temporary, not committed — the brief's
+convention) on the same machine: a 20,000-vector compacted directory
+(`MockEmbedder`, dim 384), opened ten times with an empty journal and ten
+times with 999 journal records — one below `COMPACT_THRESHOLD`, i.e. the
+worst case a reader can encounter.
+
+| Open | Median | Samples (ms) |
+|---|---|---|
+| 20,000 vectors, **empty journal** | **11.9 ms** | 13.1, 11.9, 11.9, 11.4, 12.7, 12.3, 12.1, 11.5, 11.5, 11.5 |
+| 20,000 vectors, **999 journal records** | **638.8 ms** | 639.5, 678.3, 632.0, 670.8, 628.9, 626.2, 634.3, 638.8, 644.3, 633.5 |
+
+~54× slower, and essentially all of it is the 999 HNSW insertions
+(~0.64 ms each into a 20,000-node graph at `ef_construction = 128`), not the
+journal I/O — the file is 999 × (16 + 384 × 4) ≈ 1.5 MB. The figure is
+unchanged by the correctness fixes in this branch's review wave: the same
+example run against the pre-fix tree measures 12.3 ms / 645.3 ms, within
+noise of the numbers above.
+
+**What bounds it.** Two things, and both matter:
+
+- `COMPACT_THRESHOLD = 1_000` — a `commit(false)` compacts as soon as the
+  journal holds more than 1,000 records, so 999 is the ceiling above, not a
+  number that keeps climbing.
+- **A bulk batch ends by compacting.** `Store::ingest_many` closes with one
+  end-of-batch commit, which skips the journal entirely and compacts, so a
+  bulk ingest leaves the journal at zero for the single ingests that follow.
+
+The pathological shape is therefore a long run of single-item ingests
+(up to 1,000 of them) followed by a process that opens the directory once
+and exits — a short-lived CLI invocation, for instance. It pays up to
+~0.6 s of replay that a compaction would have amortised. A long-lived
+process (the MCP server) pays it once at startup.
+
+A Criterion bench pins the worst case: `open_with_journal/`
+`open_with_999_journal_records` in `crates/singularmem-search/benches/`
+`search_perf.rs`, 20,000 compacted vectors + 999 journal records, ten
+samples. It measured 634.89 ms \[621.88, 649.45\]. **It is informational
+and is not gated** — `.github/scripts/perf-check.sh` does not read it. There
+is no budget to enforce here yet; the number exists so a future change that
+makes replay cheaper (or accidentally much more expensive) is visible.
+
 ## Reproducing
 
 ```bash
@@ -140,6 +189,16 @@ at 20,000 items above isolates that effect instead, without paying for
 cargo bench -p singularmem-search --bench search_perf -- ingest_ \
   --warm-up-time 1 --measurement-time 5
 python3 -c "import json; print(json.load(open('target/criterion/ingest_throughput/ingest_with_indexes/new/estimates.json'))['median']['point_estimate'])"
+
+# Read-side cost (informational, ungated)
+cargo bench -p singularmem-search --bench search_perf -- open_with_journal \
+  --warm-up-time 1 --measurement-time 5
+
+# Read-side medians in the table above: build a temporary example under
+# crates/singularmem-search/examples/ that seeds 20,000 vectors through
+# VectorIndex::add_batch + compact(), times ten VectorIndex::open calls,
+# then adds 999 more with commit(false) and times ten more, and delete it
+# afterwards.
 
 # Real-model numbers: build a temporary example under
 # crates/singularmem-search/examples/ that ingests through Store::ingest_many
