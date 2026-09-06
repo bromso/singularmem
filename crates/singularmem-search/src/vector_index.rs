@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -122,8 +122,19 @@ pub struct VectorIndexMeta {
 /// the forward (`u64 → ItemId`) and reverse (`ItemId → u64`) mappings here.
 /// The keymap is persisted as `keymap.bin` (bincode) alongside the `USearch`
 /// binary so that keys survive process restarts.
+///
+/// # On-disk layout (`format_version "2"`)
+///
+/// bincode, fields in declaration order: `generation`, `next_key`, `forward`,
+/// `reverse`. bincode is not self-describing and cannot default a missing
+/// field, so the `"1"` layout — which had no `generation` — is read through
+/// [`KeymapV1`] and selected by `.meta.json`'s `format_version`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Keymap {
+    /// Bumped by one on every successful compaction. A handle records the
+    /// generation it loaded; when the on-disk keymap has moved on, another
+    /// handle has compacted and this handle's in-memory graph is stale.
+    pub generation: u64,
     /// Next free sequential key. Monotonically increasing; never reused.
     pub next_key: u64,
     /// Forward direction: `USearch` key → `ItemId`. `BTreeMap` so iteration is
@@ -133,6 +144,69 @@ pub(crate) struct Keymap {
     /// is `Hash + Eq` but not `Ord` (`Ulid` is `Ord`, but `ItemId` does not
     /// derive it).
     pub reverse: HashMap<ItemId, u64>,
+}
+
+/// `keymap.bin` as written by `format_version "1"` builds: the same fields
+/// minus `generation`. Read-only — this build never writes it back.
+#[derive(Debug, Deserialize)]
+struct KeymapV1 {
+    next_key: u64,
+    forward: BTreeMap<u64, ItemId>,
+    reverse: HashMap<ItemId, u64>,
+}
+
+impl From<KeymapV1> for Keymap {
+    fn from(v1: KeymapV1) -> Self {
+        Self {
+            generation: 0,
+            next_key: v1.next_key,
+            forward: v1.forward,
+            reverse: v1.reverse,
+        }
+    }
+}
+
+/// Deserialise `keymap.bin`, picking the struct that matches `format_version`.
+///
+/// The other layout is tried as a fallback: a crash between the `.meta.json`
+/// upgrade and the first v2 keymap rename leaves a `"2"` meta beside a v1
+/// keymap, and that directory must still open.
+fn read_keymap(path: &Path, format_version: &str) -> Result<Keymap> {
+    let bytes = fs::read(path).map_err(Error::Io)?;
+    let corrupt = |e: bincode::Error| Error::Embedding {
+        context: "deserializing keymap.bin",
+        reason: format!("{e}"),
+    };
+    if format_version == FORMAT_VERSION_V1 {
+        bincode::deserialize::<KeymapV1>(&bytes)
+            .map(Keymap::from)
+            .or_else(|e| bincode::deserialize::<Keymap>(&bytes).map_err(|_| corrupt(e)))
+    } else {
+        bincode::deserialize::<Keymap>(&bytes).or_else(|e| {
+            bincode::deserialize::<KeymapV1>(&bytes)
+                .map(Keymap::from)
+                .map_err(|_| corrupt(e))
+        })
+    }
+}
+
+/// Just the `format_version` of `.meta.json`, without parsing (or requiring)
+/// the rest of the document. `None` when the file does not exist.
+fn disk_format_version(meta_path: &Path) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Probe {
+        format_version: String,
+    }
+    match fs::read_to_string(meta_path) {
+        Ok(text) => serde_json::from_str::<Probe>(&text)
+            .map(|p| Some(p.format_version))
+            .map_err(|e| Error::Embedding {
+                context: "parsing existing .meta.json",
+                reason: format!("{e}"),
+            }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::Io(e)),
+    }
 }
 
 // ── VectorIndex ───────────────────────────────────────────────────────────
@@ -155,12 +229,23 @@ pub struct VectorIndex {
     pub(crate) usearch_path: PathBuf,
     pub(crate) meta: VectorIndexMeta,
     pub(crate) keymap: Mutex<Keymap>,
+    /// `<dir>/keymap.bin`.
+    keymap_path: PathBuf,
+    /// `<dir>/.meta.json`.
+    meta_path: PathBuf,
+    /// `expansion_search` this handle was opened with. Kept so a stale-handle
+    /// reload can rebuild the `usearch::Index` with the same options.
+    expansion_search: usize,
     /// Append-only log of vectors added since the last compaction.
     journal: Journal,
     /// Vectors added but not yet appended to `journal`, in insertion order.
     pending: Mutex<Vec<(ItemId, Vec<f32>)>>,
     /// `<dir>/lock`, the advisory lock file taken for the whole of a commit.
     lock_path: PathBuf,
+    /// `keymap.generation` this handle's in-memory graph corresponds to. When
+    /// the on-disk keymap's generation has moved past this, another handle
+    /// compacted and this handle must reload before it may save.
+    loaded_generation: AtomicU64,
     /// Set when `.meta.json` on disk still says `format_version "1"`; the
     /// upgraded meta is written by the first commit, inside the lock.
     meta_upgrade_pending: AtomicBool,
@@ -173,8 +258,8 @@ pub struct VectorIndex {
     tombstones: Mutex<HashSet<ItemId>>,
 }
 
-/// Holds `<dir>/lock` for the duration of a commit. Releasing on drop means
-/// an early `?` return inside a commit cannot strand the lock.
+/// Holds `<dir>/lock` for the duration of a commit or of a load. Releasing on
+/// drop means an early `?` return inside a commit cannot strand the lock.
 struct CommitLock(File);
 
 impl Drop for CommitLock {
@@ -183,6 +268,90 @@ impl Drop for CommitLock {
         // descriptor closes a moment later anyway.
         let _ = FileExt::unlock(&self.0);
     }
+}
+
+/// Which advisory lock mode [`acquire_lock_at`] should take. Writers need the
+/// exclusive lock; a load only needs to exclude writers, so several readers
+/// can share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+/// Take `<dir>/lock` in `mode`, retrying a busy lock on the schedule the
+/// Tantivy sidecar uses: five attempts sleeping `50, 100, 200, 400` ms.
+fn acquire_lock_at(lock_path: &Path, mode: LockMode) -> Result<CommitLock> {
+    let mut delay = LOCK_BASE_DELAY;
+    for attempt in 1..=LOCK_ATTEMPTS {
+        let file = File::create(lock_path).map_err(Error::Io)?;
+        // UFCS: `File` grew inherent `try_lock_shared` in Rust 1.89, which
+        // returns a different error type. We want fs4's `FileExt` on both
+        // arms, so both stay on the `io::ErrorKind::WouldBlock` contract the
+        // retry loop below is written against.
+        let taken = match mode {
+            LockMode::Shared => FileExt::try_lock_shared(&file),
+            LockMode::Exclusive => FileExt::try_lock_exclusive(&file),
+        };
+        match taken {
+            Ok(()) => return Ok(CommitLock(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                tracing::debug!(
+                    path = %lock_path.display(),
+                    ?mode,
+                    attempt,
+                    attempts = LOCK_ATTEMPTS,
+                    "vector index lock busy; retrying",
+                );
+                if attempt < LOCK_ATTEMPTS {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+            }
+            Err(e) => return Err(Error::Io(e)),
+        }
+    }
+    Err(Error::Usearch {
+        context: "acquiring vector index lock",
+        reason: format!("busy after {LOCK_ATTEMPTS} attempts"),
+    })
+}
+
+/// Take the shared lock for a load. A directory we may not write to has no
+/// lock file we can create; loading it unsynchronised is the pre-lock
+/// behaviour and is the only way a read-only vector directory can be opened
+/// at all, so a permission failure downgrades to "no lock" rather than
+/// failing the open.
+fn acquire_load_lock(lock_path: &Path) -> Result<Option<CommitLock>> {
+    match acquire_lock_at(lock_path, LockMode::Shared) {
+        Ok(guard) => Ok(Some(guard)),
+        Err(Error::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            tracing::debug!(
+                path = %lock_path.display(),
+                "vector index lock file is not writable; loading without the lock",
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `true` for the errors a torn compaction produces, i.e. the ones worth
+/// retrying the load for once the lock has been re-taken.
+fn is_retryable_load_error(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Usearch { .. }
+            | Error::Embedding {
+                context: "deserializing keymap.bin",
+                ..
+            }
+    )
 }
 
 impl std::fmt::Debug for VectorIndex {
@@ -234,33 +403,47 @@ impl VectorIndex {
     ) -> Result<Self> {
         let dir = dir.as_ref();
         fs::create_dir_all(dir).map_err(Error::Io)?;
-        let meta_path = dir.join(".meta.json");
-        let usearch_path = dir.join("index.usearch");
-        let keymap_path = dir.join("keymap.bin");
+        let lock_path = dir.join("lock");
 
-        // ── Load or create meta ───────────────────────────────────────────
-        let meta = if meta_path.exists() {
-            let text = fs::read_to_string(&meta_path).map_err(Error::Io)?;
-            let m: VectorIndexMeta = serde_json::from_str(&text).map_err(|e| Error::Embedding {
-                context: "parsing existing .meta.json",
-                reason: format!("{e}"),
-            })?;
-            if m.model_id != embedder.model_id() {
-                return Err(Error::ModelMismatch {
-                    path: dir.to_path_buf(),
-                    found_model: m.model_id,
-                    expected_model: embedder.model_id().to_string(),
-                });
+        // The whole load runs under the SHARED advisory lock, so a concurrent
+        // compaction's two renames can never be observed half-done: a reader
+        // would otherwise see a new `index.usearch` beside an old `keymap.bin`
+        // (replay then collides on keys the graph already holds) or the
+        // reverse (vectors silently invisible). Several readers may hold it at
+        // once; only a commit excludes them.
+        for attempt in 0..2 {
+            let _guard = acquire_load_lock(&lock_path)?;
+            match Self::load(dir, embedder, options) {
+                Ok(index) => return Ok(index),
+                // Retry once: a load that raced a compaction started before we
+                // held the lock can still see a half-written file.
+                Err(e) if attempt == 0 && is_retryable_load_error(&e) => {
+                    tracing::debug!(
+                        path = %dir.display(),
+                        error = %e,
+                        "vector index load failed; retrying once under a fresh lock",
+                    );
+                }
+                Err(e) => return Err(e),
             }
-            if m.dim != embedder.dim() {
-                return Err(Error::DimMismatch {
-                    expected: m.dim,
-                    got: embedder.dim(),
-                });
-            }
-            m
-        } else {
-            VectorIndexMeta {
+        }
+        unreachable!("the second loop iteration either returns Ok or propagates the error")
+    }
+
+    /// Read `.meta.json`, or build the meta a fresh directory should have.
+    ///
+    /// Returns the meta this handle will use — always `format_version "2"` —
+    /// alongside the version actually on disk, which selects the `keymap.bin`
+    /// layout and says whether an upgrade is outstanding. `None` for a fresh
+    /// directory, whose `.meta.json` this function has just written.
+    fn load_meta(
+        dir: &Path,
+        meta_path: &Path,
+        embedder: &dyn Embedder,
+        options: VectorIndexOptions,
+    ) -> Result<(VectorIndexMeta, Option<String>)> {
+        if !meta_path.exists() {
+            let meta = VectorIndexMeta {
                 format_version: FORMAT_VERSION.to_string(),
                 model_id: embedder.model_id().to_string(),
                 dim: embedder.dim(),
@@ -268,27 +451,63 @@ impl VectorIndex {
                 hnsw_m: options.hnsw_m,
                 hnsw_ef_construction: options.hnsw_ef_construction,
                 created_at: jiff::Timestamp::now(),
-            }
-        };
-
-        // ── v1 → v2 upgrade ───────────────────────────────────────────────
-        // A pre-journal directory opens unchanged; the in-memory meta is
-        // already v2 and the first commit rewrites `.meta.json` under the
-        // commit lock, so a read-only open never touches the file.
-        let upgrading = meta.format_version == FORMAT_VERSION_V1;
-        let mut meta = meta;
-        if upgrading {
-            meta.format_version = FORMAT_VERSION.to_string();
-        }
-
-        // ── Persist meta on first open ────────────────────────────────────
-        if !meta_path.exists() {
+            };
             let text = serde_json::to_string_pretty(&meta).map_err(|e| Error::Embedding {
                 context: "serializing .meta.json",
                 reason: format!("{e}"),
             })?;
-            fs::write(&meta_path, text).map_err(Error::Io)?;
+            fs::write(meta_path, text).map_err(Error::Io)?;
+            return Ok((meta, None));
         }
+
+        let text = fs::read_to_string(meta_path).map_err(Error::Io)?;
+        let mut meta: VectorIndexMeta =
+            serde_json::from_str(&text).map_err(|e| Error::Embedding {
+                context: "parsing existing .meta.json",
+                reason: format!("{e}"),
+            })?;
+        // Refuse a directory written by a newer build by name rather than
+        // misreading its `keymap.bin` as one of the layouts we know.
+        if meta.format_version != FORMAT_VERSION && meta.format_version != FORMAT_VERSION_V1 {
+            return Err(Error::IndexCorrupted {
+                path: dir.to_path_buf(),
+                reason: format!(
+                    "unsupported vector index format_version {:?}; \
+                     this build reads {FORMAT_VERSION_V1:?} and {FORMAT_VERSION:?}",
+                    meta.format_version
+                ),
+            });
+        }
+        if meta.model_id != embedder.model_id() {
+            return Err(Error::ModelMismatch {
+                path: dir.to_path_buf(),
+                found_model: meta.model_id,
+                expected_model: embedder.model_id().to_string(),
+            });
+        }
+        if meta.dim != embedder.dim() {
+            return Err(Error::DimMismatch {
+                expected: meta.dim,
+                got: embedder.dim(),
+            });
+        }
+        // A pre-journal directory opens unchanged: the in-memory meta is
+        // promoted to v2 here and the first commit rewrites `.meta.json` under
+        // the commit lock, so a read-only open never touches the file.
+        let disk_format = std::mem::replace(&mut meta.format_version, FORMAT_VERSION.to_string());
+        Ok((meta, Some(disk_format)))
+    }
+
+    /// Load meta, `index.usearch`, `keymap.bin` and the journal into a fresh
+    /// handle. The caller holds the shared load lock.
+    fn load(dir: &Path, embedder: &dyn Embedder, options: VectorIndexOptions) -> Result<Self> {
+        let meta_path = dir.join(".meta.json");
+        let usearch_path = dir.join("index.usearch");
+        let keymap_path = dir.join("keymap.bin");
+
+        let (meta, disk_format) = Self::load_meta(dir, &meta_path, embedder, options)?;
+        let disk_format = disk_format.unwrap_or_else(|| FORMAT_VERSION.to_string());
+        let upgrading = disk_format == FORMAT_VERSION_V1;
 
         // ── Construct usearch::Index ──────────────────────────────────────
         let usearch_opts = IndexOptions {
@@ -322,14 +541,11 @@ impl VectorIndex {
 
         // ── Load or create keymap ─────────────────────────────────────────
         let keymap = if keymap_path.exists() {
-            let bytes = fs::read(&keymap_path).map_err(Error::Io)?;
-            bincode::deserialize::<Keymap>(&bytes).map_err(|e| Error::Embedding {
-                context: "deserializing keymap.bin",
-                reason: format!("{e}"),
-            })?
+            read_keymap(&keymap_path, &disk_format)?
         } else {
             Keymap::default()
         };
+        let generation = keymap.generation;
 
         // ── Open the journal and replay it into the in-memory graph ───────
         let journal = Journal::open(&dir.join("journal.bin"), meta.dim, &meta.model_id)?;
@@ -339,9 +555,13 @@ impl VectorIndex {
             usearch_path,
             meta,
             keymap: Mutex::new(keymap),
+            keymap_path,
+            meta_path,
+            expansion_search: options.expansion_search,
             journal,
             pending: Mutex::new(Vec::new()),
             lock_path: dir.join("lock"),
+            loaded_generation: AtomicU64::new(generation),
             meta_upgrade_pending: AtomicBool::new(upgrading),
             tombstones: Mutex::new(HashSet::new()),
         };
@@ -443,47 +663,21 @@ impl VectorIndex {
             }
         }
 
-        let keys: Vec<u64> = {
-            let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
-            entries
-                .iter()
-                .map(|(id, _)| {
-                    let key = keymap.next_key;
-                    keymap.next_key += 1;
-                    keymap.forward.insert(key, *id);
-                    keymap.reverse.insert(*id, key);
-                    key
-                })
-                .collect()
-        };
-
+        // Lock order throughout this type is inner → keymap → pending. The
+        // queue is filled while the inner lock is still held so a compaction,
+        // which snapshots the graph and takes the queue in one critical
+        // section, can never see a vector that is in neither.
         let inner = self.inner.lock().expect("usearch mutex poisoned");
-        // USearch requires explicit reservation before insertions when the
-        // index was loaded from disk (capacity does not auto-grow). Reserve
-        // in doubling increments to amortise the cost, computed once for the
-        // whole batch rather than once per entry.
-        let size = inner.size();
-        let capacity = inner.capacity();
-        let needed = size + entries.len();
-        if needed > capacity {
-            let new_cap = (capacity + 1).max(needed + 1024);
-            inner.reserve(new_cap).map_err(|e| Error::Usearch {
-                context: "auto-reserving usearch capacity before add_batch",
-                reason: format!("{e}"),
-            })?;
-        }
-        for (key, (_, vector)) in keys.iter().zip(entries.iter()) {
-            inner.add(*key, vector).map_err(|e| Error::Usearch {
-                context: "usearch add",
-                reason: format!("{e}"),
-            })?;
-        }
-        drop(inner);
-
+        let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
+        let result = insert_entries(&inner, &mut keymap, entries);
+        drop(keymap);
+        result?;
         if queue {
             let mut pending = self.pending.lock().expect("pending mutex poisoned");
             pending.extend(entries.iter().map(|(id, vector)| (*id, (*vector).to_vec())));
+            drop(pending);
         }
+        drop(inner);
         Ok(())
     }
 
@@ -607,11 +801,7 @@ impl VectorIndex {
             if let Err(e) = self.journal.append(&drained) {
                 // Put the queue back (ahead of anything added meanwhile) so a
                 // later commit can still make these vectors durable.
-                let mut pending = self.pending.lock().expect("pending mutex poisoned");
-                let mut restored = drained;
-                restored.append(&mut pending);
-                *pending = restored;
-                drop(pending);
+                self.requeue(drained);
                 return Err(e);
             }
         }
@@ -622,22 +812,51 @@ impl VectorIndex {
         Ok(())
     }
 
-    /// Fold the journal into `index.usearch` + `keymap.bin` and truncate it,
-    /// with the file lock already held by the caller.
+    /// Put drained-but-unwritten records back at the front of `pending`,
+    /// ahead of anything added meanwhile, preserving insertion order.
+    fn requeue(&self, mut records: Vec<(ItemId, Vec<f32>)>) {
+        if records.is_empty() {
+            return;
+        }
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        records.append(&mut pending);
+        *pending = records;
+        drop(pending);
+    }
+
+    /// Fold everything into `index.usearch` + `keymap.bin` and truncate the
+    /// journal, with the exclusive file lock already held by the caller.
     ///
-    /// Replays the journal first. That is not redundant with the replay in
-    /// `open`: another handle may have appended vectors since this one opened,
-    /// and this handle's in-memory graph knows nothing about them. Saving from
-    /// that stale view and then truncating would delete the other writer's
-    /// vectors outright, so a compaction always absorbs the journal it is
-    /// about to discard.
+    /// Two things must happen before this handle may write the graph out, and
+    /// both exist because another handle may have moved the directory on since
+    /// this one loaded:
+    ///
+    /// 1. **Adopt a newer on-disk state.** If `keymap.bin`'s `generation` has
+    ///    moved past the one this handle loaded, another handle compacted:
+    ///    this handle's in-memory graph predates that work and the journal no
+    ///    longer holds it (the other handle truncated it). Saving from here
+    ///    would silently delete the other handle's vectors, so reload
+    ///    `index.usearch` + `keymap.bin` first.
+    /// 2. **Replay the journal.** Another handle may have appended vectors
+    ///    that nobody has compacted yet. Truncating a journal this handle has
+    ///    not absorbed would delete them, so a compaction always absorbs the
+    ///    journal it is about to discard.
     fn compact_locked(&self) -> Result<()> {
+        self.reload_if_stale()?;
         self.absorb_journal()?;
 
+        // Snapshot the graph and take the queue in one critical section:
+        // `add_entries` holds the inner lock while it pushes to `pending`, so
+        // a concurrent add is either inside the file written below or still in
+        // `pending` afterwards, never in neither.
         let tmp_usearch = self.path.join("index.usearch.tmp");
         let inner = self.inner.lock().expect("usearch mutex poisoned");
+        let drained: Vec<(ItemId, Vec<f32>)> = {
+            let mut pending = self.pending.lock().expect("pending mutex poisoned");
+            std::mem::take(&mut *pending)
+        };
         let count = inner.size();
-        if count > 0 {
+        let saved = if count > 0 {
             // Only persist the USearch binary when there is at least one item.
             // usearch::Index::load on a file saved from an empty index may
             // segfault on some platforms; we avoid generating such files.
@@ -646,26 +865,50 @@ impl VectorIndex {
                 .map_err(|e| Error::Usearch {
                     context: "usearch save",
                     reason: format!("{e}"),
-                })?;
-        }
+                })
+        } else {
+            Ok(())
+        };
         drop(inner);
+
+        match saved.and_then(|()| self.publish_compaction(count, &tmp_usearch)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Nothing was published, so the drained vectors are still only
+                // in memory. Put them back so the next commit journals them.
+                self.requeue(drained);
+                Err(e)
+            }
+        }
+    }
+
+    /// Rename the freshly written pair into place, stamp the new generation,
+    /// and drop the journal. Called by [`compact_locked`] with the exclusive
+    /// lock held and `index.usearch.tmp` already written when `count > 0`.
+    fn publish_compaction(&self, count: usize, tmp_usearch: &Path) -> Result<()> {
         if count > 0 {
-            sync_file(&tmp_usearch)?;
-            fs::rename(&tmp_usearch, &self.usearch_path).map_err(Error::Io)?;
+            sync_file(tmp_usearch)?;
+            fs::rename(tmp_usearch, &self.usearch_path).map_err(Error::Io)?;
         } else if self.usearch_path.exists() {
             // Remove any stale usearch file so the next open starts fresh.
             fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
         }
 
-        let bytes = bincode::serialize(&*self.keymap.lock().expect("keymap mutex poisoned"))
-            .map_err(|e| Error::Embedding {
+        let generation = self.loaded_generation.load(Ordering::SeqCst) + 1;
+        let bytes = {
+            let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
+            keymap.generation = generation;
+            let bytes = bincode::serialize(&*keymap).map_err(|e| Error::Embedding {
                 context: "serializing keymap",
                 reason: format!("{e}"),
-            })?;
+            });
+            drop(keymap);
+            bytes?
+        };
         let tmp_keymap = self.path.join("keymap.bin.tmp");
         fs::write(&tmp_keymap, bytes).map_err(Error::Io)?;
         sync_file(&tmp_keymap)?;
-        fs::rename(&tmp_keymap, self.path.join("keymap.bin")).map_err(Error::Io)?;
+        fs::rename(&tmp_keymap, &self.keymap_path).map_err(Error::Io)?;
 
         // Best-effort directory fsync so the renames are durable. Not every
         // platform lets you open a directory for this, and a failure here
@@ -683,7 +926,89 @@ impl VectorIndex {
         let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
         tombstones.clear();
         drop(tombstones);
+
+        self.loaded_generation.store(generation, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// If `keymap.bin`'s generation has moved past the one this handle loaded,
+    /// replace the in-memory graph and keymap with what is on disk, then
+    /// re-insert anything still queued in `pending`. Tombstones survive.
+    ///
+    /// Called at the top of every compaction, with the exclusive lock held.
+    fn reload_if_stale(&self) -> Result<()> {
+        if !self.keymap_path.exists() {
+            return Ok(());
+        }
+        let version =
+            disk_format_version(&self.meta_path)?.unwrap_or_else(|| FORMAT_VERSION.to_string());
+        let disk_keymap = read_keymap(&self.keymap_path, &version)?;
+        if disk_keymap.generation == self.loaded_generation.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        tracing::debug!(
+            path = %self.path.display(),
+            loaded = self.loaded_generation.load(Ordering::SeqCst),
+            on_disk = disk_keymap.generation,
+            "another handle compacted; reloading before saving",
+        );
+
+        let fresh = usearch::Index::new(&self.usearch_options()).map_err(|e| Error::Usearch {
+            context: "constructing usearch::Index for a stale-handle reload",
+            reason: format!("{e}"),
+        })?;
+        if self.usearch_path.exists() {
+            fresh
+                .load(self.usearch_path.to_str().unwrap())
+                .map_err(|e| Error::Usearch {
+                    context: "reloading usearch index after another handle compacted",
+                    reason: format!("{e}"),
+                })?;
+        } else {
+            fresh.reserve(1024).map_err(|e| Error::Usearch {
+                context: "reserving initial usearch capacity",
+                reason: format!("{e}"),
+            })?;
+        }
+
+        let mut disk_keymap = disk_keymap;
+        let generation = disk_keymap.generation;
+        let mut inner = self.inner.lock().expect("usearch mutex poisoned");
+        let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
+        // Anything queued here has never reached the journal, so the reloaded
+        // graph does not have it; re-insert it under fresh keys.
+        let queued: Vec<(ItemId, Vec<f32>)> = {
+            let pending = self.pending.lock().expect("pending mutex poisoned");
+            pending.clone()
+        };
+        let entries: Vec<(ItemId, &[f32])> = queued
+            .iter()
+            .map(|(id, vector)| (*id, vector.as_slice()))
+            .collect();
+        let inserted = insert_entries(&fresh, &mut disk_keymap, &entries);
+        if inserted.is_ok() {
+            *inner = fresh;
+            *keymap = disk_keymap;
+            self.loaded_generation.store(generation, Ordering::SeqCst);
+        }
+        drop(keymap);
+        drop(inner);
+        inserted
+    }
+
+    /// The `usearch::IndexOptions` this handle's graph was built with.
+    /// `usearch::IndexOptions` is neither `Clone` nor `Copy`, so it is rebuilt
+    /// from `meta` plus the `expansion_search` the handle was opened with.
+    const fn usearch_options(&self) -> IndexOptions {
+        IndexOptions {
+            dimensions: self.meta.dim,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            connectivity: self.meta.hnsw_m,
+            expansion_add: self.meta.hnsw_ef_construction,
+            expansion_search: self.expansion_search,
+            multi: false,
+        }
     }
 
     /// Rewrite `.meta.json` with `format_version "2"` the first time a v1
@@ -697,7 +1022,7 @@ impl VectorIndex {
                 context: "serializing .meta.json",
                 reason: format!("{e}"),
             })?;
-            fs::write(self.path.join(".meta.json"), text).map_err(Error::Io)
+            fs::write(&self.meta_path, text).map_err(Error::Io)
         };
         write().inspect_err(|_| {
             // Leave the upgrade outstanding so the next commit retries it.
@@ -705,33 +1030,9 @@ impl VectorIndex {
         })
     }
 
-    /// Take the exclusive advisory lock on `<dir>/lock`, retrying a busy lock
-    /// on the same schedule the Tantivy sidecar uses.
+    /// Take the exclusive advisory lock on `<dir>/lock` for a commit.
     fn acquire_lock(&self) -> Result<CommitLock> {
-        let mut delay = LOCK_BASE_DELAY;
-        for attempt in 1..=LOCK_ATTEMPTS {
-            let file = File::create(&self.lock_path).map_err(Error::Io)?;
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(CommitLock(file)),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    tracing::debug!(
-                        path = %self.lock_path.display(),
-                        attempt,
-                        attempts = LOCK_ATTEMPTS,
-                        "vector index commit lock busy; retrying",
-                    );
-                    if attempt < LOCK_ATTEMPTS {
-                        std::thread::sleep(delay);
-                        delay *= 2;
-                    }
-                }
-                Err(e) => return Err(Error::Io(e)),
-            }
-        }
-        Err(Error::Usearch {
-            context: "acquiring vector index lock",
-            reason: format!("busy after {LOCK_ATTEMPTS} attempts"),
-        })
+        acquire_lock_at(&self.lock_path, LockMode::Exclusive)
     }
 
     /// Number of vectors currently in the in-memory graph, journal replay
@@ -1011,6 +1312,64 @@ impl EmbedderIndex {
             total_indexed,
         })
     }
+}
+
+/// Assign the next sequential keys to `entries`, insert the vectors into
+/// `index`, and record the mappings in `keymap`.
+///
+/// # Collision-proof replay
+///
+/// If the graph already holds the key about to be issued, `index.usearch` is
+/// *ahead* of `keymap.bin`: a compaction renamed the graph and then crashed
+/// before renaming the keymap. `USearch` refuses a duplicate key outright
+/// ("Duplicate keys not allowed"), which used to make such a directory
+/// permanently unopenable. `USearch` 2.15 cannot enumerate a loaded graph's
+/// keys, so the highest key present cannot be computed up front; instead each
+/// key is checked as it is issued and a stale occupant is evicted first. The
+/// record being replayed is the authoritative value for that key — it is the
+/// very record the crashed compaction folded in to produce it.
+fn insert_entries(
+    index: &usearch::Index,
+    keymap: &mut Keymap,
+    entries: &[(ItemId, &[f32])],
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    // USearch requires explicit reservation before insertions when the index
+    // was loaded from disk (capacity does not auto-grow). Reserve in doubling
+    // increments to amortise the cost, computed once for the whole batch
+    // rather than once per entry.
+    let capacity = index.capacity();
+    let needed = index.size() + entries.len();
+    if needed > capacity {
+        let new_cap = (capacity + 1).max(needed + 1024);
+        index.reserve(new_cap).map_err(|e| Error::Usearch {
+            context: "auto-reserving usearch capacity before add_batch",
+            reason: format!("{e}"),
+        })?;
+    }
+    for (id, vector) in entries {
+        let key = keymap.next_key;
+        keymap.next_key += 1;
+        if index.contains(key) {
+            tracing::debug!(
+                key,
+                "usearch graph is ahead of keymap.bin (torn compaction); replacing the orphan key",
+            );
+            index.remove(key).map_err(|e| Error::Usearch {
+                context: "evicting an orphan usearch key during replay",
+                reason: format!("{e}"),
+            })?;
+        }
+        index.add(key, vector).map_err(|e| Error::Usearch {
+            context: "usearch add",
+            reason: format!("{e}"),
+        })?;
+        keymap.forward.insert(key, *id);
+        keymap.reverse.insert(*id, key);
+    }
+    Ok(())
 }
 
 /// `fsync` the file at `path`, so a rename over the original cannot expose a

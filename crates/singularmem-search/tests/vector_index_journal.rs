@@ -3,9 +3,9 @@
 //! at the threshold and at batch end, replay is idempotent, and a v1 directory
 //! is upgraded to v2 on its first commit.
 
-use singularmem_core::{NewItem, Store};
+use singularmem_core::{ItemId, NewItem, Store};
 use singularmem_search::testing::MockEmbedder;
-use singularmem_search::{Embedder, EmbedderIndex, VectorIndex, COMPACT_THRESHOLD};
+use singularmem_search::{Embedder, EmbedderIndex, Error, VectorIndex, COMPACT_THRESHOLD};
 
 fn open(dir: &std::path::Path) -> EmbedderIndex {
     EmbedderIndex::open(dir.join("v"), Box::new(MockEmbedder::default())).unwrap()
@@ -13,6 +13,10 @@ fn open(dir: &std::path::Path) -> EmbedderIndex {
 
 fn embed(text: &str) -> Vec<f32> {
     Embedder::embed(&MockEmbedder::default(), text).unwrap()
+}
+
+fn fresh_id() -> ItemId {
+    ulid::Ulid::new().to_string().parse().unwrap()
 }
 
 #[test]
@@ -189,4 +193,99 @@ fn remove_after_journalling_is_not_resurrected_by_compaction() {
     assert_eq!(reopened.len(), 1, "the removal survives a reopen");
     assert!(reopened.contains(keep));
     assert!(!reopened.contains(drop_me));
+}
+
+/// Critical: `compact` renames `index.usearch` and then `keymap.bin`. A crash
+/// between the two renames leaves a NEW `index.usearch` (holding keys the old
+/// keymap never issued) beside an OLD `keymap.bin` and the full journal. Replay
+/// then hands out keys that already exist in the graph, which `USearch` rejects
+/// as duplicates — the directory used to be permanently unopenable. Open must
+/// recover instead, and every vector must survive.
+#[test]
+fn torn_rename_pair_reopens_and_keeps_every_vector() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let mut ids: Vec<ItemId> = Vec::new();
+    let mut vectors: Vec<Vec<f32>> = Vec::new();
+
+    // A completed compaction first, so `keymap.bin` exists with N < the count
+    // the torn compaction will leave in the graph.
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    for i in 0..10 {
+        let (id, v) = (fresh_id(), embed(&format!("first {i}")));
+        idx.add(id, &v).unwrap();
+        ids.push(id);
+        vectors.push(v);
+    }
+    idx.compact().unwrap();
+    drop(idx);
+
+    // Ten more, journalled but not compacted.
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    for i in 0..10 {
+        let (id, v) = (fresh_id(), embed(&format!("second {i}")));
+        idx.add(id, &v).unwrap();
+        ids.push(id);
+        vectors.push(v);
+    }
+    idx.commit(false).unwrap();
+    assert_eq!(idx.journal_len().unwrap(), 10);
+    drop(idx);
+
+    let old_keymap = std::fs::read(vdir.join("keymap.bin")).unwrap();
+    let old_journal = std::fs::read(vdir.join("journal.bin")).unwrap();
+
+    // Compact, then hand-build the torn state: new index.usearch, old
+    // keymap.bin, full journal.
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    idx.compact().unwrap();
+    drop(idx);
+    std::fs::write(vdir.join("keymap.bin"), &old_keymap).unwrap();
+    std::fs::write(vdir.join("journal.bin"), &old_journal).unwrap();
+
+    let idx = VectorIndex::open(&vdir, &e).expect("a torn rename pair must still open");
+    for (id, v) in ids.iter().zip(vectors.iter()) {
+        let hits = idx.search(v, 1).unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.id),
+            Some(*id),
+            "every id must be searchable after recovering from a torn rename pair"
+        );
+    }
+    idx.compact().unwrap();
+    drop(idx);
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(
+        idx.len(),
+        20,
+        "recovery must not duplicate or drop vectors across a compaction"
+    );
+}
+
+/// A directory written by a future build must be refused by name, not
+/// misparsed as v2.
+#[test]
+fn unknown_format_version_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    VectorIndex::open(&vdir, &e).unwrap().compact().unwrap();
+
+    let meta_path = vdir.join(".meta.json");
+    let meta = std::fs::read_to_string(&meta_path)
+        .unwrap()
+        .replace("\"format_version\": \"2\"", "\"format_version\": \"9\"");
+    assert!(meta.contains("\"format_version\": \"9\""));
+    std::fs::write(&meta_path, meta).unwrap();
+
+    match VectorIndex::open(&vdir, &e) {
+        Err(Error::IndexCorrupted { reason, .. }) => {
+            assert!(
+                reason.contains('9'),
+                "the error must name the version: {reason}"
+            );
+        }
+        other => panic!("expected IndexCorrupted, got {other:?}"),
+    }
 }

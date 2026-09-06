@@ -50,15 +50,9 @@ fn compaction_from_a_stale_handle_keeps_the_other_handles_vectors() {
     let a = VectorIndex::open(&vdir, &e).unwrap();
     let b = VectorIndex::open(&vdir, &e).unwrap();
 
-    for i in 0..40 {
-        let v = Embedder::embed(&e, &format!("a {i}")).unwrap();
-        a.add(fresh_id(), &v).unwrap();
-    }
+    fill(&a, &e, "a");
     a.commit(false).unwrap();
-    for i in 0..40 {
-        let v = Embedder::embed(&e, &format!("b {i}")).unwrap();
-        b.add(fresh_id(), &v).unwrap();
-    }
+    fill(&b, &e, "b");
     b.commit(false).unwrap();
     assert_eq!(a.journal_len().unwrap(), 80, "both writers appended");
 
@@ -73,6 +67,74 @@ fn compaction_from_a_stale_handle_keeps_the_other_handles_vectors() {
         80,
         "compaction must replay the journal under the lock before saving"
     );
+}
+
+/// The case the journal-replay rule alone does *not* cover, and the one that
+/// actually lost data: `a` compacts (truncating the journal), then long-lived
+/// `b` compacts from an in-memory graph that predates `a`'s work. Replay finds
+/// nothing left in the journal, so `b` would save its own 40 vectors over
+/// `a`'s 80. A compaction must notice the on-disk keymap's generation moved
+/// and reload `index.usearch` + `keymap.bin` before saving.
+#[test]
+fn a_compacts_then_b_compacts_and_a_fresh_open_sees_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let a = VectorIndex::open(&vdir, &e).unwrap();
+    let b = VectorIndex::open(&vdir, &e).unwrap();
+
+    fill(&a, &e, "a");
+    a.commit(false).unwrap();
+    fill(&b, &e, "b");
+    b.commit(false).unwrap();
+
+    a.compact().unwrap();
+    b.compact().unwrap();
+    assert_eq!(
+        b.len(),
+        80,
+        "b must adopt a's compacted state before saving"
+    );
+    drop((a, b));
+
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(
+        idx.len(),
+        80,
+        "a stale handle's compaction must not clobber"
+    );
+}
+
+/// Same hazard on the bulk path, where both handles compact on every commit
+/// and the journal is never written at all. This is the shape the reviewer
+/// reproduced: 40 of 80 vectors silently lost, no error.
+#[test]
+fn end_of_batch_commits_from_two_handles_keep_both_sets() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let a = VectorIndex::open(&vdir, &e).unwrap();
+    let b = VectorIndex::open(&vdir, &e).unwrap();
+
+    fill(&a, &e, "a");
+    a.commit(true).unwrap();
+    fill(&b, &e, "b");
+    b.commit(true).unwrap();
+    drop((a, b));
+
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(
+        idx.len(),
+        80,
+        "an end-of-batch commit from a stale handle must not clobber the other's vectors"
+    );
+}
+
+fn fill(idx: &VectorIndex, e: &MockEmbedder, tag: &str) {
+    for i in 0..40 {
+        let v = Embedder::embed(e, &format!("{tag} {i}")).unwrap();
+        idx.add(fresh_id(), &v).unwrap();
+    }
 }
 
 fn fresh_id() -> singularmem_core::ItemId {
