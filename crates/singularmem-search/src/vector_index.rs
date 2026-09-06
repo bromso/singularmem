@@ -292,37 +292,74 @@ impl VectorIndex {
     /// Panics if the keymap or inner index mutex is poisoned (only possible if
     /// another thread panicked while holding the lock).
     pub fn add(&self, id: ItemId, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.meta.dim {
-            return Err(Error::DimMismatch {
-                expected: self.meta.dim,
-                got: vector.len(),
-            });
+        self.add_batch(&[(id, vector)])
+    }
+
+    /// Add (or replace) a batch of items' embedding vectors under a single
+    /// keymap lock acquisition and a single inner-index lock acquisition.
+    ///
+    /// Every entry's dimension is validated before either lock is taken: if
+    /// any `vector.len() != meta.dim`, the whole batch is rejected and
+    /// neither the keymap nor the inner index is touched.
+    ///
+    /// Call [`VectorIndex::save`] to persist changes to disk.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::DimMismatch`] if any `vector.len() != meta.dim`.
+    /// - [`Error::Usearch`] on `USearch` internal failure.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the keymap or inner index mutex is poisoned (only possible if
+    /// another thread panicked while holding the lock).
+    pub fn add_batch(&self, entries: &[(ItemId, &[f32])]) -> Result<()> {
+        for (_, vector) in entries {
+            if vector.len() != self.meta.dim {
+                return Err(Error::DimMismatch {
+                    expected: self.meta.dim,
+                    got: vector.len(),
+                });
+            }
         }
-        let key = {
+
+        let keys: Vec<u64> = {
             let mut keymap = self.keymap.lock().expect("keymap mutex poisoned");
-            let key = keymap.next_key;
-            keymap.next_key += 1;
-            keymap.forward.insert(key, id);
-            keymap.reverse.insert(id, key);
-            key
+            entries
+                .iter()
+                .map(|(id, _)| {
+                    let key = keymap.next_key;
+                    keymap.next_key += 1;
+                    keymap.forward.insert(key, *id);
+                    keymap.reverse.insert(*id, key);
+                    key
+                })
+                .collect()
         };
+
         let inner = self.inner.lock().expect("usearch mutex poisoned");
         // USearch requires explicit reservation before insertions when the
         // index was loaded from disk (capacity does not auto-grow). Reserve
-        // in doubling increments to amortise the cost.
+        // in doubling increments to amortise the cost, computed once for the
+        // whole batch rather than once per entry.
         let size = inner.size();
         let capacity = inner.capacity();
-        if size >= capacity {
-            let new_cap = (capacity + 1).max(size + 1024);
+        let needed = size + entries.len();
+        if needed > capacity {
+            let new_cap = (capacity + 1).max(needed + 1024);
             inner.reserve(new_cap).map_err(|e| Error::Usearch {
-                context: "auto-reserving usearch capacity before add",
+                context: "auto-reserving usearch capacity before add_batch",
                 reason: format!("{e}"),
             })?;
         }
-        inner.add(key, vector).map_err(|e| Error::Usearch {
-            context: "usearch add",
-            reason: format!("{e}"),
-        })
+        for (key, (_, vector)) in keys.iter().zip(entries.iter()) {
+            inner.add(*key, vector).map_err(|e| Error::Usearch {
+                context: "usearch add",
+                reason: format!("{e}"),
+            })?;
+        }
+        drop(inner);
+        Ok(())
     }
 
     /// Remove an item by [`ItemId`]. If the ID is not present, this is a no-op
@@ -580,11 +617,20 @@ impl singularmem_core::IndexHook for EmbedderIndex {
                 .embedder
                 .embed_batch(&texts)
                 .map_err(|ref e| to_core_err(e))?;
-            for (item, v) in chunk.iter().zip(vectors) {
-                self.vector_index
-                    .add(item.id, &v)
-                    .map_err(|ref e| to_core_err(e))?;
+            if vectors.len() != chunk.len() {
+                return Err(to_core_err(&Error::Embedding {
+                    context: "embed_batch returned a short result",
+                    reason: format!("expected {} vectors, got {}", chunk.len(), vectors.len()),
+                }));
             }
+            let entries: Vec<(ItemId, &[f32])> = chunk
+                .iter()
+                .zip(vectors.iter())
+                .map(|(item, v)| (item.id, v.as_slice()))
+                .collect();
+            self.vector_index
+                .add_batch(&entries)
+                .map_err(|ref e| to_core_err(e))?;
         }
         Ok(())
     }
@@ -641,4 +687,92 @@ impl EmbedderIndex {
 /// Type information is lost but the full string survives for logging.
 fn to_core_err(e: &crate::Error) -> singularmem_core::Error {
     singularmem_core::Error::Io(std::io::Error::other(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use singularmem_core::ItemId;
+
+    use super::{Error, VectorIndex};
+    use crate::embedder::Embedder;
+    use crate::testing::MockEmbedder;
+
+    fn fresh_id() -> ItemId {
+        ItemId::from_str(&ulid::Ulid::new().to_string()).expect("freshly minted ulid parses")
+    }
+
+    #[test]
+    fn add_batch_of_n_equals_n_add_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = MockEmbedder::default();
+        let idx_batch = VectorIndex::open(dir.path().join("batch"), &e).unwrap();
+        let idx_single = VectorIndex::open(dir.path().join("single"), &e).unwrap();
+
+        let ids: Vec<ItemId> = (0..5).map(|_| fresh_id()).collect();
+        let vectors: Vec<Vec<f32>> = (0..ids.len())
+            .map(|i| e.embed(&format!("batch item {i}")).unwrap())
+            .collect();
+
+        let entries: Vec<(ItemId, &[f32])> = ids
+            .iter()
+            .zip(vectors.iter())
+            .map(|(id, v)| (*id, v.as_slice()))
+            .collect();
+        idx_batch.add_batch(&entries).unwrap();
+
+        for (id, v) in ids.iter().zip(vectors.iter()) {
+            idx_single.add(*id, v).unwrap();
+        }
+
+        for id in &ids {
+            assert!(idx_batch.contains(*id), "batch-added id should be present");
+            assert!(
+                idx_single.contains(*id),
+                "singly-added id should be present"
+            );
+        }
+        assert_eq!(
+            idx_batch.doc_count().unwrap(),
+            idx_single.doc_count().unwrap(),
+            "add_batch of N entries should match N individual add calls"
+        );
+        assert_eq!(idx_batch.doc_count().unwrap(), ids.len() as u64);
+    }
+
+    #[test]
+    fn add_batch_dimension_mismatch_in_middle_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = MockEmbedder::default(); // dim 384
+        let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+
+        let id1 = fresh_id();
+        let id2 = fresh_id();
+        let id3 = fresh_id();
+
+        let v1 = e.embed("hello").unwrap();
+        let bad = vec![0.0_f32; 128]; // wrong dim, in the middle of the batch
+        let v3 = e.embed("world").unwrap();
+
+        let entries: Vec<(ItemId, &[f32])> = vec![
+            (id1, v1.as_slice()),
+            (id2, bad.as_slice()),
+            (id3, v3.as_slice()),
+        ];
+
+        let err = idx.add_batch(&entries).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::DimMismatch {
+                expected: 384,
+                got: 128
+            }
+        ));
+        assert!(
+            !idx.contains(id1),
+            "a dimension mismatch anywhere in the batch must add nothing at all"
+        );
+        assert_eq!(idx.doc_count().unwrap(), 0);
+    }
 }

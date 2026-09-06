@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use singularmem_core::{Item, NewItem, Store};
+use singularmem_core::{IndexHook, Item, NewItem, Store};
 use singularmem_search::testing::MockEmbedder;
 use singularmem_search::{Embedder, EmbedderIndex, EMBED_CHUNK};
 
@@ -84,5 +84,89 @@ fn every_item_is_present_after_batch_ingest() {
     let idx = EmbedderIndex::open(dir.path().join("v"), Box::new(MockEmbedder::default())).unwrap();
     for item in &items {
         assert!(idx.vector_index().contains(item.id));
+    }
+}
+
+/// Wraps `MockEmbedder` but drops the last vector of the result on one
+/// specific `embed_batch` call (`drop_on_call`, 0-indexed), simulating an
+/// `Embedder::embed_batch` implementation that returns a short result.
+/// Every other call behaves normally.
+struct DropsLastVector {
+    inner: MockEmbedder,
+    calls: AtomicUsize,
+    drop_on_call: usize,
+}
+
+impl Embedder for DropsLastVector {
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+    fn embed(&self, c: &str) -> singularmem_search::Result<Vec<f32>> {
+        self.inner.embed(c)
+    }
+    fn embed_batch(&self, items: &[&str]) -> singularmem_search::Result<Vec<Vec<f32>>> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut vectors = self.inner.embed_batch(items)?;
+        if call == self.drop_on_call {
+            vectors.pop();
+        }
+        Ok(vectors)
+    }
+}
+
+#[test]
+fn on_ingest_batch_errors_on_short_embed_batch_result_but_keeps_earlier_chunks() {
+    // Wire the fake into a real store and ingest two full chunks' worth of
+    // items. `ingest_many` must still return `Ok`: a failing hook is logged
+    // and swallowed by the store, not propagated to the caller.
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_idx = EmbedderIndex::open(
+        store_dir.path().join("v"),
+        Box::new(DropsLastVector {
+            inner: MockEmbedder::default(),
+            calls: AtomicUsize::new(0),
+            drop_on_call: 1,
+        }),
+    )
+    .unwrap();
+    let store = Store::open_with_hook(store_dir.path().join("s.db"), Box::new(store_idx)).unwrap();
+    let items: Vec<Item> = store
+        .ingest_many(
+            (0..(EMBED_CHUNK * 2)).map(|i| NewItem::text(format!("short-result item {i}"))),
+        )
+        .expect("ingest_many succeeds even when the IndexHook fails internally");
+    drop(store);
+
+    // Now call the hook directly on a fresh `EmbedderIndex` built over an
+    // identically-misbehaving fake, so the hook error is directly
+    // observable (not just logged-and-swallowed as above).
+    let dir = tempfile::tempdir().unwrap();
+    let idx = EmbedderIndex::open(
+        dir.path().join("v"),
+        Box::new(DropsLastVector {
+            inner: MockEmbedder::default(),
+            calls: AtomicUsize::new(0),
+            drop_on_call: 1,
+        }),
+    )
+    .unwrap();
+
+    let err = IndexHook::on_ingest_batch(&idx, &items).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("embed_batch returned a short result"),
+        "error should surface the short-result guard, got: {msg}"
+    );
+
+    // The first chunk fully succeeded before the second (short) chunk
+    // failed; those items must still be indexed.
+    for item in &items[..EMBED_CHUNK] {
+        assert!(
+            idx.vector_index().contains(item.id),
+            "item from the first (successful) chunk should still be indexed"
+        );
     }
 }
