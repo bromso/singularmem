@@ -48,7 +48,7 @@ pub const EMBED_CHUNK: usize = 64;
 /// every record is replayed into the HNSW graph on `open`, at roughly
 /// 0.6 ms per record on a 20,000-vector index, so the worst-case open
 /// latency a reader can see is about `COMPACT_THRESHOLD × 0.6 ms`. At 256
-/// that is ~150 ms; at 1,000 it was ~640 ms, which every short-lived CLI
+/// that measured ~165 ms; at 1,000 it was ~640 ms, which every short-lived CLI
 /// search or MCP retrieve would have paid. Compaction itself costs ~60 ms
 /// at 50,000 vectors, so compacting every 256 single-item commits adds
 /// well under a millisecond per item amortised.
@@ -437,6 +437,39 @@ impl std::fmt::Debug for VectorIndex {
     }
 }
 
+/// Per-process counter that makes `.meta.json` temp names unique across
+/// handles racing to create the same fresh directory.
+static META_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Write `.meta.json` atomically: serialise to `<path>.tmp`, fsync it,
+/// rename over `path`, then fsync the directory. A crash leaves either the
+/// previous file or the new one, never a torn JSON document.
+fn write_meta_atomic(path: &Path, meta: &VectorIndexMeta) -> Result<()> {
+    let text = serde_json::to_string_pretty(meta).map_err(|e| Error::Embedding {
+        context: "serializing .meta.json",
+        reason: format!("{e}"),
+    })?;
+    // Two handles may create a fresh directory concurrently under shared
+    // locks, so the temp name must be unique per writer; losing the rename
+    // race is fine as long as *a* `.meta.json` exists afterwards.
+    let seq = META_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
+    fs::write(&tmp, text).map_err(Error::Io)?;
+    crate::fsync::sync_file(&tmp)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        if !path.exists() {
+            return Err(Error::Io(e));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            crate::fsync::sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
 impl VectorIndex {
     /// Open (or create) a vector index at `dir` using the given [`Embedder`].
     ///
@@ -527,11 +560,7 @@ impl VectorIndex {
                 hnsw_ef_construction: options.hnsw_ef_construction,
                 created_at: jiff::Timestamp::now(),
             };
-            let text = serde_json::to_string_pretty(&meta).map_err(|e| Error::Embedding {
-                context: "serializing .meta.json",
-                reason: format!("{e}"),
-            })?;
-            fs::write(meta_path, text).map_err(Error::Io)?;
+            write_meta_atomic(meta_path, &meta)?;
             return Ok((meta, None));
         }
 
@@ -1190,13 +1219,7 @@ impl VectorIndex {
         if !self.meta_upgrade_pending.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
-        let write = || -> Result<()> {
-            let text = serde_json::to_string_pretty(&self.meta).map_err(|e| Error::Embedding {
-                context: "serializing .meta.json",
-                reason: format!("{e}"),
-            })?;
-            fs::write(&self.meta_path, text).map_err(Error::Io)
-        };
+        let write = || -> Result<()> { write_meta_atomic(&self.meta_path, &self.meta) };
         write().inspect_err(|_| {
             // Leave the upgrade outstanding so the next commit retries it.
             self.meta_upgrade_pending.store(true, Ordering::SeqCst);
@@ -1232,7 +1255,7 @@ impl VectorIndex {
     ///
     /// # Panics
     ///
-    /// Panics if the inner index mutex is poisoned.
+    /// Panics if the keymap mutex is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
