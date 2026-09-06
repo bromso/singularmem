@@ -4,6 +4,10 @@
 //! Wired into `VectorIndex::commit`/`open` in sub-project 17 Task 4; until
 //! then this module's `pub(crate)` surface is only reachable from its own
 //! tests, hence the blanket `dead_code` allow below.
+//!
+//! The on-disk model id is capped at 512 bytes (see [`Journal::open`]); the
+//! header is read with two bounded `read_exact` calls rather than one
+//! best-effort `read`, so a header can never be misparsed from a short read.
 #![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
@@ -23,6 +27,11 @@ const ID_BYTES: usize = 16;
 /// Bytes of fixed-size header fields before the variable-length model id:
 /// magic (4) + version (2) + dim (4) + model-id length (2).
 const HEADER_PREFIX_LEN: usize = 4 + 2 + 4 + 2;
+/// Maximum length in bytes of an on-disk model id. `encoded()`'s length
+/// field can technically hold up to `u16::MAX`, but `open` bounds the id it
+/// will create or accept to this cap so the header can be read with a
+/// fixed-size buffer.
+const MAX_MODEL_ID_LEN: usize = 512;
 
 /// Decoded `journal.bin` header: the embedding dimension and model id the
 /// journal's records were written under.
@@ -42,12 +51,6 @@ impl JournalHeader {
         out.extend_from_slice(&id_len.to_le_bytes());
         out.extend_from_slice(self.model_id.as_bytes());
         out
-    }
-
-    /// Length in bytes of this header once encoded, i.e. the offset of the
-    /// first record in the file.
-    fn byte_len(&self) -> u64 {
-        u64::try_from(self.encoded().len()).expect("header length fits in a u64")
     }
 
     fn decode(bytes: &[u8], path: &Path) -> Result<Self> {
@@ -82,16 +85,24 @@ impl JournalHeader {
 pub struct Journal {
     path: PathBuf,
     header: JournalHeader,
+    /// Byte length of `header` once encoded, i.e. the offset of the first
+    /// record in the file. Computed once at open/create time rather than
+    /// re-encoding the header on every call that needs it.
+    header_len: u64,
 }
 
 impl Journal {
     /// Open or create `journal.bin` at `path`. Creates the header (and an
     /// otherwise-empty file) when the file is absent.
     ///
+    /// `model_id` is capped at 512 bytes on the create path so the header
+    /// can always be read with a fixed-size buffer (see the module doc).
+    ///
     /// # Errors
     /// - `Error::IndexCorrupted` if an existing file's header is unreadable.
     /// - `Error::DimMismatch` / `Error::ModelMismatch` if an existing
     ///   header disagrees with `dim` / `model_id`.
+    /// - `Error::Embedding` if `model_id` is longer than 512 bytes.
     /// - `Error::Io` on a filesystem failure.
     pub fn open(path: &Path, dim: usize, model_id: &str) -> Result<Self> {
         let dim_u32 = u32::try_from(dim).map_err(|_| Error::DimMismatch {
@@ -104,10 +115,36 @@ impl Journal {
         };
 
         if path.exists() {
-            let mut buf = vec![0_u8; HEADER_PREFIX_LEN + 512];
             let mut file = File::open(path).map_err(Error::Io)?;
-            let n = file.read(&mut buf).map_err(Error::Io)?;
-            let found = JournalHeader::decode(&buf[..n], path)?;
+            let mut prefix = [0_u8; HEADER_PREFIX_LEN];
+            if let Err(e) = file.read_exact(&mut prefix) {
+                return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    Error::IndexCorrupted {
+                        path: path.to_path_buf(),
+                        reason: "journal header truncated".to_string(),
+                    }
+                } else {
+                    Error::Io(e)
+                });
+            }
+            // Only the id length (bytes 10..12) is needed before we know how
+            // much more to read; full validation happens in `decode` below.
+            let id_len = usize::from(u16::from_le_bytes([prefix[10], prefix[11]]));
+            let mut id_bytes = vec![0_u8; id_len];
+            if let Err(e) = file.read_exact(&mut id_bytes) {
+                return Err(if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    Error::IndexCorrupted {
+                        path: path.to_path_buf(),
+                        reason: "journal header model id truncated".to_string(),
+                    }
+                } else {
+                    Error::Io(e)
+                });
+            }
+            let mut buf = Vec::with_capacity(HEADER_PREFIX_LEN + id_len);
+            buf.extend_from_slice(&prefix);
+            buf.extend_from_slice(&id_bytes);
+            let found = JournalHeader::decode(&buf, path)?;
             if found.model_id != wanted.model_id {
                 return Err(Error::ModelMismatch {
                     path: path.to_path_buf(),
@@ -117,21 +154,32 @@ impl Journal {
             }
             if found.dim != wanted.dim {
                 return Err(Error::DimMismatch {
-                    expected: dim,
-                    got: usize::try_from(found.dim).unwrap_or(usize::MAX),
+                    expected: usize::try_from(found.dim).unwrap_or(usize::MAX),
+                    got: dim,
                 });
             }
+            let header_len = HEADER_PREFIX_LEN + id_len;
             Ok(Self {
                 path: path.to_path_buf(),
                 header: found,
+                header_len: u64::try_from(header_len).expect("header length fits in a u64"),
             })
         } else {
+            if wanted.model_id.len() > MAX_MODEL_ID_LEN {
+                return Err(Error::Embedding {
+                    context: "journal model id",
+                    reason: "model id longer than 512 bytes".to_string(),
+                });
+            }
+            let encoded = wanted.encoded();
+            let header_len = encoded.len();
             let mut file = File::create(path).map_err(Error::Io)?;
-            file.write_all(&wanted.encoded()).map_err(Error::Io)?;
+            file.write_all(&encoded).map_err(Error::Io)?;
             file.sync_all().map_err(Error::Io)?;
             Ok(Self {
                 path: path.to_path_buf(),
                 header: wanted,
+                header_len: u64::try_from(header_len).expect("header length fits in a u64"),
             })
         }
     }
@@ -144,7 +192,10 @@ impl Journal {
     }
 
     /// Append `records`; one `write_all` for the whole batch followed by one
-    /// `fsync`.
+    /// `fsync`. Buffers the whole batch in memory before writing, so peak
+    /// memory use is proportional to the batch size; concurrent callers must
+    /// serialize their own `append`/compaction sequence (Task 4's commit
+    /// lock — this module does no locking of its own).
     ///
     /// # Errors
     /// - `Error::DimMismatch` if any vector's length doesn't match the
@@ -177,13 +228,15 @@ impl Journal {
     }
 
     /// Read every complete record after the header; a trailing partial
-    /// record (a crash remnant) is dropped, not an error.
+    /// record (a crash remnant) is dropped, not an error. Reads the whole
+    /// journal into memory at once, so peak memory use is proportional to
+    /// the journal's size.
     ///
     /// # Errors
     /// Returns `Error::Io` on a filesystem failure.
     pub fn replay(&self) -> Result<Vec<(ItemId, Vec<f32>)>> {
         let mut file = File::open(&self.path).map_err(Error::Io)?;
-        file.seek(SeekFrom::Start(self.header.byte_len()))
+        file.seek(SeekFrom::Start(self.header_len))
             .map_err(Error::Io)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(Error::Io)?;
@@ -225,7 +278,7 @@ impl Journal {
     #[allow(clippy::len_without_is_empty)] // record count, not a collection accessor
     pub fn len(&self) -> Result<usize> {
         let size = std::fs::metadata(&self.path).map_err(Error::Io)?.len();
-        let body = size.saturating_sub(self.header.byte_len());
+        let body = size.saturating_sub(self.header_len);
         let record_len = u64::try_from(self.record_len()).expect("record length fits u64");
         Ok(usize::try_from(body / record_len).expect("record count fits usize"))
     }
@@ -239,7 +292,7 @@ impl Journal {
             .write(true)
             .open(&self.path)
             .map_err(Error::Io)?;
-        file.set_len(self.header.byte_len()).map_err(Error::Io)?;
+        file.set_len(self.header_len).map_err(Error::Io)?;
         file.sync_all().map_err(Error::Io)
     }
 }
@@ -250,6 +303,20 @@ mod tests {
 
     fn id(n: u128) -> ItemId {
         ulid::Ulid::from(n).to_string().parse().unwrap()
+    }
+
+    /// Hand-assembled `journal.bin` header bytes, independent of
+    /// `JournalHeader::encoded`, for exercising `decode`'s corruption
+    /// branches directly.
+    fn raw_header(magic: &[u8], version: u16, dim: u32, model_id: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(magic);
+        out.extend_from_slice(&version.to_le_bytes());
+        out.extend_from_slice(&dim.to_le_bytes());
+        let id_len = u16::try_from(model_id.len()).unwrap();
+        out.extend_from_slice(&id_len.to_le_bytes());
+        out.extend_from_slice(model_id);
+        out
     }
 
     #[test]
@@ -290,10 +357,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("journal.bin");
         Journal::open(&p, 4, "m@v1").unwrap();
-        assert!(matches!(
-            Journal::open(&p, 8, "m@v1"),
-            Err(Error::DimMismatch { .. })
-        ));
+        match Journal::open(&p, 8, "m@v1") {
+            Err(Error::DimMismatch { expected, got }) => {
+                // `expected` is the on-disk dimension, `got` is the caller's.
+                assert_eq!(expected, 4);
+                assert_eq!(got, 8);
+            }
+            other => panic!("expected DimMismatch, got {other:?}"),
+        }
         assert!(matches!(
             Journal::open(&p, 4, "other@v1"),
             Err(Error::ModelMismatch { .. })
@@ -304,11 +375,90 @@ mod tests {
     fn bad_magic_is_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("journal.bin");
-        std::fs::write(&p, b"NOPE\0\0").unwrap();
+        std::fs::write(&p, raw_header(b"NOPE", JOURNAL_VERSION, 4, b"m@v1")).unwrap();
         assert!(matches!(
-            Journal::open(&p, 4, "m"),
+            Journal::open(&p, 4, "m@v1"),
             Err(Error::IndexCorrupted { .. })
         ));
+    }
+
+    #[test]
+    fn too_short_header_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        // Only 6 bytes total, short of the 12-byte fixed prefix.
+        std::fs::write(&p, b"SMVJ\x01\x00").unwrap();
+        assert!(matches!(
+            Journal::open(&p, 4, "m@v1"),
+            Err(Error::IndexCorrupted { .. })
+        ));
+    }
+
+    #[test]
+    fn unsupported_version_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        std::fs::write(&p, raw_header(JOURNAL_MAGIC, 99, 4, b"m@v1")).unwrap();
+        assert!(matches!(
+            Journal::open(&p, 4, "m@v1"),
+            Err(Error::IndexCorrupted { .. })
+        ));
+    }
+
+    #[test]
+    fn truncated_model_id_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        // Header claims a 4-byte model id but only 1 byte follows the prefix.
+        let mut bytes = raw_header(JOURNAL_MAGIC, JOURNAL_VERSION, 4, b"m@v1");
+        bytes.truncate(HEADER_PREFIX_LEN + 1);
+        std::fs::write(&p, bytes).unwrap();
+        assert!(matches!(
+            Journal::open(&p, 4, "m@v1"),
+            Err(Error::IndexCorrupted { .. })
+        ));
+    }
+
+    #[test]
+    fn non_utf8_model_id_is_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        std::fs::write(
+            &p,
+            raw_header(JOURNAL_MAGIC, JOURNAL_VERSION, 4, &[0xFF, 0xFE, 0x00, 0x00]),
+        )
+        .unwrap();
+        assert!(matches!(
+            Journal::open(&p, 4, "m@v1"),
+            Err(Error::IndexCorrupted { .. })
+        ));
+    }
+
+    #[test]
+    fn golden_bytes_header_and_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        let j = Journal::open(&p, 2, "m@v1").unwrap();
+        j.append(&[(id(1), vec![1.0, 2.0])]).unwrap();
+
+        // Pinned byte-for-byte per the worked example in
+        // `.superpowers/sdd/task-3-report.md`: this test fails if field
+        // order or endianness ever silently changes.
+        #[rustfmt::skip]
+        let expected: Vec<u8> = vec![
+            // header (16 bytes)
+            0x53, 0x4D, 0x56, 0x4A, // magic "SMVJ"
+            0x01, 0x00,             // version = 1 (LE u16)
+            0x02, 0x00, 0x00, 0x00, // dim = 2 (LE u32)
+            0x04, 0x00,             // model_id_len = 4 (LE u16)
+            b'm', b'@', b'v', b'1', // model_id = "m@v1"
+            // record (24 bytes)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // ULID big-endian value 1
+            0x00, 0x00, 0x80, 0x3F, // 1.0f32 (LE)
+            0x00, 0x00, 0x00, 0x40, // 2.0f32 (LE)
+        ];
+        assert_eq!(std::fs::read(&p).unwrap(), expected);
     }
 
     #[test]

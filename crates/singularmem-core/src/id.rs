@@ -13,6 +13,12 @@ macro_rules! ulid_id {
         impl $name {
             /// Wrap a raw `Ulid`. Crate-internal — the store mints ids.
             ///
+            /// `FromStr` and `from_bytes` are the public deserialisation
+            /// constructors for callers reconstructing an id from a string
+            /// or byte encoding; this one exists only for minting a fresh
+            /// id from a freshly-generated `Ulid`, which is why it stays
+            /// `pub(crate)`.
+            ///
             /// Not every newtype built with this macro has a minting call
             /// site yet (e.g. `EntityId`/`FactId` before the graph write
             /// module lands), so this is allowed to look unused per-type.
