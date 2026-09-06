@@ -201,4 +201,67 @@ once.
 
 ## Deviations
 
-None yet. Record implementation-time deviations here.
+Recorded during Tasks 3–5 (see `.superpowers/sdd/task-3-report.md`,
+`task-4-report.md`, `task-5-report.md` for full detail):
+
+1. **Compaction always replays the journal first**, even when the
+   compacting handle already has every vector it queued in memory. Not in
+   this design's original text: a *different* handle may have appended to
+   the shared journal since this handle last read it, and compacting from
+   a stale view before replaying would silently delete that writer's
+   vectors on truncate. The invariant: a handle may only truncate the
+   journal after replaying, under the lock, every record whose id is not
+   already in its keymap. Guarded by
+   `compaction_from_a_stale_handle_keeps_the_other_handles_vectors` in
+   `tests/vector_index_concurrency.rs`; mutation-checked (removing the
+   replay call fails exactly that test).
+2. **`VectorIndex::add_batch`** added beyond the single-item `add` this
+   design describes, so `EmbedderIndex::on_ingest_batch` can assign
+   keymap keys and reserve `USearch` capacity once per batch instead of
+   once per item.
+3. **`VectorIndex::save()`** kept as a compatibility alias for
+   `compact()` (flush pending + rewrite unconditionally), so pre-journal
+   callers keep working without a rename.
+4. **`ItemId::to_bytes`/`from_bytes`** added (as `const fn`, per
+   `clippy::missing_const_for_fn`) to give `journal.bin` records a raw
+   16-byte big-endian encoding. Added to the shared `ulid_id!` macro, so
+   `EntityId`/`FactId` get them too.
+5. **In-memory tombstones for `remove()`.** `journal.bin` has no
+   tombstone record, so replaying it after a `remove()` would resurrect
+   the removed vector on the next compaction. Fixed with an in-process
+   `HashSet<ItemId>` that `absorb_journal` consults and that clears once
+   the compaction that truncates the journal completes. **Known gap:** a
+   *different* handle that replays the journal before the removing
+   handle's compaction lands still resurrects the vector — the tombstone
+   doesn't cross handles. Fixing this needs an on-disk tombstone record,
+   which is a further format change, not implemented here. Documented as
+   a known limitation in `docs/formats/vectors-v2.md`. Live impact is nil
+   today: `IndexHook` has no delete verb and `VectorIndex::remove` has no
+   production caller.
+6. **`journal.bin` is created eagerly, not lazily**, by `Journal::open`
+   inside every `VectorIndex::open` call (read-only opens included) —
+   simpler than deferring creation to the first append, at the cost that
+   opening a vector directory on a read-only filesystem now fails where
+   it previously succeeded (no test or product path does that today).
+7. **fs4 API path**: `fs4 = "0.8"` (default `sync` feature) exports the
+   lock trait at `fs4::FileExt`, not `fs4::fs_std::FileExt` (the 0.9+
+   path this design's text didn't pin a version for).
+8. **Perf-check.sh exit codes renumbered.** The two new gates
+   (`ingest_with_indexes`, `ingest_single_with_indexes`) take exit codes
+   14 and 15, placed right after the existing `ingest_one` gate (13); the
+   pre-existing query/semantic/hybrid gates shift from 14/15/16 to
+   16/17/18 to make room, since the numbers this design's Part 3 text
+   suggested for the two new gates (15, 16) collided with those two
+   already-assigned codes.
+9. **The `ingest_single_with_indexes` gate, as specified (both a Tantivy
+   `Index` hook and an `EmbedderIndex` in one `MultiHook`), measures a
+   figure dominated by Tantivy's pre-existing per-item commit cost
+   (~88 ms on the measurement machine), not the vector index's own cost
+   (~6.6 ms, isolated). The combined figure is very likely to exceed the
+   20 ms budget in CI. This is not a sub-project 17 regression — Tantivy's
+   per-item commit cost predates all of Tasks 1–4 and this design lists
+   "Changing the Tantivy sidecar" as a non-goal — but it means the literal
+   acceptance criterion 2 gate can fail even though the vector-index
+   improvement it was meant to verify is real and measured. See
+   `docs/benchmarks/ingest.md` § "A caveat on the single-item gate" for
+   the isolated numbers, and `task-5-report.md` for the recommendation.

@@ -176,3 +176,9 @@ the hook logs `could not open Tantivy index` at `warn` before
 continuing without the index hook — the session simply won't appear
 in `search` results until the sidecar is rebuilt. `singularmem
 reindex` rebuilds it from `SQLite`.
+
+A `stop`/`pre-compact`/`session-end` save on the semantic (vector) index
+no longer rewrites the whole `index.usearch` file — it appends the
+session's vectors to `journal.bin` and only rewrites the index once the
+journal crosses a size threshold. See
+[docs/formats/vectors-v2.md](formats/vectors-v2.md) for the format.
