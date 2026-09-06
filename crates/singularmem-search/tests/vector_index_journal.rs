@@ -19,6 +19,13 @@ fn fresh_id() -> ItemId {
     ulid::Ulid::new().to_string().parse().unwrap()
 }
 
+/// Number of records in `<dir>/journal.bin`, treating an absent file as empty
+/// — an end-of-batch commit compacts instead of journalling, so a directory
+/// that has only ever seen bulk ingests never grows a journal at all.
+fn journal_bytes(vdir: &std::path::Path) -> u64 {
+    std::fs::metadata(vdir.join("journal.bin")).map_or(0, |m| m.len())
+}
+
 #[test]
 fn single_ingest_appends_to_journal_and_does_not_rewrite_index() {
     let dir = tempfile::tempdir().unwrap();
@@ -31,9 +38,9 @@ fn single_ingest_appends_to_journal_and_does_not_rewrite_index() {
             .unwrap();
     }
     let usearch = dir.path().join("v/index.usearch");
-    let journal = dir.path().join("v/journal.bin");
+    let vdir = dir.path().join("v");
     let before = std::fs::metadata(&usearch).unwrap().modified().unwrap();
-    let jlen_before = std::fs::metadata(&journal).unwrap().len();
+    let jlen_before = journal_bytes(&vdir);
     std::thread::sleep(std::time::Duration::from_millis(20));
     {
         let store =
@@ -45,10 +52,7 @@ fn single_ingest_appends_to_journal_and_does_not_rewrite_index() {
         before,
         "index.usearch must not be rewritten by a single ingest"
     );
-    assert!(
-        std::fs::metadata(&journal).unwrap().len() > jlen_before,
-        "journal grew"
-    );
+    assert!(journal_bytes(&vdir) > jlen_before, "journal grew");
     // And the item is searchable after reopen (journal replay).
     let idx = open(dir.path());
     let v = embed("one more");
@@ -124,7 +128,7 @@ fn v1_directory_opens_and_becomes_v2_on_first_commit() {
         store.ingest_many(vec![NewItem::text("a")]).unwrap();
     }
     // Simulate v0.20.0 layout: no journal, format_version "1".
-    std::fs::remove_file(dir.path().join("v/journal.bin")).unwrap();
+    let _ = std::fs::remove_file(dir.path().join("v/journal.bin"));
     let meta_path = dir.path().join("v/.meta.json");
     let meta = std::fs::read_to_string(&meta_path)
         .unwrap()
@@ -288,4 +292,138 @@ fn unknown_format_version_is_refused() {
         }
         other => panic!("expected IndexCorrupted, got {other:?}"),
     }
+}
+
+/// A complete v2 directory (compacted, no journal) must open without writing
+/// anything at all: `journal.bin` is created lazily, on the first append.
+#[cfg(unix)]
+#[test]
+fn open_of_a_complete_v2_directory_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    idx.add(fresh_id(), &embed("only")).unwrap();
+    idx.commit(true).unwrap();
+    drop(idx);
+    assert!(
+        !vdir.join("journal.bin").exists(),
+        "an end-of-batch commit compacts instead of journalling"
+    );
+
+    let before = std::fs::read_dir(&vdir).unwrap().count();
+    let perms = std::fs::metadata(&vdir).unwrap().permissions();
+    std::fs::set_permissions(&vdir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let opened = VectorIndex::open(&vdir, &e);
+    std::fs::set_permissions(&vdir, perms).unwrap();
+
+    let opened = opened.expect("a read-only v2 directory must still open");
+    assert_eq!(opened.len(), 1);
+    assert_eq!(
+        std::fs::read_dir(&vdir).unwrap().count(),
+        before,
+        "open must not create any file in a complete v2 directory"
+    );
+}
+
+/// Compaction goes through temp+rename for both files and leaves no `.tmp`
+/// behind; a `.tmp` left by a crash before the rename leaves the live files
+/// untouched and is swept away by the next open.
+#[test]
+fn compaction_leaves_no_tmp_and_open_sweeps_stale_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    for i in 0..5 {
+        idx.add(fresh_id(), &embed(&format!("t {i}"))).unwrap();
+    }
+    idx.compact().unwrap();
+    drop(idx);
+    assert!(!vdir.join("index.usearch.tmp").exists());
+    assert!(!vdir.join("keymap.bin.tmp").exists());
+
+    // Simulate a crash after writing the temp file but before the rename.
+    let usearch_before = std::fs::read(vdir.join("index.usearch")).unwrap();
+    let keymap_before = std::fs::read(vdir.join("keymap.bin")).unwrap();
+    std::fs::write(vdir.join("index.usearch.tmp"), b"half-written").unwrap();
+    std::fs::write(vdir.join("keymap.bin.tmp"), b"half-written").unwrap();
+    assert_eq!(
+        std::fs::read(vdir.join("index.usearch")).unwrap(),
+        usearch_before
+    );
+    assert_eq!(
+        std::fs::read(vdir.join("keymap.bin")).unwrap(),
+        keymap_before
+    );
+
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(idx.len(), 5);
+    assert!(
+        !vdir.join("index.usearch.tmp").exists(),
+        "open must sweep stale temp files"
+    );
+    assert!(!vdir.join("keymap.bin.tmp").exists());
+}
+
+/// The empty-index compaction path writes `keymap.bin` through the same
+/// temp+rename, and only removes `index.usearch` once the keymap naming the
+/// empty state is in place.
+#[test]
+fn compacting_an_empty_index_renames_the_keymap_and_drops_index_usearch() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    let id = fresh_id();
+    idx.add(id, &embed("solo")).unwrap();
+    idx.compact().unwrap();
+    assert!(vdir.join("index.usearch").exists());
+
+    // Make `keymap.bin` itself unwritable: a compaction that goes through
+    // temp+rename still replaces it, a direct rewrite in place cannot.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            vdir.join("keymap.bin"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+    }
+
+    idx.remove(id).unwrap();
+    idx.compact().unwrap();
+    assert!(
+        !vdir.join("index.usearch").exists(),
+        "an empty index leaves no usearch file behind"
+    );
+    assert!(vdir.join("keymap.bin").exists());
+    assert!(!vdir.join("keymap.bin.tmp").exists());
+    drop(idx);
+    assert_eq!(VectorIndex::open(&vdir, &e).unwrap().len(), 0);
+}
+
+/// A commit that is going to compact anyway must not write the vectors to the
+/// journal first: the compaction makes them durable inside the same locked
+/// section, so journalling them is pure write amplification.
+#[test]
+fn end_of_batch_commit_skips_the_journal_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    for i in 0..5 {
+        idx.add(fresh_id(), &embed(&format!("bulk {i}"))).unwrap();
+    }
+    idx.commit(true).unwrap();
+    assert_eq!(
+        journal_bytes(&vdir),
+        0,
+        "an end-of-batch commit compacts instead of journalling"
+    );
+    drop(idx);
+    assert_eq!(VectorIndex::open(&vdir, &e).unwrap().len(), 5);
 }

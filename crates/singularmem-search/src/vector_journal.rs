@@ -91,11 +91,19 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Open or create `journal.bin` at `path`. Creates the header (and an
-    /// otherwise-empty file) when the file is absent.
+    /// Open `journal.bin` at `path`, validating an existing header against
+    /// `dim`/`model_id`.
     ///
-    /// `model_id` is capped at 512 bytes on the create path so the header
-    /// can always be read with a fixed-size buffer (see the module doc).
+    /// **Nothing is written when the file is absent**: the header is derived
+    /// from `dim`/`model_id` and the file is created by the first
+    /// [`append`](Journal::append). Opening a fully compacted vector
+    /// directory — the common case for a search-only process, and the only
+    /// case that can work on a read-only filesystem — therefore touches no
+    /// file at all. [`replay`](Journal::replay), [`len`](Journal::len) and
+    /// [`clear`](Journal::clear) treat an absent file as an empty journal.
+    ///
+    /// `model_id` is capped at 512 bytes so the header can always be read
+    /// with a fixed-size buffer (see the module doc).
     ///
     /// # Errors
     /// - `Error::IndexCorrupted` if an existing file's header is unreadable.
@@ -170,17 +178,21 @@ impl Journal {
                     reason: "model id longer than 512 bytes".to_string(),
                 });
             }
-            let encoded = wanted.encoded();
-            let header_len = encoded.len();
-            let mut file = File::create(path).map_err(Error::Io)?;
-            file.write_all(&encoded).map_err(Error::Io)?;
-            file.sync_all().map_err(Error::Io)?;
+            let header_len = wanted.encoded().len();
             Ok(Self {
                 path: path.to_path_buf(),
                 header: wanted,
                 header_len: u64::try_from(header_len).expect("header length fits in a u64"),
             })
         }
+    }
+
+    /// Write the header out, creating `journal.bin`. Called by the first
+    /// [`append`](Journal::append).
+    fn create_file(&self) -> Result<()> {
+        let mut file = File::create(&self.path).map_err(Error::Io)?;
+        file.write_all(&self.header.encoded()).map_err(Error::Io)?;
+        file.sync_all().map_err(Error::Io)
     }
 
     /// Size in bytes of one record: a 16-byte ULID plus `dim` little-endian
@@ -218,6 +230,11 @@ impl Journal {
                 buf.extend_from_slice(&x.to_le_bytes());
             }
         }
+        if !self.path.exists() {
+            // Lazily created (see `open`); the caller holds the commit lock,
+            // so no other writer can be racing this create.
+            self.create_file()?;
+        }
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.path)
@@ -227,14 +244,18 @@ impl Journal {
     }
 
     /// Read every complete record after the header; a trailing partial
-    /// record (a crash remnant) is dropped, not an error. Reads the whole
-    /// journal into memory at once, so peak memory use is proportional to
-    /// the journal's size.
+    /// record (a crash remnant) is dropped, not an error. An absent file is
+    /// an empty journal. Reads the whole journal into memory at once, so peak
+    /// memory use is proportional to the journal's size.
     ///
     /// # Errors
     /// Returns `Error::Io` on a filesystem failure.
     pub fn replay(&self) -> Result<Vec<(ItemId, Vec<f32>)>> {
-        let mut file = File::open(&self.path).map_err(Error::Io)?;
+        let mut file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Io(e)),
+        };
         file.seek(SeekFrom::Start(self.header_len))
             .map_err(Error::Io)?;
         let mut bytes = Vec::new();
@@ -270,27 +291,34 @@ impl Journal {
     }
 
     /// Number of complete records currently in the file (excludes any
-    /// trailing partial record).
+    /// trailing partial record). An absent file is an empty journal.
     ///
     /// # Errors
     /// Returns `Error::Io` if the file's metadata cannot be read.
     #[allow(clippy::len_without_is_empty)] // record count, not a collection accessor
     pub fn len(&self) -> Result<usize> {
-        let size = std::fs::metadata(&self.path).map_err(Error::Io)?.len();
+        let size = match std::fs::metadata(&self.path) {
+            Ok(m) => m.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(Error::Io(e)),
+        };
         let body = size.saturating_sub(self.header_len);
         let record_len = u64::try_from(self.record_len()).expect("record length fits u64");
         Ok(usize::try_from(body / record_len).expect("record count fits usize"))
     }
 
-    /// Truncate the file back to just the header, discarding all records.
+    /// Truncate the file back to just the header, discarding all records. An
+    /// absent file is already empty and is left absent — clearing must never
+    /// be the thing that creates the journal.
     ///
     /// # Errors
     /// Returns `Error::Io` on a filesystem failure.
     pub fn clear(&self) -> Result<()> {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(&self.path)
-            .map_err(Error::Io)?;
+        let file = match OpenOptions::new().write(true).open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::Io(e)),
+        };
         file.set_len(self.header_len).map_err(Error::Io)?;
         file.sync_all().map_err(Error::Io)
     }
@@ -355,7 +383,11 @@ mod tests {
     fn header_mismatch_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("journal.bin");
-        Journal::open(&p, 4, "m@v1").unwrap();
+        // Append so the header actually reaches disk: `open` is lazy.
+        Journal::open(&p, 4, "m@v1")
+            .unwrap()
+            .append(&[(id(1), vec![1.0; 4])])
+            .unwrap();
         match Journal::open(&p, 8, "m@v1") {
             Err(Error::DimMismatch { expected, got }) => {
                 // `expected` is the on-disk dimension, `got` is the caller's.
@@ -458,6 +490,23 @@ mod tests {
             0x00, 0x00, 0x00, 0x40, // 2.0f32 (LE)
         ];
         assert_eq!(std::fs::read(&p).unwrap(), expected);
+    }
+
+    #[test]
+    fn open_creates_nothing_until_the_first_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        let j = Journal::open(&p, 4, "m@v1").unwrap();
+        assert!(!p.exists(), "open must not create the file");
+        assert_eq!(j.len().unwrap(), 0);
+        assert!(j.replay().unwrap().is_empty());
+        j.clear().unwrap();
+        assert!(!p.exists(), "clear must not create the file either");
+
+        j.append(&[(id(1), vec![1.0; 4])]).unwrap();
+        assert!(p.exists(), "the first append creates the header");
+        assert_eq!(j.len().unwrap(), 1);
+        assert_eq!(j.replay().unwrap()[0].0, id(1));
     }
 
     #[test]

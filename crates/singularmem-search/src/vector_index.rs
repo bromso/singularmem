@@ -19,7 +19,7 @@
 //! `docs/superpowers/specs/2026-09-06-ingest-throughput-17-design.md` § "Part 2".
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -47,6 +47,12 @@ pub const EMBED_CHUNK: usize = 64;
 /// model is ~1.5 MB of journal — cheap to replay on open, and far cheaper to
 /// append to than re-serialising the whole HNSW graph per item.
 pub const COMPACT_THRESHOLD: usize = 1_000;
+
+/// Maximum records handed to one `Journal::append` call when draining the
+/// pending queue. `append` buffers its whole argument before writing, so a
+/// bulk drain of a large queue would otherwise materialise the entire corpus
+/// as one contiguous byte buffer on top of the queue itself.
+const JOURNAL_APPEND_CHUNK: usize = 1_024;
 
 /// Attempts and base backoff used when taking the commit lock on
 /// `<dir>/lock`. Mirrors the Tantivy sidecar's schedule in
@@ -279,12 +285,24 @@ enum LockMode {
     Exclusive,
 }
 
+/// Open `<dir>/lock` without truncating it. `File::create` would truncate,
+/// and on Windows `LockFileEx` then fails with a sharing violation that the
+/// retry loop cannot tell apart from a hard error.
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
 /// Take `<dir>/lock` in `mode`, retrying a busy lock on the schedule the
 /// Tantivy sidecar uses: five attempts sleeping `50, 100, 200, 400` ms.
 fn acquire_lock_at(lock_path: &Path, mode: LockMode) -> Result<CommitLock> {
     let mut delay = LOCK_BASE_DELAY;
     for attempt in 1..=LOCK_ATTEMPTS {
-        let file = File::create(lock_path).map_err(Error::Io)?;
+        let file = open_lock_file(lock_path).map_err(Error::Io)?;
         // UFCS: `File` grew inherent `try_lock_shared` in Rust 1.89, which
         // returns a different error type. We want fs4's `FileExt` on both
         // arms, so both stay on the `io::ErrorKind::WouldBlock` contract the
@@ -338,6 +356,23 @@ fn acquire_load_lock(lock_path: &Path) -> Result<Option<CommitLock>> {
             Ok(None)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Delete leftover `*.tmp` files from a crashed compaction. Best effort: the
+/// caller holds the shared load lock, so no compaction is in flight, but a
+/// read-only directory simply keeps its litter.
+fn sweep_temp_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "tmp") {
+            if let Err(e) = fs::remove_file(&path) {
+                tracing::debug!(path = %path.display(), error = %e, "could not sweep stale temp file");
+            }
+        }
     }
 }
 
@@ -413,6 +448,7 @@ impl VectorIndex {
         // once; only a commit excludes them.
         for attempt in 0..2 {
             let _guard = acquire_load_lock(&lock_path)?;
+            sweep_temp_files(dir);
             match Self::load(dir, embedder, options) {
                 Ok(index) => return Ok(index),
                 // Retry once: a load that raced a compaction started before we
@@ -548,6 +584,8 @@ impl VectorIndex {
         let generation = keymap.generation;
 
         // ── Open the journal and replay it into the in-memory graph ───────
+        // A fully compacted directory has no `journal.bin`, and opening one
+        // must not create it (see `Journal::open`).
         let journal = Journal::open(&dir.join("journal.bin"), meta.dim, &meta.model_id)?;
         let index = Self {
             inner: Mutex::new(inner),
@@ -712,13 +750,17 @@ impl VectorIndex {
         }
         // Drop the vector from the not-yet-journalled queue, and remember the
         // removal until the next compaction truncates the journal — otherwise
-        // the replay in `absorb_journal` would add it straight back.
+        // the replay in `absorb_journal` would add it straight back. Only an
+        // id that was actually present needs suppressing; tombstoning an
+        // absent id would suppress a *later* legitimate add of it.
         let mut pending = self.pending.lock().expect("pending mutex poisoned");
         pending.retain(|(pending_id, _)| *pending_id != id);
         drop(pending);
-        let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
-        tombstones.insert(id);
-        drop(tombstones);
+        if key_opt.is_some() {
+            let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
+            tombstones.insert(id);
+            drop(tombstones);
+        }
         Ok(())
     }
 
@@ -793,20 +835,35 @@ impl VectorIndex {
     fn commit_locked(&self, end_of_batch: bool) -> Result<()> {
         self.write_meta_upgrade()?;
 
+        if end_of_batch {
+            // This commit compacts unconditionally, and the compaction makes
+            // `pending` durable inside this same locked section. Journalling
+            // it first would write every vector twice and buffer the whole
+            // batch a second time; a crash before the compaction loses the
+            // vectors either way, and the caller never saw `Ok`.
+            return self.compact_locked();
+        }
+
         let drained: Vec<(ItemId, Vec<f32>)> = {
             let mut pending = self.pending.lock().expect("pending mutex poisoned");
             std::mem::take(&mut *pending)
         };
-        if !drained.is_empty() {
-            if let Err(e) = self.journal.append(&drained) {
-                // Put the queue back (ahead of anything added meanwhile) so a
-                // later commit can still make these vectors durable.
-                self.requeue(drained);
+        // Append in bounded chunks: `Journal::append` buffers its argument
+        // before writing, so one giant call would hold the whole queue twice.
+        let mut written = 0_usize;
+        for chunk in drained.chunks(JOURNAL_APPEND_CHUNK) {
+            if let Err(e) = self.journal.append(chunk) {
+                // Put the unwritten tail back (ahead of anything added
+                // meanwhile) so a later commit can still make it durable; the
+                // chunks already appended are on disk and must not be
+                // duplicated.
+                self.requeue(drained[written..].to_vec());
                 return Err(e);
             }
+            written += chunk.len();
         }
 
-        if end_of_batch || self.journal.len()? > COMPACT_THRESHOLD {
+        if self.journal.len()? > COMPACT_THRESHOLD {
             self.compact_locked()?;
         }
         Ok(())
@@ -889,9 +946,6 @@ impl VectorIndex {
         if count > 0 {
             sync_file(tmp_usearch)?;
             fs::rename(tmp_usearch, &self.usearch_path).map_err(Error::Io)?;
-        } else if self.usearch_path.exists() {
-            // Remove any stale usearch file so the next open starts fresh.
-            fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
         }
 
         let generation = self.loaded_generation.load(Ordering::SeqCst) + 1;
@@ -910,10 +964,15 @@ impl VectorIndex {
         sync_file(&tmp_keymap)?;
         fs::rename(&tmp_keymap, &self.keymap_path).map_err(Error::Io)?;
 
-        // Best-effort directory fsync so the renames are durable. Not every
-        // platform lets you open a directory for this, and a failure here
-        // costs durability of an already-consistent state, not correctness.
-        let _ = File::open(&self.path).and_then(|d| d.sync_all());
+        if count == 0 && self.usearch_path.exists() {
+            // Remove the stale usearch file only now: the keymap naming the
+            // empty state is already in place, so the pair on disk is never
+            // (old graph + empty keymap).
+            fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
+        }
+
+        // fsync the directory so the renames are durable in the order above.
+        sync_dir(&self.path)?;
 
         // Only now is the journal redundant: on-disk state is either
         // (old index + full journal) or (new index + empty journal), and a
@@ -1038,6 +1097,11 @@ impl VectorIndex {
     /// Number of vectors currently in the in-memory graph, journal replay
     /// included.
     ///
+    /// The canonical count is [`doc_count`](VectorIndex::doc_count), which is
+    /// what the search paths use; this is the same number as a plain `usize`,
+    /// kept because `len`/`is_empty` read better at call sites that just want
+    /// to know whether anything is indexed.
+    ///
     /// # Panics
     ///
     /// Panics if the inner index mutex is poisoned.
@@ -1046,7 +1110,8 @@ impl VectorIndex {
         self.inner.lock().expect("usearch mutex poisoned").size()
     }
 
-    /// Returns `true` if no vectors are indexed.
+    /// Returns `true` if no vectors are indexed. See
+    /// [`len`](VectorIndex::len).
     ///
     /// # Panics
     ///
@@ -1056,7 +1121,9 @@ impl VectorIndex {
         self.len() == 0
     }
 
-    /// Returns the number of vectors currently indexed.
+    /// The canonical count of vectors currently indexed, journal replay
+    /// included. [`len`](VectorIndex::len) returns the same number as a
+    /// `usize`.
     ///
     /// # Errors
     ///
@@ -1274,9 +1341,17 @@ impl singularmem_core::IndexHook for EmbedderIndex {
     /// Returns [`singularmem_core::Error::Io`] wrapping the search error
     /// message if the flush fails.
     fn commit(&self) -> singularmem_core::Result<()> {
+        // Read, then clear only on success: a failed commit leaves the batch
+        // still open, so the retry still compacts instead of degrading into a
+        // journal append that leaves the bulk ingest un-compacted.
+        let end_of_batch = self.batch_end.load(Ordering::SeqCst);
         self.vector_index
-            .commit(self.batch_end.swap(false, Ordering::SeqCst))
-            .map_err(|ref e| to_core_err(e))
+            .commit(end_of_batch)
+            .map_err(|ref e| to_core_err(e))?;
+        if end_of_batch {
+            self.batch_end.store(false, Ordering::SeqCst);
+        }
+        Ok(())
     }
 }
 
@@ -1380,6 +1455,20 @@ fn sync_file(path: &Path) -> Result<()> {
         .map_err(Error::Io)
 }
 
+/// `fsync` the directory at `path` so the renames within it are durable —
+/// this is what makes the "either old pair or new pair, never a mix" ordering
+/// hold across a power cut, so a failure is reported rather than swallowed.
+///
+/// Windows has no directory handle to sync; there the renames' ordering is
+/// the filesystem's business and the failure to open is not ours to report.
+fn sync_dir(path: &Path) -> Result<()> {
+    match File::open(path).and_then(|d| d.sync_all()) {
+        Ok(()) => Ok(()),
+        Err(_) if cfg!(windows) => Ok(()),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
 /// Convert a search crate [`Error`] into a [`singularmem_core::Error`].
 ///
 /// The core trait cannot reference the search error type without creating a
@@ -1392,12 +1481,73 @@ fn to_core_err(e: &crate::Error) -> singularmem_core::Error {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
+    use fs4::FileExt;
     use singularmem_core::ItemId;
 
-    use super::{Error, VectorIndex};
+    use super::{open_lock_file, Error, VectorIndex};
     use crate::embedder::Embedder;
     use crate::testing::MockEmbedder;
+
+    /// Hold `<dir>/lock` exclusively from another thread for `hold`, using
+    /// fs4 directly so the test does not depend on `VectorIndex`'s own
+    /// acquisition path. Returns once the lock is definitely held.
+    fn hold_lock_for(lock_path: std::path::PathBuf, hold: Duration) -> std::thread::JoinHandle<()> {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let file = open_lock_file(&lock_path).expect("lock file opens");
+            FileExt::try_lock_exclusive(&file).expect("uncontended lock is free");
+            tx.send(()).expect("receiver alive");
+            std::thread::sleep(hold);
+            FileExt::unlock(&file).expect("unlock");
+        });
+        rx.recv().expect("lock taken");
+        handle
+    }
+
+    #[test]
+    fn commit_waits_out_a_briefly_held_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = MockEmbedder::default();
+        let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+        idx.add(fresh_id(), &e.embed("waited").unwrap()).unwrap();
+
+        // Shorter than the 50+100+200+400 ms the retry schedule sleeps.
+        let holder = hold_lock_for(dir.path().join("v/lock"), Duration::from_millis(300));
+        let started = Instant::now();
+        idx.commit(true)
+            .expect("the commit must back off and then succeed");
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the commit should have waited for the lock, not sailed past it"
+        );
+        holder.join().unwrap();
+        assert_eq!(idx.len(), 1);
+    }
+
+    #[test]
+    fn commit_reports_the_lock_context_once_the_backoff_is_exhausted() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = MockEmbedder::default();
+        let idx = VectorIndex::open(dir.path().join("v"), &e).unwrap();
+        idx.add(fresh_id(), &e.embed("blocked").unwrap()).unwrap();
+
+        // Longer than the 750 ms total backoff, so all five attempts fail.
+        let holder = hold_lock_for(dir.path().join("v/lock"), Duration::from_millis(1_500));
+        match idx.commit(true) {
+            Err(Error::Usearch { context, reason }) => {
+                assert_eq!(context, "acquiring vector index lock");
+                assert!(reason.contains("busy"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected a lock-acquisition error, got {other:?}"),
+        }
+        holder.join().unwrap();
+        // The vectors are still queued, so a later commit can persist them.
+        idx.commit(true).unwrap();
+        assert_eq!(idx.len(), 1);
+    }
 
     fn fresh_id() -> ItemId {
         ItemId::from_str(&ulid::Ulid::new().to_string()).expect("freshly minted ulid parses")
