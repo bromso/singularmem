@@ -3,31 +3,61 @@
 //!
 //! ```text
 //! <dir>/
-//!   .meta.json      — VectorIndexMeta (serde_json)
-//!   index.usearch   — USearch binary (written on first save)
-//!   keymap.bin      — Keymap (bincode; u64 key ↔ ItemId)
+//!   .meta.json      — VectorIndexMeta (serde_json), format_version "2"
+//!   index.usearch   — USearch binary, rewritten only on compaction
+//!   keymap.bin      — Keymap (bincode; u64 key ↔ ItemId), written with it
+//!   journal.bin     — append-only vectors since the last compaction
+//!   lock            — advisory lock file held across a commit
 //! ```
 //!
 //! Tasks 5-7 of the search-v0-embeddings plan implement open + add/remove/save +
-//! search respectively.
+//! search respectively. Sub-project 17 adds the `journal.bin` write path: an
+//! [`add`](VectorIndex::add) updates the in-memory graph immediately and queues
+//! the vector; [`commit`](VectorIndex::commit) appends the queue to the journal
+//! and only rewrites `index.usearch` when the journal outgrows
+//! [`COMPACT_THRESHOLD`] or the commit ends a bulk batch. See
+//! `docs/superpowers/specs/2026-09-06-ingest-throughput-17-design.md` § "Part 2".
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use singularmem_core::ItemId;
 use usearch::{IndexOptions, MetricKind, ScalarKind};
 
 use crate::embedder::Embedder;
 use crate::error::{Error, Result};
+use crate::vector_journal::Journal;
 
 /// Items per `Embedder::embed_batch` call in [`EmbedderIndex::on_ingest_batch`].
 ///
 /// 64 sits on the flat part of the measured throughput curve for the bundled
 /// ONNX models; larger chunks buy nothing and cost memory.
 pub const EMBED_CHUNK: usize = 64;
+
+/// Journal records tolerated before [`VectorIndex::commit`] compacts, i.e.
+/// rewrites `index.usearch` + `keymap.bin` and truncates `journal.bin`.
+///
+/// A record is `16 + 4 × dim` bytes, so 1 000 records of a 384-dimensional
+/// model is ~1.5 MB of journal — cheap to replay on open, and far cheaper to
+/// append to than re-serialising the whole HNSW graph per item.
+pub const COMPACT_THRESHOLD: usize = 1_000;
+
+/// Attempts and base backoff used when taking the commit lock on
+/// `<dir>/lock`. Mirrors the Tantivy sidecar's schedule in
+/// `src/commands/index.rs`: five attempts sleeping `50, 100, 200, 400` ms.
+const LOCK_ATTEMPTS: u32 = 5;
+const LOCK_BASE_DELAY: Duration = Duration::from_millis(50);
+
+/// On-disk `format_version` written by this build.
+const FORMAT_VERSION: &str = "2";
+/// The pre-journal `format_version`, upgraded in place on the first commit.
+const FORMAT_VERSION_V1: &str = "1";
 
 // ── VectorIndexOptions ────────────────────────────────────────────────────
 
@@ -67,7 +97,8 @@ impl Default for VectorIndexOptions {
 /// open returns [`Error::ModelMismatch`] or [`Error::DimMismatch`] respectively.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorIndexMeta {
-    /// Monotonic format version. Always `"1"` for v0.3.0.
+    /// Monotonic format version. `"1"` was the pre-journal layout; this build
+    /// creates and upgrades to `"2"` (see [`COMPACT_THRESHOLD`]).
     pub format_version: String,
     /// Stable model identifier from [`Embedder::model_id()`].
     pub model_id: String,
@@ -114,15 +145,44 @@ pub(crate) struct Keymap {
 /// Both the inner `usearch::Index` and the keymap are guarded by [`Mutex`].
 /// Multiple threads can call [`add`](VectorIndex::add),
 /// [`remove`](VectorIndex::remove), and [`search`](VectorIndex::search)
-/// concurrently; each operation acquires its own lock. [`save`](VectorIndex::save)
-/// acquires both locks in sequence (inner first, then keymap) to avoid partial
-/// writes.
+/// concurrently; each operation acquires its own lock.
+/// [`commit`](VectorIndex::commit) additionally takes an advisory *file* lock
+/// on `<dir>/lock`, so handles in different processes (or two handles in this
+/// one) serialise their journal appends and compactions against each other.
 pub struct VectorIndex {
     pub(crate) inner: Mutex<usearch::Index>,
     pub(crate) path: PathBuf,
     pub(crate) usearch_path: PathBuf,
     pub(crate) meta: VectorIndexMeta,
     pub(crate) keymap: Mutex<Keymap>,
+    /// Append-only log of vectors added since the last compaction.
+    journal: Journal,
+    /// Vectors added but not yet appended to `journal`, in insertion order.
+    pending: Mutex<Vec<(ItemId, Vec<f32>)>>,
+    /// `<dir>/lock`, the advisory lock file taken for the whole of a commit.
+    lock_path: PathBuf,
+    /// Set when `.meta.json` on disk still says `format_version "1"`; the
+    /// upgraded meta is written by the first commit, inside the lock.
+    meta_upgrade_pending: AtomicBool,
+    /// Ids removed since the last compaction. `journal.bin` has no tombstone
+    /// record, so a removed id whose vector is still in the journal would be
+    /// added straight back by the replay in `absorb_journal`. Holding the id
+    /// here until the compaction that truncates the journal keeps the removal
+    /// stable. In-memory only, exactly like the pre-journal behaviour where a
+    /// `remove` was lost unless it was followed by a save.
+    tombstones: Mutex<HashSet<ItemId>>,
+}
+
+/// Holds `<dir>/lock` for the duration of a commit. Releasing on drop means
+/// an early `?` return inside a commit cannot strand the lock.
+struct CommitLock(File);
+
+impl Drop for CommitLock {
+    fn drop(&mut self) {
+        // Nothing useful to do on failure — the OS releases the flock when the
+        // descriptor closes a moment later anyway.
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 
 impl std::fmt::Debug for VectorIndex {
@@ -201,7 +261,7 @@ impl VectorIndex {
             m
         } else {
             VectorIndexMeta {
-                format_version: "1".to_string(),
+                format_version: FORMAT_VERSION.to_string(),
                 model_id: embedder.model_id().to_string(),
                 dim: embedder.dim(),
                 distance: "cosine".to_string(),
@@ -210,6 +270,16 @@ impl VectorIndex {
                 created_at: jiff::Timestamp::now(),
             }
         };
+
+        // ── v1 → v2 upgrade ───────────────────────────────────────────────
+        // A pre-journal directory opens unchanged; the in-memory meta is
+        // already v2 and the first commit rewrites `.meta.json` under the
+        // commit lock, so a read-only open never touches the file.
+        let upgrading = meta.format_version == FORMAT_VERSION_V1;
+        let mut meta = meta;
+        if upgrading {
+            meta.format_version = FORMAT_VERSION.to_string();
+        }
 
         // ── Persist meta on first open ────────────────────────────────────
         if !meta_path.exists() {
@@ -261,13 +331,50 @@ impl VectorIndex {
             Keymap::default()
         };
 
-        Ok(Self {
+        // ── Open the journal and replay it into the in-memory graph ───────
+        let journal = Journal::open(&dir.join("journal.bin"), meta.dim, &meta.model_id)?;
+        let index = Self {
             inner: Mutex::new(inner),
             path: dir.to_path_buf(),
             usearch_path,
             meta,
             keymap: Mutex::new(keymap),
-        })
+            journal,
+            pending: Mutex::new(Vec::new()),
+            lock_path: dir.join("lock"),
+            meta_upgrade_pending: AtomicBool::new(upgrading),
+            tombstones: Mutex::new(HashSet::new()),
+        };
+        index.absorb_journal()?;
+        Ok(index)
+    }
+
+    /// Add every journal record whose id is not already in the keymap to the
+    /// in-memory graph, without re-journalling it. Idempotent: a record whose
+    /// id survived a compaction (a crash between the rename and the truncate)
+    /// is skipped, so replaying the same journal twice is a no-op the second
+    /// time.
+    fn absorb_journal(&self) -> Result<()> {
+        let records = self.journal.replay()?;
+        if records.is_empty() {
+            return Ok(());
+        }
+        let missing: Vec<(ItemId, &[f32])> = {
+            let tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
+            let keymap = self.keymap.lock().expect("keymap mutex poisoned");
+            let missing = records
+                .iter()
+                .filter(|(id, _)| !keymap.reverse.contains_key(id) && !tombstones.contains(id))
+                .map(|(id, vector)| (*id, vector.as_slice()))
+                .collect();
+            drop(keymap);
+            drop(tombstones);
+            missing
+        };
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.add_entries(&missing, false)
     }
 
     /// Returns a reference to the index metadata.
@@ -280,7 +387,9 @@ impl VectorIndex {
     /// Add (or replace) one item's embedding vector. Assigns a sequential `u64`
     /// key internally and records the `ItemId` ↔ key mapping in the keymap.
     ///
-    /// Call [`VectorIndex::save`] to persist changes to disk.
+    /// The in-memory graph is current immediately; the vector is queued for
+    /// the next [`commit`](VectorIndex::commit), which writes it to
+    /// `journal.bin`.
     ///
     /// # Errors
     ///
@@ -302,7 +411,8 @@ impl VectorIndex {
     /// any `vector.len() != meta.dim`, the whole batch is rejected and
     /// neither the keymap nor the inner index is touched.
     ///
-    /// Call [`VectorIndex::save`] to persist changes to disk.
+    /// The in-memory graph is current immediately; the vectors are queued for
+    /// the next [`commit`](VectorIndex::commit).
     ///
     /// # Errors
     ///
@@ -314,6 +424,16 @@ impl VectorIndex {
     /// Panics if the keymap or inner index mutex is poisoned (only possible if
     /// another thread panicked while holding the lock).
     pub fn add_batch(&self, entries: &[(ItemId, &[f32])]) -> Result<()> {
+        self.add_entries(entries, true)
+    }
+
+    /// Shared body of [`add`](VectorIndex::add) /
+    /// [`add_batch`](VectorIndex::add_batch) and journal replay.
+    ///
+    /// `queue` is `false` on the replay path: those vectors are already on
+    /// disk, so re-queueing them would write them to the journal a second
+    /// time on the next commit.
+    fn add_entries(&self, entries: &[(ItemId, &[f32])], queue: bool) -> Result<()> {
         for (_, vector) in entries {
             if vector.len() != self.meta.dim {
                 return Err(Error::DimMismatch {
@@ -359,6 +479,11 @@ impl VectorIndex {
             })?;
         }
         drop(inner);
+
+        if queue {
+            let mut pending = self.pending.lock().expect("pending mutex poisoned");
+            pending.extend(entries.iter().map(|(id, vector)| (*id, (*vector).to_vec())));
+        }
         Ok(())
     }
 
@@ -391,26 +516,125 @@ impl VectorIndex {
                     reason: format!("{e}"),
                 })?;
         }
+        // Drop the vector from the not-yet-journalled queue, and remember the
+        // removal until the next compaction truncates the journal — otherwise
+        // the replay in `absorb_journal` would add it straight back.
+        let mut pending = self.pending.lock().expect("pending mutex poisoned");
+        pending.retain(|(pending_id, _)| *pending_id != id);
+        drop(pending);
+        let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
+        tombstones.insert(id);
+        drop(tombstones);
         Ok(())
     }
 
-    /// Flush both the `USearch` binary (`index.usearch`) and the keymap
-    /// (`keymap.bin`) to disk.
+    // ── Durability: journal append + compaction ───────────────────────────
+
+    /// Persist everything added since the last commit.
     ///
-    /// When the index is empty, the `USearch` binary is not written (or is
-    /// removed if a stale file exists). `keymap.bin` is always written so that
-    /// re-opens can distinguish "never indexed" from "index is empty but was
-    /// committed".
+    /// Under the `<dir>/lock` advisory lock: rewrite `.meta.json` if this
+    /// directory is still v1, append the queued vectors to `journal.bin`,
+    /// and — when the journal now holds more than [`COMPACT_THRESHOLD`]
+    /// records, or `end_of_batch` says this commit closes a bulk ingest —
+    /// compact. A plain single-item commit therefore writes a couple of
+    /// kilobytes instead of re-serialising the whole HNSW graph.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Usearch`] on `USearch` serialisation failure or
-    /// [`Error::Io`] on filesystem write failure.
+    /// - [`Error::Usearch`] if the commit lock is still busy after five
+    ///   attempts, or on a `USearch` serialisation failure.
+    /// - [`Error::Io`] on a filesystem failure.
     ///
     /// # Panics
     ///
-    /// Panics if the inner index or keymap mutex is poisoned.
+    /// Panics if the pending, inner index, or keymap mutex is poisoned.
+    pub fn commit(&self, end_of_batch: bool) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.commit_locked(end_of_batch)
+    }
+
+    /// Rewrite `index.usearch` + `keymap.bin` from the current in-memory state
+    /// and truncate `journal.bin`, flushing any queued vectors first.
+    ///
+    /// Public because `reindex` and the tests drive compaction directly.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`commit`](VectorIndex::commit).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending, inner index, or keymap mutex is poisoned.
+    pub fn compact(&self) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.commit_locked(true)
+    }
+
+    /// Compatibility alias for [`compact`](VectorIndex::compact): flushes the
+    /// journal and rewrites `index.usearch` + `keymap.bin` unconditionally.
+    ///
+    /// Prefer [`commit`](VectorIndex::commit) (which compacts only when it
+    /// needs to) or [`compact`](VectorIndex::compact) by name; this exists so
+    /// pre-journal callers keep working.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`compact`](VectorIndex::compact).
     pub fn save(&self) -> Result<()> {
+        self.compact()
+    }
+
+    /// Number of records currently in `journal.bin` — vectors that are durable
+    /// but not yet folded into `index.usearch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the journal's metadata cannot be read.
+    pub fn journal_len(&self) -> Result<usize> {
+        self.journal.len()
+    }
+
+    /// Body of [`commit`](VectorIndex::commit), with the file lock already
+    /// held by the caller.
+    fn commit_locked(&self, end_of_batch: bool) -> Result<()> {
+        self.write_meta_upgrade()?;
+
+        let drained: Vec<(ItemId, Vec<f32>)> = {
+            let mut pending = self.pending.lock().expect("pending mutex poisoned");
+            std::mem::take(&mut *pending)
+        };
+        if !drained.is_empty() {
+            if let Err(e) = self.journal.append(&drained) {
+                // Put the queue back (ahead of anything added meanwhile) so a
+                // later commit can still make these vectors durable.
+                let mut pending = self.pending.lock().expect("pending mutex poisoned");
+                let mut restored = drained;
+                restored.append(&mut pending);
+                *pending = restored;
+                drop(pending);
+                return Err(e);
+            }
+        }
+
+        if end_of_batch || self.journal.len()? > COMPACT_THRESHOLD {
+            self.compact_locked()?;
+        }
+        Ok(())
+    }
+
+    /// Fold the journal into `index.usearch` + `keymap.bin` and truncate it,
+    /// with the file lock already held by the caller.
+    ///
+    /// Replays the journal first. That is not redundant with the replay in
+    /// `open`: another handle may have appended vectors since this one opened,
+    /// and this handle's in-memory graph knows nothing about them. Saving from
+    /// that stale view and then truncating would delete the other writer's
+    /// vectors outright, so a compaction always absorbs the journal it is
+    /// about to discard.
+    fn compact_locked(&self) -> Result<()> {
+        self.absorb_journal()?;
+
+        let tmp_usearch = self.path.join("index.usearch.tmp");
         let inner = self.inner.lock().expect("usearch mutex poisoned");
         let count = inner.size();
         if count > 0 {
@@ -418,23 +642,117 @@ impl VectorIndex {
             // usearch::Index::load on a file saved from an empty index may
             // segfault on some platforms; we avoid generating such files.
             inner
-                .save(self.usearch_path.to_str().unwrap())
+                .save(tmp_usearch.to_str().unwrap())
                 .map_err(|e| Error::Usearch {
                     context: "usearch save",
                     reason: format!("{e}"),
                 })?;
+        }
+        drop(inner);
+        if count > 0 {
+            sync_file(&tmp_usearch)?;
+            fs::rename(&tmp_usearch, &self.usearch_path).map_err(Error::Io)?;
         } else if self.usearch_path.exists() {
             // Remove any stale usearch file so the next open starts fresh.
             fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
         }
-        drop(inner);
 
         let bytes = bincode::serialize(&*self.keymap.lock().expect("keymap mutex poisoned"))
             .map_err(|e| Error::Embedding {
                 context: "serializing keymap",
                 reason: format!("{e}"),
             })?;
-        fs::write(self.path.join("keymap.bin"), bytes).map_err(Error::Io)
+        let tmp_keymap = self.path.join("keymap.bin.tmp");
+        fs::write(&tmp_keymap, bytes).map_err(Error::Io)?;
+        sync_file(&tmp_keymap)?;
+        fs::rename(&tmp_keymap, self.path.join("keymap.bin")).map_err(Error::Io)?;
+
+        // Best-effort directory fsync so the renames are durable. Not every
+        // platform lets you open a directory for this, and a failure here
+        // costs durability of an already-consistent state, not correctness.
+        let _ = File::open(&self.path).and_then(|d| d.sync_all());
+
+        // Only now is the journal redundant: on-disk state is either
+        // (old index + full journal) or (new index + empty journal), and a
+        // crash in between replays idempotently because every replayed id is
+        // already in the freshly written keymap.
+        self.journal.clear()?;
+
+        // The journal no longer holds the removed vectors, so nothing is left
+        // for the tombstones to suppress.
+        let mut tombstones = self.tombstones.lock().expect("tombstone mutex poisoned");
+        tombstones.clear();
+        drop(tombstones);
+        Ok(())
+    }
+
+    /// Rewrite `.meta.json` with `format_version "2"` the first time a v1
+    /// directory commits. Called with the file lock held.
+    fn write_meta_upgrade(&self) -> Result<()> {
+        if !self.meta_upgrade_pending.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let write = || -> Result<()> {
+            let text = serde_json::to_string_pretty(&self.meta).map_err(|e| Error::Embedding {
+                context: "serializing .meta.json",
+                reason: format!("{e}"),
+            })?;
+            fs::write(self.path.join(".meta.json"), text).map_err(Error::Io)
+        };
+        write().inspect_err(|_| {
+            // Leave the upgrade outstanding so the next commit retries it.
+            self.meta_upgrade_pending.store(true, Ordering::SeqCst);
+        })
+    }
+
+    /// Take the exclusive advisory lock on `<dir>/lock`, retrying a busy lock
+    /// on the same schedule the Tantivy sidecar uses.
+    fn acquire_lock(&self) -> Result<CommitLock> {
+        let mut delay = LOCK_BASE_DELAY;
+        for attempt in 1..=LOCK_ATTEMPTS {
+            let file = File::create(&self.lock_path).map_err(Error::Io)?;
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(CommitLock(file)),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tracing::debug!(
+                        path = %self.lock_path.display(),
+                        attempt,
+                        attempts = LOCK_ATTEMPTS,
+                        "vector index commit lock busy; retrying",
+                    );
+                    if attempt < LOCK_ATTEMPTS {
+                        std::thread::sleep(delay);
+                        delay *= 2;
+                    }
+                }
+                Err(e) => return Err(Error::Io(e)),
+            }
+        }
+        Err(Error::Usearch {
+            context: "acquiring vector index lock",
+            reason: format!("busy after {LOCK_ATTEMPTS} attempts"),
+        })
+    }
+
+    /// Number of vectors currently in the in-memory graph, journal replay
+    /// included.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inner index mutex is poisoned.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.lock().expect("usearch mutex poisoned").size()
+    }
+
+    /// Returns `true` if no vectors are indexed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inner index mutex is poisoned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns the number of vectors currently indexed.
@@ -549,6 +867,10 @@ pub struct VectorHit {
 pub struct EmbedderIndex {
     embedder: Box<dyn Embedder>,
     vector_index: VectorIndex,
+    /// Set by `on_ingest_batch` and consumed by the `commit` that follows it,
+    /// so a bulk ingest compacts once at its end while single ingests only
+    /// append to the journal.
+    batch_end: AtomicBool,
 }
 
 impl EmbedderIndex {
@@ -565,6 +887,7 @@ impl EmbedderIndex {
         Ok(Self {
             embedder,
             vector_index,
+            batch_end: AtomicBool::new(false),
         })
     }
 
@@ -632,17 +955,27 @@ impl singularmem_core::IndexHook for EmbedderIndex {
                 .add_batch(&entries)
                 .map_err(|ref e| to_core_err(e))?;
         }
+        // Tell the `commit` that follows this call to compact: a bulk ingest
+        // is worth one graph rewrite, and it leaves the journal empty for the
+        // single ingests that come after.
+        self.batch_end.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Flush the [`VectorIndex`] to disk (`index.usearch` + `keymap.bin`).
+    /// Persist the [`VectorIndex`]: append the vectors added since the last
+    /// commit to `journal.bin`, compacting into `index.usearch` +
+    /// `keymap.bin` only when the journal outgrew
+    /// [`COMPACT_THRESHOLD`] or this commit closes an
+    /// [`on_ingest_batch`](singularmem_core::IndexHook::on_ingest_batch).
     ///
     /// # Errors
     ///
     /// Returns [`singularmem_core::Error::Io`] wrapping the search error
     /// message if the flush fails.
     fn commit(&self) -> singularmem_core::Result<()> {
-        self.vector_index.save().map_err(|ref e| to_core_err(e))
+        self.vector_index
+            .commit(self.batch_end.swap(false, Ordering::SeqCst))
+            .map_err(|ref e| to_core_err(e))
     }
 }
 
@@ -678,6 +1011,14 @@ impl EmbedderIndex {
             total_indexed,
         })
     }
+}
+
+/// `fsync` the file at `path`, so a rename over the original cannot expose a
+/// name pointing at unflushed contents.
+fn sync_file(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(Error::Io)
 }
 
 /// Convert a search crate [`Error`] into a [`singularmem_core::Error`].

@@ -1,14 +1,13 @@
 //! Append-only journal of vectors added since the last compaction of the
 //! `USearch` index. Format documented in `docs/formats/vectors-v2.md`.
 //!
-//! Wired into `VectorIndex::commit`/`open` in sub-project 17 Task 4; until
-//! then this module's `pub(crate)` surface is only reachable from its own
-//! tests, hence the blanket `dead_code` allow below.
+//! Driven by `VectorIndex::commit`/`compact`/`open`, which own the advisory
+//! file lock that serialises concurrent writers; this module does no locking
+//! of its own.
 //!
 //! The on-disk model id is capped at 512 bytes (see [`Journal::open`]); the
 //! header is read with two bounded `read_exact` calls rather than one
 //! best-effort `read`, so a header can never be misparsed from a short read.
-#![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
