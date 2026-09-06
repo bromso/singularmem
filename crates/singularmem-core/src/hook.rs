@@ -1,8 +1,10 @@
 //! `IndexHook` — extension point for search index implementations.
 //!
-//! The trait is intentionally minimal: three methods, no associated types,
-//! no Tantivy or vector-index types in the signature. Implementations live in
-//! external crates (e.g. `singularmem-search` provides a Tantivy impl).
+//! The trait is intentionally minimal: four methods (`on_ingest`,
+//! `on_reindex`, `commit`, and the defaulted `on_ingest_batch`), no
+//! associated types, no Tantivy or vector-index types in the signature.
+//! Implementations live in external crates (e.g. `singularmem-search`
+//! provides a Tantivy impl).
 //!
 //! Hook failures DO NOT roll back the underlying `SQLite` write. Per
 //! Principle VII (Honest Failure Modes), `Store::ingest`'s contract is "the
@@ -39,6 +41,18 @@ pub trait IndexHook: Send + Sync {
     ///
     /// Returns an error if the commit fails.
     fn commit(&self) -> Result<()>;
+
+    /// Index a batch of freshly ingested items. The default indexes each
+    /// item with [`IndexHook::on_ingest`], in order, stopping at the first
+    /// error. Implementations that can amortise work across items (batched
+    /// embedding, one lock acquisition) override this.
+    ///
+    /// # Errors
+    /// Whatever the per-item path returns; callers treat a failure as
+    /// "stored but not searchable until `reindex`".
+    fn on_ingest_batch(&self, items: &[Item]) -> Result<()> {
+        items.iter().try_for_each(|item| self.on_ingest(item))
+    }
 }
 
 /// Composite `IndexHook` that fans calls out to multiple underlying hooks.
@@ -77,6 +91,12 @@ impl IndexHook for MultiHook {
 
     fn commit(&self) -> crate::Result<()> {
         run_all(self.hooks.iter(), "commit", |h| h.commit())
+    }
+
+    fn on_ingest_batch(&self, items: &[crate::Item]) -> crate::Result<()> {
+        run_all(self.hooks.iter(), "on_ingest_batch", |h| {
+            h.on_ingest_batch(items)
+        })
     }
 }
 
