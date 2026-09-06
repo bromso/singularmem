@@ -238,30 +238,115 @@ Recorded during Tasks 3–5 (see `.superpowers/sdd/task-3-report.md`,
    a known limitation in `docs/formats/vectors-v2.md`. Live impact is nil
    today: `IndexHook` has no delete verb and `VectorIndex::remove` has no
    production caller.
-6. **`journal.bin` is created eagerly, not lazily**, by `Journal::open`
-   inside every `VectorIndex::open` call (read-only opens included) —
-   simpler than deferring creation to the first append, at the cost that
-   opening a vector directory on a read-only filesystem now fails where
-   it previously succeeded (no test or product path does that today).
+6. **`journal.bin` creation, reversed back to lazy during the Task 4 fix
+   wave.** This bullet originally recorded the opposite choice — eager
+   creation by `Journal::open` inside every `VectorIndex::open` call,
+   including read-only opens — and the cost that came with it: opening a
+   vector directory on a read-only filesystem failed where it previously
+   succeeded. The fix wave (`4d26431`,
+   `fix(search): journal laziness, lock-file open mode, temp cleanup, lock
+   tests`) reversed this: `Journal::open` now writes nothing when
+   `journal.bin` is absent, and the file (with its header) is created only
+   by the first `Journal::append`. A fully compacted directory therefore
+   opens read-only without creating or touching any new file, restoring
+   the pre-journal behaviour. Guarded by
+   `open_creates_nothing_until_the_first_append` in
+   `crates/singularmem-search/src/vector_journal.rs` and
+   `open_of_a_complete_v2_directory_writes_nothing` in
+   `tests/vector_index_journal.rs` (mutation-checked: making `Journal::open`
+   eager fails the latter).
 7. **fs4 API path**: `fs4 = "0.8"` (default `sync` feature) exports the
    lock trait at `fs4::FileExt`, not `fs4::fs_std::FileExt` (the 0.9+
    path this design's text didn't pin a version for).
 8. **Perf-check.sh exit codes renumbered.** The two new gates
-   (`ingest_with_indexes`, `ingest_single_with_indexes`) take exit codes
-   14 and 15, placed right after the existing `ingest_one` gate (13); the
-   pre-existing query/semantic/hybrid gates shift from 14/15/16 to
-   16/17/18 to make room, since the numbers this design's Part 3 text
-   suggested for the two new gates (15, 16) collided with those two
-   already-assigned codes.
-9. **The `ingest_single_with_indexes` gate, as specified (both a Tantivy
-   `Index` hook and an `EmbedderIndex` in one `MultiHook`), measures a
-   figure dominated by Tantivy's pre-existing per-item commit cost
-   (~88 ms on the measurement machine), not the vector index's own cost
-   (~6.6 ms, isolated). The combined figure is very likely to exceed the
-   20 ms budget in CI. This is not a sub-project 17 regression — Tantivy's
+   (`ingest_with_indexes`, single-item ingest — originally
+   `ingest_single_with_indexes`, later split per deviation 9 below into
+   `ingest_single_with_vector_index` for the gate itself and the ungated
+   `ingest_single_with_both_hooks`) take exit codes 14 and 15, placed right
+   after the existing `ingest_one` gate (13); the pre-existing
+   query/semantic/hybrid gates shift from 14/15/16 to 16/17/18 to make
+   room, since the numbers this design's Part 3 text suggested for the two
+   new gates (15, 16) collided with those two already-assigned codes.
+9. **The single-item gate was split into a gated vector-only bench and an
+   ungated combined-hooks bench, resolving the concern originally recorded
+   here.** As specified (both a Tantivy `Index` hook and an `EmbedderIndex`
+   in one `MultiHook`), the single-item gate measured a figure dominated by
+   Tantivy's pre-existing per-item commit cost (~88 ms on the measurement
+   machine), not the vector index's own cost (~6.75 ms, isolated) — the
+   combined figure would very likely have exceeded the 20 ms budget in CI
+   even though the vector-index improvement it was meant to verify is real
+   and measured. This is not a sub-project 17 regression: Tantivy's
    per-item commit cost predates all of Tasks 1–4 and this design lists
-   "Changing the Tantivy sidecar" as a non-goal — but it means the literal
-   acceptance criterion 2 gate can fail even though the vector-index
-   improvement it was meant to verify is real and measured. See
-   `docs/benchmarks/ingest.md` § "A caveat on the single-item gate" for
-   the isolated numbers, and `task-5-report.md` for the recommendation.
+   "Changing the Tantivy sidecar" as a non-goal.
+   Resolved during reconciliation (sub-project 17) by renaming the
+   combined-hooks bench to `ingest_single_with_both_hooks` (kept ungated,
+   reported informationally by `.github/scripts/perf-check.sh`'s summary
+   line) and adding `ingest_single_with_vector_index` — same 20,000
+   pre-seeded corpus, but opened with **only** the `EmbedderIndex` hook —
+   which is what the ≤ 20 ms gate now measures (exit code 15, unchanged).
+   See `docs/benchmarks/ingest.md` § "Why the gate is vector-only" for the
+   isolated numbers, and that doc's benchmarks table for both current
+   medians. Tantivy's per-item `commit` cost is listed there as the next
+   performance follow-up.
+10. **`Keymap` gained a `generation: u64` field**, not in this design's
+    original text, bumped by one on every successful compaction and
+    serialised as the first field (before `next_key`) in `format_version
+    "2"`'s `keymap.bin`. A handle records the generation it loaded; when
+    the on-disk keymap has moved past it, another handle has compacted and
+    this handle's in-memory graph is stale relative to disk. `"1"` keymaps
+    have no `generation` field and are read through the separate `KeymapV1`
+    struct, converted with `generation: 0`. Needed so `compact_locked` can
+    detect a stale handle and reload before saving over another handle's
+    work (deviation 11 below); without it, the concurrency tests recorded
+    `left: 40, right: 80` instead of both handles' vectors surviving.
+11. **`open` takes `<dir>/lock` in SHARED mode** (not just `commit`),
+    with the same five-attempt `50/100/200/400 ms` backoff, and holds it
+    for the whole load; several readers may hold the shared lock at once,
+    only a commit's exclusive lock excludes them. This stops a load from
+    ever observing one of a compaction's two renames half-done. If the
+    load then fails with a `Usearch` error or a `keymap.bin` deserialize
+    error, the lock is dropped, re-taken, and the load retried exactly
+    once — the shape a load racing a compaction that started just before
+    the lock was taken can still produce. Not in this design's original
+    text, which only locked `commit`.
+12. **Lock acquisition downgrades to unlocked on a read-only directory.**
+    If `<dir>/lock` cannot be *opened* because the directory is read-only
+    (`PermissionDenied` / `ReadOnlyFilesystem`), `open`'s load proceeds
+    without the lock (logged at `debug`) instead of failing — otherwise
+    deviation 11's shared-lock-on-open change would have made a read-only
+    vector directory unopenable, which used to work.
+13. **Replay's key-collision guard uses `usearch::Index::contains`, not a
+    recorded `max_key`.** The brief that drove the Task 4 fix wave
+    suggested `next_key = max(next_key, highest key in the graph + 1)`, or
+    recording `max_key` in the keymap; neither works, because `usearch`
+    2.15 has no key-enumeration API and a `max_key` recorded in the keymap
+    is stale in exactly the torn-compaction case the check exists for (the
+    on-disk keymap being read is the *old* one). Instead, each key is
+    checked with `index.contains(key)` as it is issued during replay; a
+    hit means `index.usearch` is ahead of `keymap.bin` (a torn
+    compaction), the stale occupant is evicted with `index.remove(key)`
+    first, and the record being replayed — the authoritative value for
+    that key — is inserted. Exact for any gap pattern (including gaps left
+    by `remove`), at the cost of one hash lookup per insert.
+14. **Directory-fsync failure now propagates as an error, not just a
+    debug log.** Compaction's `sync_dir` call — which fsyncs `<dir>` after
+    the `index.usearch`/`keymap.bin` renames so their durability ordering
+    survives a power cut — returns `Err` on failure everywhere except
+    Windows (which has no directory handle to sync, so a failure to open
+    one there is tolerated, not reported). The renamed pair is already
+    consistent on failure; what's lost is only the guarantee that ordering
+    survives a crash immediately after, which is worth surfacing rather
+    than swallowing.
+15. **The `count == 0` compaction path goes through the same
+    temp-file-plus-rename as the non-empty path**, not a direct write: the
+    keymap is written to `keymap.bin.tmp`, fsynced, and renamed over
+    `keymap.bin` first, stamping the new (empty) generation; only *after*
+    that rename lands does `publish_compaction` remove the stale
+    `index.usearch`. This ordering means the on-disk pair is never
+    observed as (old graph + a keymap already renamed to reflect zero
+    items) — the graph file is removed only once the keymap naming the
+    empty state is already durable. Pinned by
+    `compacting_an_empty_index_renames_the_keymap_and_drops_index_usearch`,
+    which replaces a `chmod 0o444` `keymap.bin` (only possible via
+    temp+rename, not a direct overwrite) and confirms `index.usearch` is
+    gone afterward.

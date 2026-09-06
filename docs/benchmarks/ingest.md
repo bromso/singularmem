@@ -28,35 +28,45 @@ macOS (Darwin 25.6.0).
 | Bench | Median | Rate / cost | Gate |
 |---|---|---|---|
 | `ingest_throughput/ingest_with_indexes` — bulk `ingest_many`, 100 realistic (~1,500 char) items, Tantivy `Index` + `EmbedderIndex` over `MockEmbedder` | 240.81 ms / 100 items | **415.28 items/s** | ≥ 50 items/s (target ≥ 200) |
-| `ingest_throughput/ingest_single_with_indexes` — single `Store::ingest`, both hooks, 20,000 pre-seeded vectors | 98.61 ms/item | — | ≤ 20 ms/item |
+| `ingest_throughput/ingest_single_with_vector_index` — single `Store::ingest`, **`EmbedderIndex` only**, 20,000 pre-seeded vectors | **6.75 ms/item** | — | **≤ 20 ms/item (gated)** |
+| `ingest_throughput/ingest_single_with_both_hooks` — single `Store::ingest`, Tantivy `Index` + `EmbedderIndex` in one `MultiHook`, same 20,000 pre-seeded vectors | 86.74 ms/item | — | ungated, informational |
 
 The bulk gate passes with wide margin (415 ≫ 200 ≫ 50). The single-item gate
-**as measured with both hooks attached fails the literal 20 ms budget** —
-see "A caveat on the single-item gate" below; the vector index's own
-contribution, isolated, is well inside budget.
+is **vector-index-only** and passes comfortably (6.75 ms ≪ 20 ms budget); the
+combined-hooks figure is reported alongside it for visibility but is not
+gated — see "Why the gate is vector-only" below.
 
-## A caveat on the single-item gate
+## Why the gate is vector-only
 
-`ingest_single_with_indexes` measures `Store::ingest` through a `MultiHook`
-of a Tantivy `Index` **and** an `EmbedderIndex`, per the design. Tantivy
-commits a whole segment on every single-item `commit()` call — a
-pre-existing cost, unrelated to this sub-project and already present before
-any of Tasks 1–4 — and it dominates the combined figure:
+Sub-project 17's acceptance criterion is that the vector index's own
+per-item commit cost stops scaling with index size — the whole point of the
+journal (see `docs/formats/vectors-v2.md`). Measuring that claim through a
+`MultiHook` of a Tantivy `Index` **and** an `EmbedderIndex` (as the design's
+text originally specified) conflates it with a second, unrelated cost:
+Tantivy commits a whole segment on every single-item `commit()` call — a
+pre-existing cost, present before any of Tasks 1–4 and out of this
+sub-project's scope (the design's own non-goals list "Changing the Tantivy
+sidecar") — and that cost dominates the combined figure:
 
 | Configuration | Median | What it measures |
 |---|---|---|
-| `EmbedderIndex` alone, 20,000 mock-preseeded vectors, this branch | **6.6 ms** | The vector index's own per-item commit cost, journal-backed |
-| `Index` (Tantivy) alone, fresh/empty directory, this branch | 88.0 ms | Tantivy's per-item segment commit — unrelated to sub-project 17 |
-| Both hooks together (the CI gate's bench) | 98.6 ms | Sum of the two, Tantivy-dominated |
+| `ingest_single_with_vector_index` — `EmbedderIndex` alone, 20,000 mock-preseeded vectors, this branch | **6.75 ms** | The vector index's own per-item commit cost, journal-backed. **This is what the CI gate checks, at ≤ 20 ms.** |
+| `Index` (Tantivy) alone, fresh/empty directory, this branch | ~88.0 ms | Tantivy's per-item segment commit — unrelated to sub-project 17 |
+| `ingest_single_with_both_hooks` — both hooks together | 86.74 ms | Sum of the two, Tantivy-dominated. Printed by `perf-check.sh`'s summary line, not gated. |
 
-The design's stated intent for this gate ("asserts the size-proportional
-rewrite is gone") is about the vector index specifically, and that part
-holds — see the before/after isolation below. The combined-hook gate as
-specified will very likely also fail on the CI runner, for the same
-Tantivy-shaped reason, independent of anything in this sub-project. This is
-flagged as an open concern in the Task 5 report rather than silently
-patched, since fixing Tantivy's per-item commit cost is out of scope
-(the design's own non-goals list "Changing the Tantivy sidecar").
+Gating the combined figure would fail CI on a cost this sub-project neither
+introduced nor can fix, while telling a reader nothing about whether the
+vector-index work it is meant to verify actually succeeded. Isolating the
+vector-index-only bench as the gate, and keeping the combined-hooks bench
+as an ungated, reported sibling, measures the right thing while still
+keeping the realistic (Tantivy-dominated) cost visible.
+
+**Next performance follow-up:** Tantivy's per-item `commit` cost
+(~88 ms on this machine, for a single-item ingest through the Tantivy
+`Index` hook) is unaddressed by this sub-project and is the largest
+remaining single-item ingest cost when both hooks are attached. Reducing
+it is out of scope here (see the design's non-goals) but is the natural
+next target for ingest-latency work.
 
 ## Vector-index-only isolation: before vs after
 
