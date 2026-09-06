@@ -32,6 +32,7 @@ use usearch::{IndexOptions, MetricKind, ScalarKind};
 
 use crate::embedder::Embedder;
 use crate::error::{Error, Result};
+use crate::fsync::{sync_dir, sync_file};
 use crate::vector_journal::Journal;
 
 /// Items per `Embedder::embed_batch` call in [`EmbedderIndex::on_ingest_batch`].
@@ -297,8 +298,41 @@ fn open_lock_file(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// Windows `ERROR_LOCK_VIOLATION`. `LockFileEx` reports a lock already held
+/// by another process with this raw code, and Rust's `io::Error` has no
+/// `ErrorKind` for it — it surfaces as `ErrorKind::Uncategorized`, which is
+/// unstable and cannot be matched on. So the raw code is matched instead.
+#[cfg(windows)]
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+/// `true` if `e` means "someone else holds this lock", the one condition
+/// [`acquire_lock_at`] retries.
+///
+/// Unix `flock`/`fcntl` report contention as `EWOULDBLOCK`, which maps to
+/// [`std::io::ErrorKind::WouldBlock`]. Windows `LockFileEx` reports it as raw
+/// OS error 33 (`ERROR_LOCK_VIOLATION`), which maps to the unstable
+/// `Uncategorized` kind — treating that as a hard error made every genuinely
+/// contended commit on Windows fail immediately instead of backing off.
+fn is_lock_contention(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        return e.raw_os_error() == Some(ERROR_LOCK_VIOLATION);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 /// Take `<dir>/lock` in `mode`, retrying a busy lock on the schedule the
 /// Tantivy sidecar uses: five attempts sleeping `50, 100, 200, 400` ms.
+///
+/// "Busy" is whatever [`is_lock_contention`] recognises — `WouldBlock`
+/// everywhere, plus Windows' raw `ERROR_LOCK_VIOLATION` (33). Any other io
+/// error is returned immediately as [`Error::Io`]; exhausting the five
+/// attempts returns [`Error::Usearch`] with the context
+/// `"acquiring vector index lock"`.
 fn acquire_lock_at(lock_path: &Path, mode: LockMode) -> Result<CommitLock> {
     let mut delay = LOCK_BASE_DELAY;
     for attempt in 1..=LOCK_ATTEMPTS {
@@ -313,7 +347,7 @@ fn acquire_lock_at(lock_path: &Path, mode: LockMode) -> Result<CommitLock> {
         };
         match taken {
             Ok(()) => return Ok(CommitLock(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if is_lock_contention(&e) => {
                 tracing::debug!(
                     path = %lock_path.display(),
                     ?mode,
@@ -561,7 +595,8 @@ impl VectorIndex {
         })?;
 
         // Load existing data if present; otherwise reserve initial capacity.
-        if usearch_path.exists() {
+        let index_present = usearch_path.exists();
+        if index_present {
             inner
                 .load(usearch_path.to_str().unwrap())
                 .map_err(|e| Error::Usearch {
@@ -576,11 +611,31 @@ impl VectorIndex {
         }
 
         // ── Load or create keymap ─────────────────────────────────────────
-        let keymap = if keymap_path.exists() {
+        let mut keymap = if keymap_path.exists() {
             read_keymap(&keymap_path, &disk_format)?
         } else {
             Keymap::default()
         };
+        // An absent `index.usearch` beside a non-empty keymap is not a state
+        // any successful compaction produces: emptying the index removes the
+        // graph file *and* renames an empty keymap into place. Seeing both
+        // means the crash landed between those two steps (in either order),
+        // so the keymap on disk describes vectors that no longer exist. The
+        // keymap is the stale half — the graph file is gone and cannot be
+        // recovered from it — so it is reset to empty. `generation` and
+        // `next_key` are kept: the generation still identifies this state to
+        // other handles, and keys are never reused.
+        if !index_present && !keymap.forward.is_empty() {
+            tracing::warn!(
+                path = %dir.display(),
+                stale_entries = keymap.forward.len(),
+                generation = keymap.generation,
+                "keymap.bin names vectors but index.usearch is absent (crash during an \
+                 empty-index compaction); resetting the keymap and replaying the journal",
+            );
+            keymap.forward.clear();
+            keymap.reverse.clear();
+        }
         let generation = keymap.generation;
 
         // ── Open the journal and replay it into the in-memory graph ───────
@@ -604,7 +659,46 @@ impl VectorIndex {
             tombstones: Mutex::new(HashSet::new()),
         };
         index.absorb_journal()?;
+        index.warn_if_graph_exceeds_keymap();
         Ok(index)
+    }
+
+    /// Warn when the loaded graph holds more vectors than the keymap can name.
+    ///
+    /// An end-of-batch commit skips the journal entirely (the compaction it
+    /// runs makes the queued vectors durable inside the same locked section),
+    /// so a crash between compaction's `index.usearch` rename and its
+    /// `keymap.bin` rename leaves a *new* graph beside an *old* keymap with no
+    /// journal to recover the difference from. The extra vectors are orphans:
+    /// `search` filters its hits through `keymap.forward`, so they can never
+    /// be returned, and no later compaction removes them — they are re-saved
+    /// into every subsequent `index.usearch`.
+    ///
+    /// Nothing here can reconstruct the missing ids (`USearch` 2.15 cannot
+    /// enumerate a graph's keys, and the ids only ever lived in the keymap
+    /// that was lost), so this is a report, not a repair: the searchable
+    /// count is the keymap's and that is what
+    /// [`doc_count`](VectorIndex::doc_count) returns, while the operator is
+    /// told how to rebuild.
+    fn warn_if_graph_exceeds_keymap(&self) {
+        let graph = self.inner.lock().expect("usearch mutex poisoned").size();
+        let named = self
+            .keymap
+            .lock()
+            .expect("keymap mutex poisoned")
+            .forward
+            .len();
+        if graph > named {
+            tracing::warn!(
+                path = %self.path.display(),
+                graph_vectors = graph,
+                keymap_entries = named,
+                orphans = graph - named,
+                "index.usearch holds more vectors than keymap.bin names (torn compaction); \
+                 the extra vectors are unsearchable — run `singularmem reindex \
+                 --with-embeddings --reset-vectors --force` to rebuild the index",
+            );
+        }
     }
 
     /// Add every journal record whose id is not already in the keymap to the
@@ -942,10 +1036,32 @@ impl VectorIndex {
     /// Rename the freshly written pair into place, stamp the new generation,
     /// and drop the journal. Called by [`compact_locked`] with the exclusive
     /// lock held and `index.usearch.tmp` already written when `count > 0`.
+    ///
+    /// Order of the two on-disk mutations, and why:
+    ///
+    /// - `count > 0`: rename `index.usearch` first, then `keymap.bin`. A crash
+    ///   in between is the *torn pair* — a graph ahead of its keymap — which
+    ///   the journal replays over when there is a journal, and which
+    ///   [`warn_if_graph_exceeds_keymap`](Self::warn_if_graph_exceeds_keymap)
+    ///   reports when there is not.
+    /// - `count == 0`: **remove** `index.usearch` first, then rename the empty
+    ///   `keymap.bin`. A crash in between leaves (no index + the old keymap),
+    ///   which `load` treats as a stale keymap and resets to empty. Renaming
+    ///   the keymap first would instead leave (old index + empty keymap): the
+    ///   removed vectors would still be in the graph, unnamed, and every
+    ///   later compaction would write them out again.
     fn publish_compaction(&self, count: usize, tmp_usearch: &Path) -> Result<()> {
         if count > 0 {
             sync_file(tmp_usearch)?;
             fs::rename(tmp_usearch, &self.usearch_path).map_err(Error::Io)?;
+        } else if self.usearch_path.exists() {
+            // Empty graph: drop the stale `index.usearch` *before* the empty
+            // keymap is renamed into place. A crash between the two then
+            // leaves (no index + the old keymap), which `load` recognises as
+            // stale and resets to empty. The other ordering leaves (old index
+            // + empty keymap), which resurrects every removed vector as an
+            // orphan in the graph the next compaction saves.
+            fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
         }
 
         let generation = self.loaded_generation.load(Ordering::SeqCst) + 1;
@@ -963,13 +1079,6 @@ impl VectorIndex {
         fs::write(&tmp_keymap, bytes).map_err(Error::Io)?;
         sync_file(&tmp_keymap)?;
         fs::rename(&tmp_keymap, &self.keymap_path).map_err(Error::Io)?;
-
-        if count == 0 && self.usearch_path.exists() {
-            // Remove the stale usearch file only now: the keymap naming the
-            // empty state is already in place, so the pair on disk is never
-            // (old graph + empty keymap).
-            fs::remove_file(&self.usearch_path).map_err(Error::Io)?;
-        }
 
         // fsync the directory so the renames are durable in the order above.
         sync_dir(&self.path)?;
@@ -1094,8 +1203,7 @@ impl VectorIndex {
         acquire_lock_at(&self.lock_path, LockMode::Exclusive)
     }
 
-    /// Number of vectors currently in the in-memory graph, journal replay
-    /// included.
+    /// Number of vectors currently *searchable*, journal replay included.
     ///
     /// The canonical count is [`doc_count`](VectorIndex::doc_count), which is
     /// what the search paths use; this is the same number as a plain `usize`,
@@ -1104,10 +1212,14 @@ impl VectorIndex {
     ///
     /// # Panics
     ///
-    /// Panics if the inner index mutex is poisoned.
+    /// Panics if the keymap mutex is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("usearch mutex poisoned").size()
+        self.keymap
+            .lock()
+            .expect("keymap mutex poisoned")
+            .forward
+            .len()
     }
 
     /// Returns `true` if no vectors are indexed. See
@@ -1125,6 +1237,13 @@ impl VectorIndex {
     /// included. [`len`](VectorIndex::len) returns the same number as a
     /// `usize`.
     ///
+    /// This is the number of entries in the keymap — the *searchable* count —
+    /// not `usearch::Index::size()`. The two differ only after a torn
+    /// compaction has left orphan vectors in the graph that no keymap entry
+    /// names (see [`warn_if_graph_exceeds_keymap`](Self::warn_if_graph_exceeds_keymap)).
+    /// `search` filters every hit through the keymap, so counting the graph
+    /// would over-report what a query can actually return, permanently.
+    ///
     /// # Errors
     ///
     /// Always succeeds in the current implementation; returns `Result<u64>` for
@@ -1132,9 +1251,9 @@ impl VectorIndex {
     ///
     /// # Panics
     ///
-    /// Panics if the inner index mutex is poisoned.
+    /// Panics if the keymap mutex is poisoned.
     pub fn doc_count(&self) -> Result<u64> {
-        Ok(self.inner.lock().expect("usearch mutex poisoned").size() as u64)
+        Ok(self.len() as u64)
     }
 
     /// Returns `true` if the given [`ItemId`] is present in the index.
@@ -1392,6 +1511,20 @@ impl EmbedderIndex {
 /// Assign the next sequential keys to `entries`, insert the vectors into
 /// `index`, and record the mappings in `keymap`.
 ///
+/// # Re-adding an id that is already indexed
+///
+/// [`VectorIndex::add`] is documented as "add **or replace**", so an id that
+/// the keymap already knows must end up with exactly one vector — the new
+/// one. The id's previous key is therefore evicted from the graph and from
+/// both keymap directions *before* the new key is issued. Keys are never
+/// reused (`next_key` only ever moves forward, and the old key's slot stays
+/// a hole), which keeps the numbering aligned with the sequential order
+/// journal replay reproduces.
+///
+/// Without the eviction, `reindex --with-embeddings` without
+/// `--reset-vectors` doubled every vector in the graph and `search` returned
+/// the same id twice — once per key.
+///
 /// # Collision-proof replay
 ///
 /// If the graph already holds the key about to be issued, `index.usearch` is
@@ -1425,6 +1558,17 @@ fn insert_entries(
         })?;
     }
     for (id, vector) in entries {
+        // "Add or replace": drop whatever key this id already holds, so the
+        // graph never carries two vectors for one id.
+        if let Some(old_key) = keymap.reverse.remove(id) {
+            keymap.forward.remove(&old_key);
+            if index.contains(old_key) {
+                index.remove(old_key).map_err(|e| Error::Usearch {
+                    context: "evicting the previous vector of a re-added id",
+                    reason: format!("{e}"),
+                })?;
+            }
+        }
         let key = keymap.next_key;
         keymap.next_key += 1;
         if index.contains(key) {
@@ -1445,28 +1589,6 @@ fn insert_entries(
         keymap.reverse.insert(*id, key);
     }
     Ok(())
-}
-
-/// `fsync` the file at `path`, so a rename over the original cannot expose a
-/// name pointing at unflushed contents.
-fn sync_file(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(Error::Io)
-}
-
-/// `fsync` the directory at `path` so the renames within it are durable —
-/// this is what makes the "either old pair or new pair, never a mix" ordering
-/// hold across a power cut, so a failure is reported rather than swallowed.
-///
-/// Windows has no directory handle to sync; there the renames' ordering is
-/// the filesystem's business and the failure to open is not ours to report.
-fn sync_dir(path: &Path) -> Result<()> {
-    match File::open(path).and_then(|d| d.sync_all()) {
-        Ok(()) => Ok(()),
-        Err(_) if cfg!(windows) => Ok(()),
-        Err(e) => Err(Error::Io(e)),
-    }
 }
 
 /// Convert a search crate [`Error`] into a [`singularmem_core::Error`].

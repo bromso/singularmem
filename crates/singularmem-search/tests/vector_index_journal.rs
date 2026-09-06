@@ -427,3 +427,175 @@ fn end_of_batch_commit_skips_the_journal_append() {
     drop(idx);
     assert_eq!(VectorIndex::open(&vdir, &e).unwrap().len(), 5);
 }
+
+/// `add` is documented as "add **or replace**". Re-adding an id that is
+/// already indexed must leave exactly one vector for it — the new one — in
+/// the graph, the keymap, the journal replay, and after a compaction.
+///
+/// This is the `reindex --with-embeddings` path without `--reset-vectors`:
+/// before the fix every item got a second key, the graph doubled, and
+/// `search` returned the same id twice.
+#[test]
+fn re_adding_an_id_replaces_its_vector_instead_of_duplicating_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+    let id = fresh_id();
+    let old = embed("the first version of this item");
+    let new = embed("the completely rewritten second version");
+
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    idx.add(id, &old).unwrap();
+    idx.add(id, &new).unwrap();
+    assert_eq!(idx.len(), 1, "a re-added id must not occupy two keys");
+
+    let hits = idx.search(&new, 5).unwrap();
+    assert_eq!(hits.len(), 1, "search must return the id exactly once");
+    assert_eq!(hits[0].id, id);
+    let new_score = hits[0].score;
+    assert!(
+        new_score > 0.999,
+        "the stored vector must be the new one (self-similarity ~1.0), got {new_score}"
+    );
+    let old_score = idx.search(&old, 5).unwrap()[0].score;
+    assert!(
+        old_score < new_score,
+        "the old vector must be gone: querying it should not score {old_score} \
+         against a graph holding only the new one ({new_score})"
+    );
+
+    // Journal replay path: two records for one id, replayed in order.
+    idx.commit(false).unwrap();
+    assert_eq!(idx.journal_len().unwrap(), 2, "both adds were journalled");
+    drop(idx);
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(idx.len(), 1, "replaying both records must not duplicate");
+    let hits = idx.search(&new, 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(
+        (hits[0].score - new_score).abs() < 1e-6,
+        "replay must keep the *last* record's vector"
+    );
+
+    // And again after a compaction + reopen.
+    idx.compact().unwrap();
+    drop(idx);
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx.doc_count().unwrap(), 1);
+    let hits = idx.search(&new, 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, id);
+    assert!((hits[0].score - new_score).abs() < 1e-6);
+}
+
+/// Emptying an index removes `index.usearch` and *then* renames an empty
+/// `keymap.bin` into place. A crash between those two steps leaves
+/// (no index + the old, non-empty keymap) — a state no successful compaction
+/// produces. `open` must recognise the keymap as stale, reset it, and report
+/// zero documents rather than naming vectors that no longer exist.
+#[test]
+fn an_absent_index_beside_a_non_empty_keymap_is_reset_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    let ids: Vec<ItemId> = (0..5).map(|_| fresh_id()).collect();
+    let vectors: Vec<Vec<f32>> = (0..5).map(|i| embed(&format!("doomed {i}"))).collect();
+    for (id, v) in ids.iter().zip(vectors.iter()) {
+        idx.add(*id, v).unwrap();
+    }
+    idx.compact().unwrap();
+    let populated_keymap = std::fs::read(vdir.join("keymap.bin")).unwrap();
+
+    for id in &ids {
+        idx.remove(*id).unwrap();
+    }
+    idx.compact().unwrap();
+    drop(idx);
+    assert!(
+        !vdir.join("index.usearch").exists(),
+        "an empty compaction removes the graph file"
+    );
+    assert!(
+        !vdir.join("journal.bin").exists(),
+        "compaction-only commits never create a journal"
+    );
+
+    // Hand-build the crash state: the graph file is gone (step one landed),
+    // the empty keymap never got renamed (step two did not).
+    std::fs::write(vdir.join("keymap.bin"), &populated_keymap).unwrap();
+
+    let idx = VectorIndex::open(&vdir, &e).expect("a stale keymap must still open");
+    assert_eq!(
+        idx.doc_count().unwrap(),
+        0,
+        "a keymap naming vectors that no longer exist must be reset to empty"
+    );
+    assert_eq!(idx.len(), 0);
+    for (id, v) in ids.iter().zip(vectors.iter()) {
+        assert!(
+            idx.search(v, 5).unwrap().is_empty(),
+            "a removed vector must not come back: {id}"
+        );
+        assert!(!idx.contains(*id));
+    }
+}
+
+/// An end-of-batch commit skips the journal, so a crash between compaction's
+/// `index.usearch` rename and its `keymap.bin` rename leaves a new graph
+/// beside an old keymap with **no journal** to recover the difference from.
+/// The extra vectors are permanent orphans — unnamed, so unsearchable.
+///
+/// `open` must succeed, warn, and report the keymap's count (what a query can
+/// actually return), not the graph's.
+#[test]
+fn a_torn_pair_with_no_journal_reports_the_keymap_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let vdir = dir.path().join("v");
+    let e = MockEmbedder::default();
+
+    // Batch one: ten vectors, compacted (no journal — `compact` is
+    // end-of-batch by definition).
+    let idx = VectorIndex::open(&vdir, &e).unwrap();
+    let mut first: Vec<(ItemId, Vec<f32>)> = Vec::new();
+    for i in 0..10 {
+        let (id, v) = (fresh_id(), embed(&format!("batch one {i}")));
+        idx.add(id, &v).unwrap();
+        first.push((id, v));
+    }
+    idx.compact().unwrap();
+    let old_keymap = std::fs::read(vdir.join("keymap.bin")).unwrap();
+
+    // Batch two: ten more, compacted again.
+    for i in 0..10 {
+        idx.add(fresh_id(), &embed(&format!("batch two {i}")))
+            .unwrap();
+    }
+    idx.compact().unwrap();
+    drop(idx);
+    assert!(
+        !vdir.join("journal.bin").exists(),
+        "the setup must leave no journal, or the torn pair would be recoverable"
+    );
+
+    // The torn pair: the twenty-vector graph landed, the twenty-entry keymap
+    // did not.
+    std::fs::write(vdir.join("keymap.bin"), &old_keymap).unwrap();
+
+    let idx = VectorIndex::open(&vdir, &e).expect("a torn pair must still open, not panic");
+    assert_eq!(
+        idx.doc_count().unwrap(),
+        10,
+        "doc_count must report the searchable (keymap) count, not the graph's 20"
+    );
+    assert_eq!(idx.len(), 10);
+    for (id, v) in &first {
+        assert_eq!(
+            idx.search(v, 1).unwrap().first().map(|h| h.id),
+            Some(*id),
+            "the vectors the surviving keymap names must still be searchable"
+        );
+    }
+}

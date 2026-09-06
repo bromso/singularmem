@@ -470,6 +470,69 @@ fn reindex_with_embeddings_creates_vectors_dir() {
     assert!(vectors_path.exists(), ".vectors/ should be created");
 }
 
+/// `reindex --with-embeddings` without `--reset-vectors` re-embeds every item
+/// into the *existing* vector index. The item's new vector must replace its
+/// old one, not sit beside it: before the fix the graph doubled on every
+/// reindex and semantic search returned the same id twice.
+#[test]
+fn reindex_with_embeddings_twice_does_not_double_the_vector_index() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("store.db");
+    let content = "doubling fixture for the reindex idempotence check";
+
+    singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "ingest",
+            "--content",
+            content,
+        ])
+        .assert()
+        .success();
+
+    for _ in 0..2 {
+        singularmem()
+            .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+            .args([
+                "--store",
+                db.to_str().unwrap(),
+                "reindex",
+                "--with-embeddings",
+            ])
+            .assert()
+            .success();
+    }
+
+    // Semantic mode answers straight from the vector index and prints one
+    // line per hit, so querying the item's own text — a self-similarity of
+    // ~1.0, one line per *key* the id holds — counts its vectors.
+    let out = singularmem()
+        .env("SINGULARMEM_TEST_EMBEDDER", "mock")
+        .args([
+            "--store",
+            db.to_str().unwrap(),
+            "search",
+            "--mode",
+            "semantic",
+            "--limit",
+            "20",
+            content,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    assert_eq!(
+        stdout.lines().filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "a second reindex must replace the item's vector, not add a second one; got:\n{stdout}"
+    );
+}
+
 #[test]
 fn reset_vectors_without_force_fails() {
     let dir = TempDir::new().unwrap();

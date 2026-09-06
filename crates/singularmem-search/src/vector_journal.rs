@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use singularmem_core::ItemId;
 
 use crate::error::{Error, Result};
+use crate::fsync::sync_dir;
 
 /// Magic bytes identifying a `journal.bin` file.
 pub const JOURNAL_MAGIC: &[u8; 4] = b"SMVJ";
@@ -189,10 +190,31 @@ impl Journal {
 
     /// Write the header out, creating `journal.bin`. Called by the first
     /// [`append`](Journal::append).
+    ///
+    /// # Durability guarantee
+    ///
+    /// On return, both the header bytes **and the directory entry naming the
+    /// file** are durable: the file is `fsync`ed and then its parent
+    /// directory is too. Without the second `fsync`, the first
+    /// `commit(false)` in a directory's life could return `Ok` and still
+    /// lose the whole journal to a power cut — the bytes would be on the
+    /// platter but the name pointing at them would not, so the recovered
+    /// directory would have no journal to replay and the caller would have
+    /// been told its vectors were durable.
+    ///
+    /// The parent-directory `fsync` is the same [`sync_dir`] compaction uses
+    /// for its renames; on Windows, which has no directory handle, it is a
+    /// no-op.
     fn create_file(&self) -> Result<()> {
         let mut file = File::create(&self.path).map_err(Error::Io)?;
         file.write_all(&self.header.encoded()).map_err(Error::Io)?;
-        file.sync_all().map_err(Error::Io)
+        file.sync_all().map_err(Error::Io)?;
+        match self.path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => sync_dir(dir),
+            // A bare relative filename has no directory to sync; the
+            // process's cwd is not ours to open.
+            _ => Ok(()),
+        }
     }
 
     /// Size in bytes of one record: a 16-byte ULID plus `dim` little-endian
@@ -507,6 +529,31 @@ mod tests {
         assert!(p.exists(), "the first append creates the header");
         assert_eq!(j.len().unwrap(), 1);
         assert_eq!(j.replay().unwrap()[0].0, id(1));
+    }
+
+    /// `create_file` fsyncs the parent directory as well as the file, so the
+    /// directory entry naming a brand-new `journal.bin` survives a power cut.
+    /// The fsync itself is not observable from a test; what is observable is
+    /// that adding it did not break creation — including in a directory
+    /// reached by a relative path, where `Path::parent` is the interesting
+    /// edge case.
+    #[test]
+    fn create_file_writes_the_header_and_survives_a_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("journal.bin");
+        let j = Journal::open(&p, 4, "m@v1").unwrap();
+        j.create_file().expect("creating the journal must succeed");
+        assert!(p.exists(), "create_file must create the file");
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            j.header.encoded(),
+            "the file must hold exactly the header"
+        );
+
+        // A bare filename has no parent directory to fsync; creation must
+        // still succeed rather than trying to open "".
+        let bare = Journal::open(Path::new("journal-bare-name.bin"), 4, "m@v1").unwrap();
+        assert!(bare.path.parent().unwrap().as_os_str().is_empty());
     }
 
     #[test]

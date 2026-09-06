@@ -18,6 +18,7 @@ pub mod semantic_query;
 pub mod testing;
 pub mod vector_index;
 
+mod fsync;
 mod hook;
 mod reindex;
 mod schema;
