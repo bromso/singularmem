@@ -44,10 +44,15 @@ pub const EMBED_CHUNK: usize = 64;
 /// Journal records tolerated before [`VectorIndex::commit`] compacts, i.e.
 /// rewrites `index.usearch` + `keymap.bin` and truncates `journal.bin`.
 ///
-/// A record is `16 + 4 × dim` bytes, so 1 000 records of a 384-dimensional
-/// model is ~1.5 MB of journal — cheap to replay on open, and far cheaper to
-/// append to than re-serialising the whole HNSW graph per item.
-pub const COMPACT_THRESHOLD: usize = 1_000;
+/// The threshold trades single-item commit cost against read-side cost:
+/// every record is replayed into the HNSW graph on `open`, at roughly
+/// 0.6 ms per record on a 20,000-vector index, so the worst-case open
+/// latency a reader can see is about `COMPACT_THRESHOLD × 0.6 ms`. At 256
+/// that is ~150 ms; at 1,000 it was ~640 ms, which every short-lived CLI
+/// search or MCP retrieve would have paid. Compaction itself costs ~60 ms
+/// at 50,000 vectors, so compacting every 256 single-item commits adds
+/// well under a millisecond per item amortised.
+pub const COMPACT_THRESHOLD: usize = 256;
 
 /// Maximum records handed to one `Journal::append` call when draining the
 /// pending queue. `append` buffers its whole argument before writing, so a

@@ -350,9 +350,11 @@ A **commit** is: take the exclusive `<dir>/lock`, then either
 - **append every vector queued since the last commit to `journal.bin`**
   (in chunks of at most 1,024 records per `Journal::append` call, so a
   large drain never buffers the whole queue twice), then decide whether to
-  **compact**: only if the journal now holds **more than 1,000 records**
-  (`COMPACT_THRESHOLD = 1_000`; strictly greater — a journal holding
-  exactly 1,000 has not triggered compaction yet).
+  **compact**: only if the journal now holds **more than 256 records**
+  (`COMPACT_THRESHOLD = 256`; strictly greater — a journal holding
+  exactly 256 has not triggered compaction yet). The threshold is a
+  read-side bound: every record is replayed into the HNSW graph on
+  open, at roughly 0.6 ms per record on a 20,000-vector index.
 
 A single-item ingest that doesn't cross the threshold therefore costs one
 small `journal.bin` append (a few kilobytes) instead of a full

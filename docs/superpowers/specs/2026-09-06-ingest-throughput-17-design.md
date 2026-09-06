@@ -98,7 +98,7 @@ discarded as a crash remnant; anything before it is valid.
 `EmbedderIndex::commit`:
 
 1. Append every vector added since the last commit to `journal.bin`.
-2. If the journal now holds more than `COMPACT_THRESHOLD = 1_000`
+2. If the journal now holds more than `COMPACT_THRESHOLD = 256`
    records, or this commit ends a bulk batch (flag set by
    `on_ingest_batch`), **compact**: write `index.usearch` and
    `keymap.bin` to temp files in the same directory, `fsync`, rename
@@ -430,8 +430,16 @@ Recorded during Tasks 3–5 (see `.superpowers/sdd/task-3-report.md`,
     beside the existing in-memory-tombstone one.
     `docs/benchmarks/ingest.md` gains a "Read-side cost" section with the
     open-latency measurement the write-side numbers were silent about
-    (11.9 ms with an empty journal vs 638.8 ms with 999 records, at 20,000
+    (11.9 ms with an empty journal vs 638.8 ms with 999 records at the original threshold of 1,000, ~165 ms with 255 records at the final threshold of 256, at 20,000
     vectors) and the two things that bound it. `crates/singularmem-core/`
     `src/hook.rs`'s module doc said `IndexHook` has "three methods"; it has
     four (`on_ingest`, `on_reindex`, `commit`, and the defaulted
     `on_ingest_batch`, added by this sub-project).
+23. **`COMPACT_THRESHOLD` lowered from 1,000 to 256.** The design chose
+   1,000 by write-side reasoning only. The open-latency measurement showed
+   readers replaying a near-full journal at ~0.6 ms per record (638.8 ms at
+   999 records), which every short-lived CLI search or MCP retrieve would
+   pay. At 256 the worst case is ~165 ms; compaction (~60 ms at 50,000
+   vectors) every 256 single-item commits adds under a millisecond per item
+   amortised. `docs/formats/vectors-v2.md` and `docs/benchmarks/ingest.md`
+   carry both numbers.

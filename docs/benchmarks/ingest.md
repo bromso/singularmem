@@ -144,40 +144,44 @@ in exactly the way commit latency stopped growing with index size.
 Measured with an ad-hoc example (temporary, not committed — the brief's
 convention) on the same machine: a 20,000-vector compacted directory
 (`MockEmbedder`, dim 384), opened ten times with an empty journal and ten
-times with 999 journal records — one below `COMPACT_THRESHOLD`, i.e. the
+times with 255 journal records — one below `COMPACT_THRESHOLD`, i.e. the
 worst case a reader can encounter.
 
 | Open | Median | Samples (ms) |
 |---|---|---|
 | 20,000 vectors, **empty journal** | **11.9 ms** | 13.1, 11.9, 11.9, 11.4, 12.7, 12.3, 12.1, 11.5, 11.5, 11.5 |
-| 20,000 vectors, **999 journal records** | **638.8 ms** | 639.5, 678.3, 632.0, 670.8, 628.9, 626.2, 634.3, 638.8, 644.3, 633.5 |
+| 20,000 vectors, **255 journal records** | **~165 ms** | Criterion median 165.18 ms [164.72, 165.90]; an earlier run at the original threshold of 1,000 (999 records) measured 638.8 ms |
 
-~54× slower, and essentially all of it is the 999 HNSW insertions
+~14× slower, and essentially all of it is the 255 HNSW insertions
 (~0.64 ms each into a 20,000-node graph at `ef_construction = 128`), not the
-journal I/O — the file is 999 × (16 + 384 × 4) ≈ 1.5 MB. The figure is
+journal I/O — the file is 255 × (16 + 384 × 4) ≈ 0.4 MB. The figure is
 unchanged by the correctness fixes in this branch's review wave: the same
 example run against the pre-fix tree measures 12.3 ms / 645.3 ms, within
 noise of the numbers above.
 
 **What bounds it.** Two things, and both matter:
 
-- `COMPACT_THRESHOLD = 1_000` — a `commit(false)` compacts as soon as the
-  journal holds more than 1,000 records, so 999 is the ceiling above, not a
-  number that keeps climbing.
+- `COMPACT_THRESHOLD = 256` — a `commit(false)` compacts as soon as the
+  journal holds more than 256 records, so 255 is the ceiling above, not a
+  number that keeps climbing. The threshold was lowered from 1,000 after
+  the first measurement (638.8 ms of replay at 999 records) showed the
+  read side paying too much; at 256 the worst case is ~165 ms, and the
+  extra compactions cost well under a millisecond per single-item ingest
+  amortised (a compaction is ~60 ms at 50,000 vectors).
 - **A bulk batch ends by compacting.** `Store::ingest_many` closes with one
   end-of-batch commit, which skips the journal entirely and compacts, so a
   bulk ingest leaves the journal at zero for the single ingests that follow.
 
 The pathological shape is therefore a long run of single-item ingests
-(up to 1,000 of them) followed by a process that opens the directory once
+(up to 255 of them) followed by a process that opens the directory once
 and exits — a short-lived CLI invocation, for instance. It pays up to
-~0.6 s of replay that a compaction would have amortised. A long-lived
+~0.17 s of replay that a compaction would have amortised. A long-lived
 process (the MCP server) pays it once at startup.
 
 A Criterion bench pins the worst case: `open_with_journal/`
-`open_with_999_journal_records` in `crates/singularmem-search/benches/`
-`search_perf.rs`, 20,000 compacted vectors + 999 journal records, ten
-samples. It measured 634.89 ms \[621.88, 649.45\]. **It is informational
+`open_with_journal_at_threshold` in `crates/singularmem-search/benches/`
+`search_perf.rs`, 20,000 compacted vectors + 255 journal records, ten
+samples. It measured 165.18 ms \[164.72, 165.90\] (634.89 ms at the old threshold). **It is informational
 and is not gated** — `.github/scripts/perf-check.sh` does not read it. There
 is no budget to enforce here yet; the number exists so a future change that
 makes replay cheaper (or accidentally much more expensive) is visible.
@@ -197,7 +201,7 @@ cargo bench -p singularmem-search --bench search_perf -- open_with_journal \
 # Read-side medians in the table above: build a temporary example under
 # crates/singularmem-search/examples/ that seeds 20,000 vectors through
 # VectorIndex::add_batch + compact(), times ten VectorIndex::open calls,
-# then adds 999 more with commit(false) and times ten more, and delete it
+# then adds 255 more with commit(false) and times ten more, and delete it
 # afterwards.
 
 # Real-model numbers: build a temporary example under

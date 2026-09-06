@@ -20,7 +20,7 @@
 //!   reported informationally by `.github/scripts/perf-check.sh` so the
 //!   Tantivy-dominated combined cost stays visible without gating on it.
 //! - `open_with_journal`: `VectorIndex::open` on a 20,000-vector compacted
-//!   directory with 999 journal records waiting to be replayed — the
+//!   directory with `COMPACT_THRESHOLD - 1` journal records waiting to be replayed — the
 //!   read-side cost the journal buys the write side with. Ungated,
 //!   informational; see `docs/benchmarks/ingest.md` § "Read-side cost".
 //!
@@ -30,6 +30,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use singularmem_core::{NewItem, Store};
 use singularmem_search::testing::MockEmbedder;
+use singularmem_search::COMPACT_THRESHOLD;
 use singularmem_search::{
     Embedder, EmbedderIndex, HybridSearcher, Index, Query, SearchOptions, SemanticSearchOptions,
     VectorIndex,
@@ -226,7 +227,7 @@ fn seed_vector_dir(n: usize) -> TempDir {
 /// sibling `ingest_single_with_both_hooks` bench below, which is ungated
 /// for that reason).
 ///
-/// Note the bench crosses the compaction threshold every 1,000 iterations;
+/// Note the bench crosses the compaction threshold every `COMPACT_THRESHOLD` iterations;
 /// that is intended (the gate is a median, and the amortised cost is what
 /// users see).
 fn bench_ingest_single_with_vector_index(c: &mut Criterion) {
@@ -271,7 +272,7 @@ fn bench_ingest_single_with_both_hooks(c: &mut Criterion) {
 
 /// Seed a vector directory with `compacted` compacted vectors and then
 /// `journalled` more sitting in `journal.bin` (a `commit(false)` below the
-/// 1,000-record compaction threshold), using `VectorIndex` directly rather
+/// `COMPACT_THRESHOLD`-record compaction threshold), using `VectorIndex` directly rather
 /// than a `Store` so the setup costs only the embedding and the graph
 /// inserts.
 fn seed_journalled_vector_dir(compacted: usize, journalled: usize) -> TempDir {
@@ -305,23 +306,23 @@ fn seed_journalled_vector_dir(compacted: usize, journalled: usize) -> TempDir {
 /// every journal record into the loaded graph, so open latency grows with
 /// journal length while commit latency stops growing with index size.
 ///
-/// Informational only — **not gated**. `COMPACT_THRESHOLD = 1_000` is what
-/// bounds this cost (a journal never holds more than 1,000 records before a
+/// Informational only — **not gated**. `COMPACT_THRESHOLD` is what bounds
+/// this cost (a journal never holds more than that many records before a
 /// commit compacts it), and any bulk `ingest_many` ends with a compacting
-/// commit that resets it to zero. 999 records is therefore the worst case a
-/// reader can encounter.
+/// commit that resets it to zero. `COMPACT_THRESHOLD - 1` records is
+/// therefore the worst case a reader can encounter.
 fn bench_open_with_journal(c: &mut Criterion) {
-    let dir = seed_journalled_vector_dir(20_000, 999);
+    let dir = seed_journalled_vector_dir(20_000, COMPACT_THRESHOLD - 1);
     let vdir = dir.path().join("v");
     let e = MockEmbedder::default();
     let mut group = c.benchmark_group("open_with_journal");
-    // Each open replays 999 vectors into a 20,000-node HNSW graph; the
+    // Each open replays COMPACT_THRESHOLD - 1 vectors into a 20,000-node HNSW graph; the
     // default 100 samples would run for minutes.
     group.sample_size(10);
-    group.bench_function("open_with_999_journal_records", |b| {
+    group.bench_function("open_with_journal_at_threshold", |b| {
         b.iter(|| {
             let idx = VectorIndex::open(&vdir, &e).unwrap();
-            assert_eq!(idx.len(), 20_999);
+            assert_eq!(idx.len(), 20_000 + COMPACT_THRESHOLD - 1);
         });
     });
     group.finish();
