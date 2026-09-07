@@ -176,21 +176,19 @@ impl Store {
             source: e,
         })?;
 
-        // Hook integration: per-item on_ingest, then ONE commit at the end.
+        // Hook integration: one on_ingest_batch call, then ONE commit at the end.
         if let Some(hook) = self
             .hook
             .lock()
             .expect("store hook mutex poisoned")
             .as_ref()
         {
-            for item in &out {
-                if let Err(e) = hook.on_ingest(item) {
-                    tracing::warn!(
-                        item_id = %item.id,
-                        error = %e,
-                        "IndexHook::on_ingest failed during bulk ingest; item is durably stored but un-searchable. Run `singularmem reindex` to recover."
-                    );
-                }
+            if let Err(e) = hook.on_ingest_batch(&out) {
+                tracing::warn!(
+                    items = out.len(),
+                    error = %e,
+                    "IndexHook::on_ingest_batch failed during bulk ingest; items are durably stored but some may be un-searchable. Run `singularmem reindex` to recover."
+                );
             }
             if let Err(e) = hook.commit() {
                 tracing::warn!(

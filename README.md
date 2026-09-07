@@ -122,6 +122,13 @@ query rules, and the export shape.
 LongMemEval. See [docs/benchmarks/longmemeval.md](docs/benchmarks/longmemeval.md)
 for the published numbers and how to reproduce them.
 
+The vector index commits by appending to a journal rather than rewriting
+the whole index on every save, so hook-driven saves (editor `stop`, a
+single `ingest`) stay cheap regardless of index size; see
+[docs/formats/vectors-v2.md](docs/formats/vectors-v2.md) for the format and
+[docs/benchmarks/ingest.md](docs/benchmarks/ingest.md) for before/after
+ingest throughput numbers.
+
 ## Installing the CLI
 
 The `singularmem` CLI and `singularmem-mcp` server ship as prebuilt binaries for:

@@ -17,6 +17,10 @@ use crate::commands::{
 };
 use crate::CliError;
 
+/// Items per [`singularmem_core::IndexHook::on_ingest_batch`] call in the
+/// `reindex --with-embeddings` embedding loop.
+const REINDEX_BATCH: usize = 500;
+
 pub fn cmd_search(store: &Store, store_path: &Path, args: &SearchArgs) -> Result<(), CliError> {
     use singularmem_search::{EmbedderIndex, HybridSearchOptions, HybridSearcher, Index};
 
@@ -232,6 +236,29 @@ pub fn cmd_semantic_search(
     cmd_search(store, store_path, &forwarded)
 }
 
+/// Embed and index one batch of items via
+/// [`singularmem_core::IndexHook::on_ingest_batch`], then clear `batch` and
+/// report progress. A no-op if `batch` is empty (used as the trailing flush
+/// after the main loop).
+fn flush_embedding_batch(
+    embedder_idx: &singularmem_search::EmbedderIndex,
+    batch: &mut Vec<singularmem_core::Item>,
+    done: &mut usize,
+    quiet: bool,
+) -> Result<(), CliError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    singularmem_core::IndexHook::on_ingest_batch(embedder_idx, batch)
+        .map_err(|e| CliError::IndexOpen(e.to_string()))?;
+    *done += batch.len();
+    batch.clear();
+    if !quiet {
+        tracing::info!("reindex (embeddings): {} items", done);
+    }
+    Ok(())
+}
+
 pub fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Result<(), CliError> {
     // Phase 1: Tantivy lexical reindex (always).
     let index_path = derive_index_path(store_path);
@@ -288,14 +315,15 @@ pub fn cmd_reindex(store: &Store, store_path: &Path, args: &ReindexArgs) -> Resu
         let embedder_idx = singularmem_search::EmbedderIndex::open(&vectors_path, embedder)
             .map_err(|e| CliError::IndexOpen(e.to_string()))?;
 
-        for (i, item_r) in store.list()?.enumerate() {
-            let item = item_r?;
-            singularmem_core::IndexHook::on_reindex(&embedder_idx, &item)
-                .map_err(|e| CliError::IndexOpen(e.to_string()))?;
-            if !args.quiet && (i + 1) % 100 == 0 {
-                tracing::info!("reindex (embeddings): {} items", i + 1);
+        let mut batch: Vec<singularmem_core::Item> = Vec::with_capacity(REINDEX_BATCH);
+        let mut done = 0usize;
+        for item_r in store.list()? {
+            batch.push(item_r?);
+            if batch.len() == REINDEX_BATCH {
+                flush_embedding_batch(&embedder_idx, &mut batch, &mut done, args.quiet)?;
             }
         }
+        flush_embedding_batch(&embedder_idx, &mut batch, &mut done, args.quiet)?;
         singularmem_core::IndexHook::commit(&embedder_idx)
             .map_err(|e| CliError::IndexOpen(e.to_string()))?;
         tracing::info!("reindex (embeddings) complete");

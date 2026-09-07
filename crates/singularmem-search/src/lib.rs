@@ -18,9 +18,11 @@ pub mod semantic_query;
 pub mod testing;
 pub mod vector_index;
 
+mod fsync;
 mod hook;
 mod reindex;
 mod schema;
+mod vector_journal;
 
 pub use crate::embedder::{Embedder, FastembedEmbedder};
 pub use crate::error::{Error, Result};
@@ -34,6 +36,7 @@ pub use crate::result::{Hit, SearchOptions, SearchResults};
 pub use crate::scope_lookup::ScopeLookup;
 pub use crate::semantic_query::{SemanticHit, SemanticSearchOptions, SemanticSearchResults};
 pub use crate::vector_index::{
-    EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions,
+    EmbedderIndex, VectorHit, VectorIndex, VectorIndexMeta, VectorIndexOptions, COMPACT_THRESHOLD,
+    EMBED_CHUNK,
 };
 pub use singularmem_core::ScopeFilter;
